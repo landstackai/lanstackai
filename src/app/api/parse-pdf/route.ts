@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     if (file.type === 'application/pdf') {
       try {
         // Use dynamic import to avoid build issues
-        const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
+        const pdfParse = (await import('pdf-parse')).default;
         const data = await pdfParse(buffer);
         return NextResponse.json({
           text: data.text,
