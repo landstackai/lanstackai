@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
           content: `Please extract all comparable sales from this document:\n\n${documentContent}`,
         };
       }
-      return { role: m.role as const, content: m.content };
+      return { role: m.role as "user" | "assistant", content: m.content };
     });
 
     const completion = await openai.chat.completions.create({
