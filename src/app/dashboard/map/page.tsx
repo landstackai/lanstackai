@@ -431,6 +431,9 @@ export default function MapPage() {
       }
 
       if (!parcel) {
+        // TxGIO can be slow (10-25s). Show a loading toast so the click
+        // doesn't feel dead, and dismiss it whether the request succeeds or fails.
+        const loadingId = toast.loading('Looking up parcel…', { duration: 30000 });
         try {
           const res = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
           if (res.ok) {
@@ -442,6 +445,7 @@ export default function MapPage() {
             }
           }
         } catch {}
+        toast.dismiss(loadingId);
       }
 
       if (!parcel) {

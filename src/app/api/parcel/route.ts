@@ -30,12 +30,23 @@ export async function GET(request: NextRequest) {
 
   if (lat && lng) {
     const txgio = await tryTxGIO(parseFloat(lat), parseFloat(lng));
-    if (txgio) return NextResponse.json(txgio);
+    if (txgio) {
+      return NextResponse.json(txgio, {
+        headers: {
+          // Lat/lng to ~10m precision → cache hits when user re-clicks same spot.
+          'Cache-Control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=86400',
+        },
+      });
+    }
   }
 
   if (REGRID_API_KEY) {
     const regrid = await tryRegrid(lat, lng, parcelId);
-    if (regrid) return NextResponse.json(regrid);
+    if (regrid) {
+      return NextResponse.json(regrid, {
+        headers: { 'Cache-Control': 'public, max-age=300, s-maxage=86400' },
+      });
+    }
   }
 
   return NextResponse.json({ error: 'No parcel data at this location' }, { status: 404 });
@@ -56,33 +67,45 @@ async function tryTxGIO(lat: number, lng: number): Promise<Parcel | null> {
     f: 'geojson',
   });
 
-  try {
+  // TxGIO is severely slow under load (~20s for tiny queries). Try twice
+  // with forgiving timeouts before giving up.
+  async function fetchOnce(timeoutMs: number) {
     const res = await fetch(`${TXGIO_QUERY_URL}?${params}`, {
       headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const f = data.features?.[0];
-    if (!f) return null;
-    const p = f.properties || {};
-    const acres = parseFloat(p.gis_area);
-    const cleanAddr = (p.situs_addr || '').replace(/[\s,]+/g, '').length === 0 ? null : p.situs_addr;
-    const cleanState = (p.situs_stat || '').trim() || 'TX';
-    return {
-      parcel_id: p.prop_id || String(f.id || ''),
-      owner_name: p.owner_name || null,
-      acres: Number.isFinite(acres) ? acres : null,
-      address: cleanAddr,
-      county: p.county || null,
-      state: cleanState,
-      latitude: lat,
-      longitude: lng,
-      geometry: f.geometry || null,
-    };
-  } catch {
-    return null;
+    if (!res.ok) throw new Error(`Upstream ${res.status}`);
+    return res.json();
   }
+
+  let data: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      data = await fetchOnce(attempt === 0 ? 25000 : 30000);
+      break;
+    } catch (e: any) {
+      if (attempt === 1) console.warn('[api/parcel] TxGIO failed after retry:', e?.message);
+    }
+  }
+  if (!data) return null;
+
+  const f = data.features?.[0];
+  if (!f) return null;
+  const p = f.properties || {};
+  const acres = parseFloat(p.gis_area);
+  const cleanAddr = (p.situs_addr || '').replace(/[\s,]+/g, '').length === 0 ? null : p.situs_addr;
+  const cleanState = (p.situs_stat || '').trim() || 'TX';
+  return {
+    parcel_id: p.prop_id || String(f.id || ''),
+    owner_name: p.owner_name || null,
+    acres: Number.isFinite(acres) ? acres : null,
+    address: cleanAddr,
+    county: p.county || null,
+    state: cleanState,
+    latitude: lat,
+    longitude: lng,
+    geometry: f.geometry || null,
+  };
 }
 
 async function tryRegrid(
