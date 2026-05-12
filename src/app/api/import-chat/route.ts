@@ -477,23 +477,50 @@ const TXGIO_QUERY =
 // covers the whole state.
 async function enrichWithTxGIO(comp: any): Promise<any> {
   try {
-    // 1) Find seed parcel by point
-    const d = 0.0001;
-    const seedParams = new URLSearchParams({
-      geometry: `${comp.longitude - d},${comp.latitude - d},${comp.longitude + d},${comp.latitude + d}`,
-      geometryType: 'esriGeometryEnvelope',
-      inSR: '4326',
-      spatialRel: 'esriSpatialRelIntersects',
-      outFields: 'prop_id,owner_name,gis_area,situs_addr,county',
-      returnGeometry: 'true',
-      outSR: '4326',
-      resultRecordCount: '1',
-      f: 'geojson',
-    });
-    const seedRes = await fetch(`${TXGIO_QUERY}?${seedParams}`, { signal: AbortSignal.timeout(10000) });
-    if (!seedRes.ok) return comp;
-    const seedData = await seedRes.json();
-    const seed = seedData.features?.[0];
+    // 1) Find seed parcel by point — cascading buffer. Appraiser-printed
+    // coords often sit on the road/driveway, not inside the parcel.
+    // Tight 10m envelope misses; 100m+ catches the actual property.
+    const BUFFERS = [0.0001, 0.001, 0.005, 0.015]; // ~10m, 100m, 500m, 1.5km
+    let seed: any = null;
+    for (const d of BUFFERS) {
+      try {
+        const seedParams = new URLSearchParams({
+          geometry: `${comp.longitude - d},${comp.latitude - d},${comp.longitude + d},${comp.latitude + d}`,
+          geometryType: 'esriGeometryEnvelope',
+          inSR: '4326',
+          spatialRel: 'esriSpatialRelIntersects',
+          outFields: 'prop_id,owner_name,gis_area,situs_addr,county',
+          returnGeometry: 'true',
+          outSR: '4326',
+          resultRecordCount: '15',
+          f: 'geojson',
+        });
+        const seedRes = await fetch(`${TXGIO_QUERY}?${seedParams}`, { signal: AbortSignal.timeout(15000) });
+        if (!seedRes.ok) continue;
+        const seedData = await seedRes.json();
+        const features: any[] = Array.isArray(seedData?.features) ? seedData.features : [];
+        if (features.length === 0) continue;
+        // Pick closest to the input coords by centroid distance
+        let bestDist = Infinity;
+        for (const f of features) {
+          if (!f?.properties?.owner_name) continue;
+          try {
+            const ring = f.geometry?.coordinates?.[0];
+            if (!Array.isArray(ring) || ring.length === 0) continue;
+            // Quick centroid-by-vertex-average (no turf import needed)
+            let sx = 0, sy = 0;
+            for (const pt of ring) { sx += pt[0]; sy += pt[1]; }
+            const cx = sx / ring.length, cy = sy / ring.length;
+            const dist = Math.hypot(cx - comp.longitude, cy - comp.latitude);
+            if (dist < bestDist) {
+              bestDist = dist;
+              seed = f;
+            }
+          } catch {}
+        }
+        if (seed) break;
+      } catch {}
+    }
     if (!seed?.properties?.owner_name) return comp;
 
     const owner = String(seed.properties.owner_name).trim();
