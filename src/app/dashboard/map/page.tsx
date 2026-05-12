@@ -1236,17 +1236,36 @@ export default function MapPage() {
             console.warn(`[txgio-bbox] HTTP ${r.status} from /api/parcels-bbox`);
             return Promise.reject(r.status);
           }
-          return r.json();
+          // The API returns a 200 with empty features when TxGIO is down/slow.
+          // Detect that via the X-Upstream-Error header so we don't overwrite
+          // previously-loaded parcels with nothing.
+          const upstreamErr = r.headers.get('x-upstream-error');
+          return r.json().then((data) => ({ data, upstreamErr }));
         })
-        .then((data: any) => {
+        .then(({ data, upstreamErr }: any) => {
           const count = Array.isArray(data?.features) ? data.features.length : 0;
+          if (upstreamErr) {
+            console.warn(`[txgio-bbox] upstream failed: ${upstreamErr} — keeping previous parcels on screen`);
+            // Reset lastBbox so the next pan retries this bbox.
+            lastBbox = '';
+            return;
+          }
           console.log(`[txgio-bbox] received ${count} parcels`);
           if (!data?.features) return;
+          // Guard: never replace currently-displayed parcels with an empty set.
+          // If TxGIO returned 0 features for this bbox (water, OK), the previous
+          // pan likely had relevant parcels — keep them visible.
+          if (count === 0) {
+            console.log('[txgio-bbox] empty response — keeping previous parcels');
+            return;
+          }
           const src = map.current?.getSource('txgio-bbox') as mapboxgl.GeoJSONSource | undefined;
           if (src) src.setData(data);
         })
         .catch((e) => {
           console.warn('[txgio-bbox] fetch failed:', e);
+          // Reset so retry happens on next pan.
+          lastBbox = '';
         });
     };
     const onMoveEnd = () => {
