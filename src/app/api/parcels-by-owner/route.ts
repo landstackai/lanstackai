@@ -118,6 +118,14 @@ export async function GET(req: NextRequest) {
   }
 
   const count = Array.isArray(data?.features) ? data.features.length : 0;
+  // Cache success aggressively (parcels change monthly at most), but cache
+  // empty/no-match results only briefly. A "no match" is often a transient
+  // state — TxGIO updates monthly, query patterns evolve, and a stuck empty
+  // cache is the most frustrating outcome for users searching iteratively.
+  const cacheControl = count > 0
+    ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400'
+    : 'public, max-age=60, s-maxage=300';
+
   return new NextResponse(JSON.stringify({
     ...data,
     query: q,
@@ -129,7 +137,7 @@ export async function GET(req: NextRequest) {
     status: 200,
     headers: {
       'Content-Type': 'application/geo+json',
-      'Cache-Control': 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400',
+      'Cache-Control': cacheControl,
     },
   });
 }
