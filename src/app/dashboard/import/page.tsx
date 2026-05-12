@@ -622,10 +622,25 @@ export default function ImportPage() {
   // Chunking guarantees each call has enough budget to actually read the
   // pages it's given.
   const extractFromChunkedPdf = async (file: File, images: string[]) => {
-    const CHUNK_SIZE = 5;
+    // 4-page chunks with 1-page overlap (stride 3). Tuned for the dominant
+    // pattern in TX appraisal reports: 2 pages per comp (photo/ID/price on
+    // page N, description/remarks on page N+1).
+    //
+    // For 24 pages (12 comps × 2 pages): 8 chunks. Each 2-page comp is
+    // guaranteed to appear complete in at least one chunk — comps that
+    // start on the last page of a chunk are caught whole by the next chunk
+    // (which starts 3 pages back and extends 4 forward).
+    //
+    // Dedupe by (name|date|price) collapses the same comp seen in
+    // overlapping chunks.
+    const CHUNK_SIZE = 4;
+    const STRIDE = 3;
     const chunks: string[][] = [];
-    for (let i = 0; i < images.length; i += CHUNK_SIZE) {
-      chunks.push(images.slice(i, i + CHUNK_SIZE));
+    for (let i = 0; i < images.length; i += STRIDE) {
+      const chunk = images.slice(i, i + CHUNK_SIZE);
+      chunks.push(chunk);
+      // Stop when we've reached the end (last chunk includes final pages)
+      if (i + CHUNK_SIZE >= images.length) break;
     }
 
     // Show upload as one user message
@@ -640,8 +655,8 @@ export default function ImportPage() {
     let errorCount = 0;
 
     for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
-      const startPage = chunkIdx * CHUNK_SIZE + 1;
-      const endPage = Math.min((chunkIdx + 1) * CHUNK_SIZE, images.length);
+      const startPage = chunkIdx * STRIDE + 1;
+      const endPage = Math.min(chunkIdx * STRIDE + CHUNK_SIZE, images.length);
       const toastId = `chunk-${chunkIdx}`;
       toast.loading(`Extracting comps from pages ${startPage}-${endPage} of ${images.length}…`, { id: toastId });
 
