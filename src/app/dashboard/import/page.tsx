@@ -233,19 +233,30 @@ export default function ImportPage() {
       if (Array.isArray(data.comps)) {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
-          const located = await autoLocateInBrowser(c);
-          if (located) {
-            console.log(`[import] auto-locate succeeded for ${c.property_name || c.county}: ${located.match_reason}`);
-            data.comps[i] = {
-              ...c,
-              latitude: located.latitude,
-              longitude: located.longitude,
-              parcel_id: located.parcel_id ?? c.parcel_id,
-              geometry: located.geometry,
-              _auto_located_confidence: located.match_confidence,
-            };
-          } else {
-            console.log(`[import] auto-locate returned null for ${c.property_name || c.county} — keeping server coords`);
+          const label = c.property_name || c.county || 'comp';
+          try {
+            const located = await autoLocateInBrowser(c);
+            if (located) {
+              console.log(`[import] auto-locate ✓ ${label}: ${located.match_reason}`);
+              toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
+              data.comps[i] = {
+                ...c,
+                latitude: located.latitude,
+                longitude: located.longitude,
+                parcel_id: located.parcel_id ?? c.parcel_id,
+                geometry: located.geometry,
+                _auto_located_confidence: located.match_confidence,
+              };
+            } else {
+              console.log(`[import] auto-locate ✗ ${label} returned null — using server coords (${c.latitude}, ${c.longitude})`);
+              toast(
+                `📍 ${label}: auto-locate found no match — using AI's coords (${c.latitude?.toFixed?.(4) ?? '?'}, ${c.longitude?.toFixed?.(4) ?? '?'})`,
+                { duration: 8000, icon: 'ℹ️' }
+              );
+            }
+          } catch (e: any) {
+            console.error(`[import] auto-locate threw for ${label}:`, e);
+            toast.error(`📍 ${label}: auto-locate error — ${e?.message || 'unknown'}`, { duration: 8000 });
           }
         }
       }
