@@ -269,15 +269,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Auto-locate: TxGIO acreage match → owner-name disambiguation →
-    // AI vision search hint → multi-parcel sum match in that area.
-    // Returns null when no confident match exists; broker fixes via picker.
+    // Auto-locate: ALWAYS run the structured pipeline regardless of whether
+    // the AI extracted lat/lng. The AI hallucinates coordinates frequently
+    // (county centroids, random TX coords), and our auto-locate's owner-
+    // search + spatial-clustering logic is significantly more reliable than
+    // the AI's guess. Keep AI coords only as a last-resort fallback if
+    // auto-locate returns null.
     if (Array.isArray(comps) && comps.length > 0) {
       const aerialImage = Array.isArray(images) && images.length > 0 ? images[0] : null;
       for (let i = 0; i < comps.length; i++) {
         const c = comps[i];
-        if (c?.latitude != null && c?.longitude != null) continue;
         try {
+          console.log(`[autoLocate] starting for "${c?.property_name || c?.county}" — ${c?.acres}ac, grantee="${c?.grantee || ''}", grantor="${c?.grantor || ''}"`);
           const located = await autoLocateFromMetadata({
             county: c.county,
             acres: c.acres,
@@ -289,16 +292,20 @@ export async function POST(request: NextRequest) {
             aerialImage,
           });
           if (located) {
+            console.log(`[autoLocate] ✓ ${located.match_confidence.toUpperCase()}: ${located.match_reason}`);
             comps[i] = {
               ...c,
               latitude: located.latitude,
               longitude: located.longitude,
               parcel_id: located.parcel_id ?? c.parcel_id,
               geometry: located.boundary_geojson,
+              _auto_located_confidence: located.match_confidence,
             };
+          } else {
+            console.log(`[autoLocate] ✗ no match — keeping AI coords if any (lat=${c?.latitude}, lng=${c?.longitude})`);
           }
-        } catch (e) {
-          console.error(`autoLocate failed for ${c?.property_name}:`, e);
+        } catch (e: any) {
+          console.error(`[autoLocate] failed for ${c?.property_name}:`, e?.message || e);
         }
       }
     }
