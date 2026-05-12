@@ -23,6 +23,7 @@ const TXGIO_QUERY =
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get('q') || '').trim();
+  const countyParam = (searchParams.get('county') || '').trim();
   if (q.length < 3) {
     return NextResponse.json(
       { error: 'q (query) must be at least 3 characters' },
@@ -34,7 +35,21 @@ export async function GET(req: NextRequest) {
   // PostgreSQL-style LIKE under the hood. Wildcards on both ends so substring
   // matches work ("Grundhoefer" matches "Grundhoefer Farms, Ltd").
   const safe = q.replace(/['\\]/g, '').toUpperCase();
-  const where = `UPPER(owner_name) LIKE '%${safe}%'`;
+
+  // Optional county filter — supports "Frio" or "Frio,Medina" for cross-
+  // county properties. Narrows the search dramatically and prevents common
+  // surnames from returning hundreds of unrelated matches statewide.
+  const counties = countyParam
+    .split(/[,&]|\s+and\s+/i)
+    .map((c) => c.replace(/['\\]/g, '').replace(/\bcount(y|ies)\b/gi, '').trim().toUpperCase())
+    .filter((c) => c.length > 0);
+  const countyClause = counties.length > 0
+    ? ' AND (' + counties.map((c) =>
+        `UPPER(county) = '${c}' OR UPPER(county) = '${c} COUNTY'`
+      ).join(' OR ') + ')'
+    : '';
+
+  const where = `UPPER(owner_name) LIKE '%${safe}%'${countyClause}`;
 
   const params = new URLSearchParams({
     where,

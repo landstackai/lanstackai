@@ -241,6 +241,127 @@ async function geocodeSearchHint(hint: string): Promise<{ lat: number; lng: numb
 // Main entry point
 // ──────────────────────────────────────────────────────────────────────────
 
+// Owner-first strategy. Tries each owner signal (grantee → grantor → property_name)
+// against TxGIO with a county filter, looking for either (a) a single-parcel
+// acreage match or (b) a multi-parcel subset whose summed acreage matches.
+//
+// Returns null if no confident match was found, allowing the caller to fall
+// through to the existing pipeline. MEDIUM matches get a vision sanity-check
+// before being returned with 'medium' confidence; HIGH matches skip vision.
+async function tryOwnerSearchStrategy(
+  comp: { aerialImage?: string | null },
+  acres: number,
+  counties: string[],
+  ownerSignals: string[]
+): Promise<AutoLocateResult | null> {
+  if (ownerSignals.length === 0) return null;
+
+  // Build the county query param ("Frio,Medina") for the API
+  const countyParam = counties.join(',');
+  // Use absolute URL when running on the server side
+  const base = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+
+  for (const owner of ownerSignals) {
+    const normalized = normalizeOwner(owner);
+    // Use the first significant token (longest piece >= 4 chars) for the query
+    // to maximize wildcard hits while staying specific. E.g., "GRUNDHOEFER FARMS"
+    // → query "GRUNDHOEFER" rather than "GRUNDHOEFER FARMS" so we catch
+    // "GRUNDHOEFER FARMS LLC" / "GRUNDHOEFER FAMILY LTD" / etc.
+    const tokens = normalized.split(/\s+/).filter((t) => t.length >= 4);
+    if (tokens.length === 0) continue;
+    const query = tokens.sort((a, b) => b.length - a.length)[0];
+
+    let features: any[] = [];
+    try {
+      const url = `${base}/api/parcels-by-owner?q=${encodeURIComponent(query)}&county=${encodeURIComponent(countyParam)}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(28000) });
+      if (!res.ok) continue;
+      const data = await res.json();
+      features = Array.isArray(data?.features) ? data.features : [];
+    } catch {
+      continue;
+    }
+    if (features.length === 0) continue;
+
+    // Require all tokens to appear in owner_name (the API uses single-token
+    // LIKE so a "FARMS" search returns ALL farms in the county — narrow it)
+    const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+    const tightMatches = features.filter((f) => {
+      const own = (f.properties?.owner_name || '').toString().toUpperCase();
+      return allTokens.every((t) => own.includes(t));
+    });
+    if (tightMatches.length === 0) continue;
+
+    // (a) Single-parcel acreage match
+    const singleMatches = tightMatches
+      .map((f) => ({
+        feature: f,
+        gisAcres: Number(f.properties?.gis_area) || 0,
+        delta: Math.abs((Number(f.properties?.gis_area) || 0) - acres) / acres,
+      }))
+      .filter((x) => x.delta <= 0.10)
+      .sort((a, b) => a.delta - b.delta);
+
+    if (singleMatches.length > 0) {
+      const best = singleMatches[0];
+      return featureToResult(
+        best.feature,
+        best.delta < 0.05 ? 'high' : 'medium',
+        `Owner+acreage: "${owner}" owns ${best.gisAcres.toFixed(1)} ac in ${counties.join('/')} County (target ${acres} ac, Δ${(best.delta * 100).toFixed(1)}%).`
+      );
+    }
+
+    // (b) Multi-parcel subset sum: do all the matched parcels together
+    // sum to the target acreage? Common for rural ranches split across
+    // 3-10 contiguous parcels under one owner.
+    const totalAcres = sumAcres(tightMatches);
+    const sumDelta = Math.abs(totalAcres - acres) / acres;
+    if (sumDelta <= 0.10) {
+      const merged = mergeFeatures(tightMatches);
+      if (merged) {
+        return featureToResult(
+          merged,
+          sumDelta < 0.05 ? 'high' : 'medium',
+          `Owner+multi-parcel sum: "${owner}" owns ${tightMatches.length} parcels totaling ${totalAcres.toFixed(1)} ac in ${counties.join('/')} County (target ${acres} ac, Δ${(sumDelta * 100).toFixed(1)}%).`
+        );
+      }
+    }
+
+    // (c) MEDIUM confidence: owner matches but acreage is off > 10%.
+    // Run vision verification before returning.
+    if (tightMatches.length <= 5) {
+      const best = tightMatches
+        .map((f) => ({
+          feature: f,
+          delta: Math.abs((Number(f.properties?.gis_area) || 0) - acres) / acres,
+        }))
+        .sort((a, b) => a.delta - b.delta)[0];
+
+      if (comp.aerialImage) {
+        const { verifyParcelMatch } = await import('./aerialAnalysis');
+        const verdict = await verifyParcelMatch(comp.aerialImage, {
+          county: best.feature.properties?.county,
+          acres: Number(best.feature.properties?.gis_area) || 0,
+          owner_name: best.feature.properties?.owner_name,
+        });
+        if (verdict?.matches && verdict.confidence >= 70) {
+          return featureToResult(
+            best.feature,
+            'medium',
+            `Owner match + vision-verified: "${owner}" — ${verdict.reason}`
+          );
+        }
+      }
+      // No vision, or vision said no → don't return medium yet, let
+      // the existing pipeline take a shot.
+    }
+  }
+
+  return null;
+}
+
 export type LocatableComp = {
   county?: string | null;
   acres?: number | null;
@@ -269,6 +390,20 @@ export async function autoLocateFromMetadata(
   const ownerSignals = [comp.grantee, comp.grantor, comp.property_name].filter(
     (s): s is string => typeof s === 'string' && s.trim().length > 0
   );
+
+  // ── STEP 0 (NEW, behind feature flag): Owner-first strategy ──────────
+  // Search TxGIO by owner name + county, looking for an acreage match.
+  // This is the most direct signal — when the grantee on the appraisal
+  // matches what TxGIO has as owner_name, we know we found the right
+  // property without needing aerial vision.
+  //
+  // Gated behind OWNER_SEARCH_FIRST env var so we can disable instantly
+  // if it misbehaves. Falls through to the existing pipeline (Steps 1-6)
+  // when it can't find a high-confidence match.
+  if (process.env.OWNER_SEARCH_FIRST === '1' && counties.length > 0) {
+    const ownerMatch = await tryOwnerSearchStrategy(comp, acres, counties, ownerSignals);
+    if (ownerMatch) return ownerMatch;
+  }
 
   // ── STEP 1: County + acreage single-parcel match ─────────────────────
   let candidates: any[] = [];
