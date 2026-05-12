@@ -78,6 +78,10 @@ export default function MapPage() {
 
   const [drawnCount, setDrawnCount] = useState(0);
   const [drawingActive, setDrawingActive] = useState(false);
+  // Tracks committed vertex count of the currently in-progress polygon (excludes
+  // the cursor-trailing preview point). Used by the drawing UI to show a live
+  // count and enable the Finish button only when ≥3 vertices are placed.
+  const [drawVertexCount, setDrawVertexCount] = useState(0);
   // Comp pin label mode — toggleable on the map
   const [pinLabelMode, setPinLabelMode] = useState<'ppa' | 'total'>('ppa');
   // Scope filter for the map: All (everything visible) / Company (only
@@ -251,7 +255,28 @@ export default function MapPage() {
     map.current.on('draw.update', updateDrawnCount);
     map.current.on('draw.delete', updateDrawnCount);
     map.current.on('draw.modechange', (e: any) => {
-      setDrawingActive(typeof e.mode === 'string' && e.mode.startsWith('draw_'));
+      const isDrawing = typeof e.mode === 'string' && e.mode.startsWith('draw_');
+      setDrawingActive(isDrawing);
+      if (!isDrawing) setDrawVertexCount(0);
+    });
+    // Live vertex count during draw_polygon. draw.render fires on every frame
+    // while drawing, so we read the in-progress polygon and count committed
+    // vertices (excluding the trailing preview point that follows the cursor).
+    map.current.on('draw.render', () => {
+      const features = drawRef.current?.getAll().features || [];
+      const inProgress = features.find(
+        (f: any) => f.geometry?.type === 'Polygon' && Array.isArray(f.geometry?.coordinates?.[0])
+      );
+      if (!inProgress) {
+        setDrawVertexCount(0);
+        return;
+      }
+      const ring = (inProgress.geometry as any).coordinates[0] as Array<[number, number]>;
+      // Polygon coords include a duplicate closing point. While drawing, the
+      // last point is also the preview cursor. So committed unique = length - 2,
+      // floored at 0. Once polygon is closed, count is the actual vertex count.
+      const committed = Math.max(0, ring.length - 2);
+      setDrawVertexCount(committed);
     });
 
     map.current.on('load', () => {
@@ -2135,17 +2160,41 @@ export default function MapPage() {
     if (!drawRef.current) return;
     drawRef.current.changeMode('draw_polygon');
     setDrawingActive(true);
+    setDrawVertexCount(0);
     setMapMode('view');
     setSheetMode('none');
     setSelectedComp(null);
     setTappedParcel(null);
-    toast('Click vertices · double-click to finish', { icon: '✏️', duration: 2500 });
   }, []);
 
   const stopDrawing = useCallback(() => {
     if (!drawRef.current) return;
     drawRef.current.changeMode('simple_select');
+    drawRef.current.deleteAll();
     setDrawingActive(false);
+    setDrawnCount(0);
+    setDrawVertexCount(0);
+  }, []);
+
+  // Manually close the polygon and exit draw mode. MapboxDraw closes the
+  // polygon automatically when switching to simple_select if there are ≥3
+  // vertices; if fewer, the partial polygon is discarded. We guard against
+  // that case in the UI by disabling the button until ≥3 vertices.
+  const finishDrawing = useCallback(() => {
+    if (!drawRef.current) return;
+    drawRef.current.changeMode('simple_select');
+    setDrawingActive(false);
+    setDrawVertexCount(0);
+  }, []);
+
+  // Discard the current in-progress polygon and restart drawing from scratch.
+  // Useful when the user clicked a wrong vertex and wants a clean slate.
+  const startOverDrawing = useCallback(() => {
+    if (!drawRef.current) return;
+    drawRef.current.deleteAll();
+    drawRef.current.changeMode('draw_polygon');
+    setDrawnCount(0);
+    setDrawVertexCount(0);
   }, []);
 
   const clearDrawings = useCallback(() => {
@@ -2153,6 +2202,7 @@ export default function MapPage() {
     drawRef.current.deleteAll();
     setDrawnCount(0);
     setDrawingActive(false);
+    setDrawVertexCount(0);
   }, []);
 
   const combineAll = useCallback(() => {
@@ -2424,15 +2474,46 @@ export default function MapPage() {
           )}
 
           {drawingActive && (
-            <div className="flex gap-1.5">
-              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                <Pencil size={12} />
-                Drawing — dbl-click to finish
+            <div className="flex gap-1.5 items-stretch">
+              <div className="bg-amber-500/15 border border-amber-500/40 rounded-xl px-3 py-2 flex items-center gap-2.5">
+                <Pencil size={14} className="text-amber-400 shrink-0" />
+                <div className="flex flex-col leading-tight">
+                  <span className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">
+                    {drawVertexCount === 0
+                      ? 'Click the first corner of the property'
+                      : drawVertexCount < 3
+                      ? `Keep clicking corners (${drawVertexCount} placed, need at least 3)`
+                      : `${drawVertexCount} corners placed — click Finish or double-click to close`}
+                  </span>
+                  <span className="text-[9px] text-amber-300/60">
+                    Press <kbd className="font-mono px-0.5 bg-amber-500/20 rounded">Backspace</kbd> to remove last corner
+                  </span>
+                </div>
               </div>
+              <button
+                onClick={finishDrawing}
+                disabled={drawVertexCount < 3}
+                className={`rounded-xl px-3 py-2 text-xs font-bold transition-colors flex items-center gap-1.5 border ${
+                  drawVertexCount >= 3
+                    ? 'bg-sage/15 border-sage/40 text-sage hover:bg-sage/25 hover:border-sage cursor-pointer'
+                    : 'bg-panel/40 border-border/40 text-slate-500 cursor-not-allowed'
+                }`}
+                title={drawVertexCount < 3 ? 'Place at least 3 corners first' : 'Close the polygon'}
+              >
+                <Check size={12} />
+                Finish
+              </button>
+              <button
+                onClick={startOverDrawing}
+                className="bg-panel/90 border border-border hover:border-amber-400 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-400 hover:text-amber-400 transition-colors"
+                title="Discard and start over"
+              >
+                Start Over
+              </button>
               <button
                 onClick={stopDrawing}
                 className="bg-panel/90 border border-border hover:border-red-400 rounded-xl px-2 text-xs font-bold text-slate-400 hover:text-red-400 transition-colors"
-                title="Stop drawing"
+                title="Cancel drawing (discards everything)"
               >
                 <X size={12} />
               </button>
