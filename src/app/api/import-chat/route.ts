@@ -318,20 +318,21 @@ export async function POST(request: NextRequest) {
       comps = await Promise.all(comps.map(enrichWithHolding));
     }
 
-    // Collect any cross-check warnings so the user sees them in the import chat.
+    // Surface low-confidence pins so brokers know to verify the boundary.
+    // (We no longer reject boundaries on acreage mismatch — appraisal vs CAD
+    // divergence is the norm for TX rural land. A pin in the right area with
+    // a "verify boundary" hint is much more useful than no pin at all.)
     const warnings: string[] = [];
     if (Array.isArray(comps)) {
       for (const c of comps) {
         const label = c.property_name || c.address || `${c.county || 'comp'} ${c.acres ? c.acres.toFixed(0) + ' ac' : ''}`.trim();
-        if (c.boundary_warning === 'acreage_mismatch') {
+        if (c.partial_sale) {
           warnings.push(
-            `⚠️ "${label}": no parcel boundary matches the appraisal acreage within 10%. ` +
-            `Verify the report acreage and use Edit Boundary to draw the tract manually.`
+            `ℹ️ "${label}": looks like a partial sale or carve-out — pinned to the matched tract, but the actual boundary may be smaller. Use Edit Boundary to trace the exact shape.`
           );
-        } else if (c.partial_sale) {
+        } else if (c._auto_located_confidence === 'low') {
           warnings.push(
-            `⚠️ "${label}": looks like a partial sale — the seller owns adjoining land that wasn't part of the deal. ` +
-            `Used just the seed parcel as the boundary; verify it matches the report.`
+            `ℹ️ "${label}": pinned to the grantor's parent property as a likely carve-out. Use Edit Boundary to trace the actual ${c.acres}-acre tract.`
           );
         }
       }
@@ -409,18 +410,17 @@ async function enrichWithHolding(comp: any): Promise<any> {
       return true;
     });
 
-    // Cross-check: if neither merged holding nor seed alone matches appraisal
-    // acreage within 10%, we refuse to attach a boundary — better to leave it
-    // empty than show a wrong polygon.
-    const { features: holding, totalAcres, mismatch, rejected } = selectBoundaryByAcreage(
+    // Pick which subset of the holding to use as the boundary (seed alone vs
+    // full contiguous holding) but do NOT reject on acreage mismatch — TX
+    // appraisal acreage routinely diverges from CAD by 20-40% due to
+    // carve-outs, surveys, road exclusions. A pin in the right neighborhood
+    // is more useful than no pin at all; broker can Edit Boundary to fix.
+    const { features: holding, totalAcres, mismatch } = selectBoundaryByAcreage(
       seed,
       dedupedHolding,
       comp.acres,
       source.acresField
     );
-    if (rejected) {
-      return { ...comp, boundary_warning: 'acreage_mismatch' };
-    }
     const merged = mergeFeatures(holding);
     if (!merged) return comp;
 
@@ -514,16 +514,14 @@ async function enrichWithTxGIO(comp: any): Promise<any> {
       return true;
     });
 
-    // Cross-check vs appraisal acreage; reject if neither matches within 10%
-    const { features: unique, totalAcres, mismatch, rejected } = selectBoundaryByAcreage(
+    // Pick the boundary subset but DO NOT reject on acreage mismatch.
+    // (See matching comment in enrichWithHolding above.)
+    const { features: unique, totalAcres, mismatch } = selectBoundaryByAcreage(
       seed,
       dedupedHolding,
       comp.acres,
       'gis_area'
     );
-    if (rejected) {
-      return { ...comp, boundary_warning: 'acreage_mismatch' };
-    }
     const merged = mergeFeatures(unique);
     if (!merged) return comp;
 
