@@ -20,6 +20,11 @@ export const maxDuration = 30;
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
 
+// Stop words — common filler words that should never become search filters.
+// Adding them as LIKE clauses would match almost everything (especially
+// "the") and dilute the result set with false positives.
+const STOP_WORDS = new Set(['THE', 'OF', 'AND', '&', 'C/O']);
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get('q') || '').trim();
@@ -31,10 +36,27 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Sanitize for SQL-LIKE — strip single quotes and back-slashes. ArcGIS uses
-  // PostgreSQL-style LIKE under the hood. Wildcards on both ends so substring
-  // matches work ("Grundhoefer" matches "Grundhoefer Farms, Ltd").
-  const safe = q.replace(/['\\]/g, '').toUpperCase();
+  // Tokenize the query so word ORDER doesn't matter. Texas appraisal districts
+  // store individual owners as "LASTNAME FIRSTNAME MIDDLE" — so searching
+  // "gary fritz" needs to find "FRITZ GARY W & APRIL N". With multi-token AND
+  // matching, every word in the query must appear somewhere in owner_name,
+  // but in any order.
+  //
+  // Tokens are required to be ≥3 chars and not a stop word, then SQL-sanitized
+  // (strip single quotes / backslashes). Hyphens and periods are treated as
+  // spaces so "smith-jones" → "smith jones".
+  const tokens = q
+    .replace(/[-.]/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.replace(/['\\]/g, '').toUpperCase().trim())
+    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
+
+  if (tokens.length === 0) {
+    return NextResponse.json(
+      { error: 'No usable search terms (need at least one word ≥3 chars)' },
+      { status: 400 }
+    );
+  }
 
   // Optional county filter — supports "Frio" or "Frio,Medina" for cross-
   // county properties. Narrows the search dramatically and prevents common
@@ -49,7 +71,11 @@ export async function GET(req: NextRequest) {
       ).join(' OR ') + ')'
     : '';
 
-  const where = `UPPER(owner_name) LIKE '%${safe}%'${countyClause}`;
+  // Build AND-joined LIKE clauses — one per token. Order-independent match.
+  const ownerClause = tokens
+    .map((t) => `UPPER(owner_name) LIKE '%${t}%'`)
+    .join(' AND ');
+  const where = `(${ownerClause})${countyClause}`;
 
   const params = new URLSearchParams({
     where,
@@ -95,6 +121,8 @@ export async function GET(req: NextRequest) {
   return new NextResponse(JSON.stringify({
     ...data,
     query: q,
+    tokens_used: tokens,
+    counties_used: counties,
     match_count: count,
     truncated: count >= 200,
   }), {

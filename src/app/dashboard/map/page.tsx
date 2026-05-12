@@ -2022,7 +2022,12 @@ export default function MapPage() {
       setOwnerSearchTruncated(Boolean(data?.truncated));
 
       if (features.length === 0) {
-        toast(`No parcels found for "${q}"`, { icon: '🔍', duration: 3000 });
+        // TxGIO stores individual owners as "LASTNAME FIRSTNAME" — gentle
+        // nudge that one of the words may not exist in the dataset at all.
+        toast(
+          `No parcels found for "${q}". Try a single name (e.g. just "Fritz") to see if either word matches.`,
+          { icon: '🔍', duration: 5000 }
+        );
         return;
       }
 
