@@ -56,11 +56,13 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     count: data?.length || 0,
     filter: nameFilter || '(none)',
-    comps: (data || []).map((c) => ({
-      ...c,
-      // Truncate description for readability
-      description: c.description ? c.description.slice(0, 200) + (c.description.length > 200 ? '…' : '') : null,
-      has_coords: Boolean(c.latitude && c.longitude),
-    })),
+    comps: (data || []).map((row: any) => {
+      const c = row as Record<string, any>;
+      return {
+        ...c,
+        description: c.description ? String(c.description).slice(0, 200) + (String(c.description).length > 200 ? '…' : '') : null,
+        has_coords: Boolean(c.latitude && c.longitude),
+      };
+    }),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
