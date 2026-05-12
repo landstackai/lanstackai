@@ -317,6 +317,35 @@ async function clusterParcelsSpatially(features: any[]): Promise<ParcelCluster[]
       });
     }
   }
+
+  // Recompute each cluster's totalAcres from the unioned polygon's actual area
+  // rather than the sum of gis_area fields. This handles a TxGIO data quirk
+  // where multiple "duplicate" records (abstract subdivisions, survey records
+  // describing the same physical parcel) all report the same gis_area —
+  // summing them would multiply the actual acreage by N.
+  // For genuine multi-parcel clusters, union returns one larger polygon and
+  // turf.area gives the correct combined acreage.
+  for (const cluster of clusters) {
+    if (cluster.parcels.length > 1) {
+      try {
+        let unioned: any = cluster.parcels[0];
+        for (let i = 1; i < cluster.parcels.length; i++) {
+          try {
+            const u = turf.union(unioned, cluster.parcels[i]);
+            if (u) unioned = u;
+          } catch {}
+        }
+        if (unioned?.geometry) {
+          // turf.area returns m² → convert to acres (1 acre = 4046.8564224 m²)
+          const acres = turf.area(unioned) / 4046.8564224;
+          if (Number.isFinite(acres) && acres > 0) {
+            cluster.totalAcres = acres;
+          }
+        }
+      } catch {}
+    }
+  }
+
   return clusters;
 }
 
