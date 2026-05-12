@@ -1191,6 +1191,16 @@ export default function MapPage() {
 
     let timer: any = null;
     let lastBbox = '';
+    // Snap to a 0.02° grid (~2km in TX) so panning within a cell reuses the
+    // exact same cached request. Matches server-side snap in /api/parcels-bbox.
+    const GRID = 0.02;
+    const snapBbox = (b: mapboxgl.LngLatBounds) => {
+      const w = Math.floor(b.getWest() / GRID) * GRID;
+      const s = Math.floor(b.getSouth() / GRID) * GRID;
+      const e = Math.ceil(b.getEast() / GRID) * GRID;
+      const n = Math.ceil(b.getNorth() / GRID) * GRID;
+      return [w, s, e, n].map((v) => v.toFixed(4)).join(',');
+    };
     const update = () => {
       if (!map.current) return;
       const zoom = map.current.getZoom();
@@ -1200,10 +1210,10 @@ export default function MapPage() {
       }
       const b = map.current.getBounds();
       if (!b) return;
-      const bbox = `${b.getWest().toFixed(5)},${b.getSouth().toFixed(5)},${b.getEast().toFixed(5)},${b.getNorth().toFixed(5)}`;
+      const bbox = snapBbox(b);
       if (bbox === lastBbox) return;
       lastBbox = bbox;
-      console.log(`[txgio-bbox] fetching parcels at zoom ${zoom.toFixed(1)} bbox=${bbox}`);
+      console.log(`[txgio-bbox] fetching parcels at zoom ${zoom.toFixed(1)} snapped-bbox=${bbox}`);
       fetch(`/api/parcels-bbox?bbox=${bbox}`)
         .then((r) => {
           if (!r.ok) {
