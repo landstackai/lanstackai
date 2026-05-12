@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+// @ts-expect-error — turf v6.5 types not exposed via package "exports"
+import * as turf from '@turf/turf';
 import {
   getCountyParcels,
   getCountySource,
@@ -121,28 +123,66 @@ async function enrich(comp: any) {
     }
   }
 
-  // TxGIO statewide fallback
+  // TxGIO statewide fallback — cascading search radius.
+  //
+  // Appraiser-printed "Geographic Location" coordinates often mark the
+  // address access point (driveway / road frontage), not the parcel
+  // interior. A tight 10m envelope at those coords lands on the road and
+  // misses the parcel entirely. Widen the search until we find at least
+  // one parcel, then pick the one whose centroid is closest to the pin.
   try {
-    const d = 0.0001;
-    const seedRes = await fetch(
-      `${TXGIO_QUERY}?` +
-        new URLSearchParams({
-          geometry: `${lng - d},${lat - d},${lng + d},${lat + d}`,
-          geometryType: 'esriGeometryEnvelope',
-          inSR: '4326',
-          spatialRel: 'esriSpatialRelIntersects',
-          outFields: 'prop_id,owner_name,gis_area,county',
-          returnGeometry: 'true',
-          outSR: '4326',
-          resultRecordCount: '1',
-          f: 'geojson',
-        }),
-      { signal: AbortSignal.timeout(20000) }
-    );
-    if (!seedRes.ok) return null;
-    const seedData = await seedRes.json();
-    const seed = seedData.features?.[0];
-    if (!seed?.properties?.owner_name) return null;
+    const BUFFERS = [0.0001, 0.001, 0.005, 0.015]; // ~10m, 100m, 500m, 1.5km
+    let seed: any = null;
+    let usedBuffer: number = 0;
+    for (const d of BUFFERS) {
+      try {
+        const seedRes = await fetch(
+          `${TXGIO_QUERY}?` +
+            new URLSearchParams({
+              geometry: `${lng - d},${lat - d},${lng + d},${lat + d}`,
+              geometryType: 'esriGeometryEnvelope',
+              inSR: '4326',
+              spatialRel: 'esriSpatialRelIntersects',
+              outFields: 'prop_id,owner_name,gis_area,county',
+              returnGeometry: 'true',
+              outSR: '4326',
+              resultRecordCount: '15',
+              f: 'geojson',
+            }),
+          { signal: AbortSignal.timeout(20000) }
+        );
+        if (!seedRes.ok) continue;
+        const seedData = await seedRes.json();
+        const features: any[] = Array.isArray(seedData?.features) ? seedData.features : [];
+        if (features.length === 0) continue;
+        // Pick the parcel whose centroid is closest to the input coords.
+        // Matters when 1km envelope returns 15 nearby parcels — we want
+        // the one the pin is closest to.
+        let bestDist = Infinity;
+        for (const f of features) {
+          if (!f?.properties?.owner_name) continue;
+          try {
+            const c = turf.centroid(f);
+            const coords = c?.geometry?.coordinates;
+            if (!Array.isArray(coords) || coords.length < 2) continue;
+            const dist = Math.hypot(coords[0] - lng, coords[1] - lat);
+            if (dist < bestDist) {
+              bestDist = dist;
+              seed = f;
+              usedBuffer = d;
+            }
+          } catch {}
+        }
+        if (seed) break;
+      } catch (e: any) {
+        console.warn(`[enrich-boundary] buffer ${d}° threw: ${e?.message}`);
+      }
+    }
+    if (!seed?.properties?.owner_name) {
+      console.warn(`[enrich-boundary] no parcel found at any cascading buffer`);
+      return null;
+    }
+    console.log(`[enrich-boundary] found seed at buffer ${usedBuffer}°: ${seed.properties.owner_name}`);
 
     const owner = String(seed.properties.owner_name).trim();
     const seedCounty = String(seed.properties.county || comp.county || '').trim();
