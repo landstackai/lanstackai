@@ -340,7 +340,9 @@ export default function MapPage() {
           setTimeout(() => {
             if (drawRef.current?.getMode() === 'simple_select') {
               try {
-                drawRef.current.changeMode('direct_select', { featureId: polygon.id });
+                // Cast: MapboxDraw's TS types are over-narrow on the overload
+                // for changeMode('direct_select', {featureId}) — runtime is fine.
+                (drawRef.current as any).changeMode('direct_select', { featureId: polygon.id });
               } catch {}
             }
           }, 0);

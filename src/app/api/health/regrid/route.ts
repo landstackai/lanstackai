@@ -110,12 +110,15 @@ export async function GET() {
     },
   ];
 
+  // env_set guard above guarantees REGRID_API_KEY is a string here, but TS
+  // can't narrow across the early-return — non-null assert for clean typing.
+  const TOKEN: string = REGRID_API_KEY!;
   const results: any[] = [];
   for (const t of tests) {
     const r = await probe(t.url);
     results.push({
       endpoint: t.label,
-      url_redacted: t.url.replace(REGRID_API_KEY, 'TOKEN'),
+      url_redacted: t.url.replace(TOKEN, 'TOKEN'),
       ...r,
     });
   }
