@@ -2057,28 +2057,98 @@ export default function MapPage() {
   }, [ownerSearchQuery]);
 
   // Geocode a place name via Mapbox forward geocoding and fly the map there.
-  // Used when the AI search detects a "location" intent rather than a filter.
-  const flyToPlace = useCallback(async (name: string) => {
+  // Texas-biased: includes "Texas" in the query and uses a TX bounding box so
+  // rural roads and city streets resolve to the TX instance, not (say) the
+  // Brummett Road in California.
+  //
+  // Returns true if the fly succeeded, false if no usable result — so the
+  // caller can fall through to AI for ambiguous queries.
+  const flyToPlace = useCallback(async (name: string): Promise<boolean> => {
     try {
+      // Append ", Texas" if not already present — this dramatically improves
+      // rural-address geocoding accuracy
+      const queryWithState = /\b(tx|texas)\b/i.test(name) ? name : `${name}, Texas`;
+      // TX bounding box (approximate): SW -107, 25.5  NE -93, 36.5
       const url =
-        `https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(name)}` +
-        `&access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}&limit=1&country=us`;
+        `https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(queryWithState)}` +
+        `&access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}` +
+        `&limit=1&country=us&bbox=-107,25.5,-93,36.5`;
       const res = await fetch(url);
-      if (!res.ok) return;
+      if (!res.ok) return false;
       const json = await res.json();
       const f = json.features?.[0];
       const coords = f?.geometry?.coordinates;
-      if (!Array.isArray(coords) || coords.length < 2 || !map.current) return;
+      if (!Array.isArray(coords) || coords.length < 2 || !map.current) return false;
       const ftype = f.properties?.feature_type;
-      const zoom = ftype === 'address' ? 16 : ftype === 'place' ? 11 : 13;
+      // Tighter zoom for addresses (street level), looser for places (town/county)
+      const zoom = ftype === 'address' ? 16 : ftype === 'place' ? 11 : ftype === 'street' ? 15 : 13;
       map.current.flyTo({ center: [coords[0], coords[1]], zoom, duration: 1200 });
-    } catch {}
+
+      // After fly, also try to highlight the parcel at the destination — gives
+      // a visual anchor so users see which property they landed on. Best-effort;
+      // failures are silent (TxGIO may be slow / point may be on a road).
+      if (zoom >= 15) {
+        setTimeout(async () => {
+          try {
+            const parcelRes = await fetch(`/api/parcel?lat=${coords[1]}&lng=${coords[0]}`);
+            if (parcelRes.ok) {
+              const parcel = await parcelRes.json();
+              if (parcel && parcel.parcel_id && parcel.geometry) {
+                setTappedParcel({
+                  ...parcel,
+                  latitude: coords[1],
+                  longitude: coords[0],
+                });
+                setSheetMode('parcel');
+              }
+            }
+          } catch {}
+        }, 1200);
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }, []);
+
+  // Heuristic: does this query look like an address or street name?
+  // If yes, we skip the AI roundtrip and go straight to Mapbox geocoding.
+  // Patterns that indicate an address/street:
+  //   - Starts with a street number ("1234 ...")
+  //   - Contains a TX road type abbreviation (FM, CR, RR, RM, PR, Hwy, etc.)
+  //   - Contains a road suffix word (Road, Street, Avenue, etc.)
+  //   - Contains a US ZIP code
+  const isLikelyAddressOrStreet = (q: string): boolean => {
+    const trimmed = q.trim();
+    // Starts with a number → almost always an address
+    if (/^\d+\s+[A-Za-z]/.test(trimmed)) return true;
+    // ZIP code
+    if (/\b\d{5}(-\d{4})?\b/.test(trimmed)) return true;
+    // TX-specific road type abbreviations (with word boundaries / dots)
+    if (/\b(FM|CR|RR|RM|PR|US|SH|IH|I-\d+|Hwy|Highway|Loop)\.?\s*\d+/i.test(trimmed)) return true;
+    // Common road suffix words
+    if (/\b(Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Lane|Ln|Boulevard|Blvd|Parkway|Pkwy|Trail|Trl|Court|Ct|Way)\b/i.test(trimmed)) return true;
+    return false;
+  };
 
   const askAi = useCallback(async () => {
     const q = searchQuery.trim();
     if (!q) return;
     setAskingAi(true);
+
+    // Fast path: address / street / zip — skip the AI roundtrip, go straight
+    // to Mapbox geocoding. Avoids 2s of AI latency and the occasional
+    // misclassification when the AI thinks a road name is a filter keyword.
+    if (isLikelyAddressOrStreet(q)) {
+      const ok = await flyToPlace(q);
+      if (ok) {
+        clearAiSearch();
+        setAskingAi(false);
+        return;
+      }
+      // Mapbox couldn't find it — fall through to AI for a backup attempt
+    }
+
     try {
       const res = await fetch('/api/ai-search', {
         method: 'POST',
