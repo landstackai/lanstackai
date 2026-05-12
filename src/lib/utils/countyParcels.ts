@@ -224,10 +224,15 @@ export function selectBoundaryByAcreage<T extends { properties?: any }>(
     // Common: seller owns adjacent land they kept; the seed alone is the sold tract.
     return { features: [seed], totalAcres: seedAcres, mismatch: true, rejected: false };
   }
-  // Neither merge nor seed matches — refuse to save a boundary. The caller
-  // should leave geometry null so the user can manually draw one via Edit
-  // Boundary instead of seeing a wrong polygon.
-  return { features: [], totalAcres: 0, mismatch: true, rejected: true };
+  // Neither merged holding nor seed alone matches the reported acreage within
+  // tolerance. Previously: returned empty + rejected. New behavior: still
+  // attach SOMETHING (the seed parcel — it's at the appraiser-marked location,
+  // owner_name matches the grantee, etc.) so the broker sees a boundary they
+  // can refine. CAD vs appraisal acreage routinely diverges 20-40% for TX
+  // rural land (carve-outs, surveys, road exclusions) — returning nothing
+  // hid the right parcel from the broker. The mismatch flag still surfaces
+  // so the broker knows to verify.
+  return { features: [seed], totalAcres: seedAcres, mismatch: true, rejected: false };
 }
 
 export function mergeFeatures(features: any[]): any | null {
