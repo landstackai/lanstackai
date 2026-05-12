@@ -105,9 +105,12 @@ Each comp should have these fields:
   "ppa_land_only": number or null,
   "sale_date": "YYYY-MM-DD" or null,
   "address": string or null,
-  "latitude": number or null,
-  "longitude": number or null,
   "parcel_id": string or null,
+  // NOTE: latitude/longitude intentionally omitted. The AI tends to
+  // hallucinate coordinates from city/town names mentioned in the description
+  // (e.g., "5mi southeast of Pearsall" → returns Pearsall's coords). The
+  // server-side autoLocate + browser-side autoLocateInBrowser handle real
+  // geocoding from owner/county/acreage; AI must NOT provide coordinates.
   "recording_number": string or null,
   "grantor": string or null,
   "grantee": string or null,
