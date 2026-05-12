@@ -294,7 +294,7 @@ export default function ImportPage() {
   // a single-entry data-URL array.
   const fileToImages = async (file: File): Promise<string[]> => {
     if (file.type === 'application/pdf') {
-      return await pdfToImages(file, { scale: 1.6, maxPages: 20 });
+      return await pdfToImages(file, { scale: 1.0, maxPages: 15 });
     }
     if (file.type.startsWith('image/')) {
       const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -622,7 +622,7 @@ export default function ImportPage() {
       // Images (jpg/png): pass straight through as a single-image array.
       if (file.type === 'application/pdf') {
         toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
-        const images = await pdfToImages(file, { scale: 1.6, maxPages: 20 });
+        const images = await pdfToImages(file, { scale: 1.0, maxPages: 15 });
         toast.dismiss('pdf-render');
         if (images.length === 0) {
           toast.error('Could not render PDF');
