@@ -33,27 +33,33 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'lat/lng or parcel_id required' }, { status: 400 });
   }
 
+  // Prefer Regrid when configured — it's sub-second, US-wide, and reliable.
+  // Fall back to TxGIO (slower, free) only if Regrid is unavailable or empty.
+  if (REGRID_API_KEY) {
+    const regrid = await tryRegrid(lat, lng, parcelId);
+    if (regrid) {
+      return NextResponse.json(regrid, {
+        headers: {
+          'Cache-Control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=86400',
+          'X-Parcel-Source': 'regrid',
+        },
+      });
+    }
+    console.warn('[api/parcel] Regrid returned no data, falling back to TxGIO');
+  }
+
   let txGioErr: string | null = null;
   if (lat && lng) {
     const result = await tryTxGIO(parseFloat(lat), parseFloat(lng));
     if (result.parcel) {
       return NextResponse.json(result.parcel, {
         headers: {
-          // Lat/lng to ~10m precision → cache hits when user re-clicks same spot.
           'Cache-Control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=86400',
+          'X-Parcel-Source': 'txgio',
         },
       });
     }
     txGioErr = result.error;
-  }
-
-  if (REGRID_API_KEY) {
-    const regrid = await tryRegrid(lat, lng, parcelId);
-    if (regrid) {
-      return NextResponse.json(regrid, {
-        headers: { 'Cache-Control': 'public, max-age=300, s-maxage=86400' },
-      });
-    }
   }
 
   return NextResponse.json(
@@ -128,31 +134,81 @@ async function tryRegrid(
   lng: string | null,
   parcelId: string | null
 ): Promise<Parcel | null> {
+  if (!REGRID_API_KEY) {
+    console.warn('[api/parcel] REGRID_API_KEY not set');
+    return null;
+  }
   try {
-    let url = '';
+    // Try the standard Regrid v2 point query first, then v1 as a fallback if
+    // the v2 endpoint shape doesn't match what we expect.
+    const candidates: string[] = [];
     if (lat && lng) {
-      url = `${REGRID_BASE}/query?lat=${lat}&lon=${lng}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
+      candidates.push(
+        `${REGRID_BASE}/parcels.json?lat=${lat}&lon=${lng}&token=${REGRID_API_KEY}`,
+        `${REGRID_BASE}/query?lat=${lat}&lon=${lng}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`,
+        `https://app.regrid.com/api/v1/search.json?query=${lat},${lng}&token=${REGRID_API_KEY}`,
+      );
     } else if (parcelId) {
-      url = `${REGRID_BASE}/query?parcel_id=${parcelId}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
+      candidates.push(
+        `${REGRID_BASE}/parcels/${parcelId}.json?token=${REGRID_API_KEY}`,
+        `${REGRID_BASE}/query?parcel_id=${parcelId}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`,
+      );
     } else {
       return null;
     }
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const data = await response.json();
-    const parcel = data.parcels?.[0];
-    if (!parcel) return null;
+
+    let parcel: any = null;
+    let lastDiag = '';
+    for (const url of candidates) {
+      const safeUrl = url.replace(REGRID_API_KEY, 'TOKEN_REDACTED');
+      const t0 = Date.now();
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        const ms = Date.now() - t0;
+        const text = await response.text();
+        let data: any = null;
+        try { data = JSON.parse(text); } catch {}
+        lastDiag = `[regrid] ${response.status} ${ms}ms ${safeUrl} → ${text.slice(0, 200)}`;
+        if (!response.ok) {
+          console.warn(lastDiag);
+          continue;
+        }
+        // Try several known Regrid response shapes
+        parcel = data?.parcels?.[0]
+          || data?.results?.[0]
+          || data?.features?.[0]
+          || (Array.isArray(data) ? data[0] : null);
+        if (parcel) {
+          console.log(`[regrid] ✓ hit at ${safeUrl} (${ms}ms)`);
+          break;
+        }
+        console.warn(`[regrid] 200 but no parcel found: ${text.slice(0, 200)}`);
+      } catch (e: any) {
+        lastDiag = `[regrid] threw ${e?.name}: ${e?.message} (${safeUrl})`;
+        console.warn(lastDiag);
+      }
+    }
+
+    if (!parcel) {
+      console.warn('[api/parcel] All Regrid endpoints failed. Last diag:', lastDiag);
+      return null;
+    }
+    // Regrid responses can come in multiple shapes — fields could be on
+    // `fields`, `properties`, or directly on the parcel object.
+    const f = parcel.fields || parcel.properties || parcel;
     return {
-      parcel_id: parcel.fields?.parno || parcel.id,
-      owner_name: parcel.fields?.owner || null,
-      acres: parcel.fields?.gisacre || parcel.fields?.calc_acreage || null,
-      address: parcel.fields?.address || null,
-      county: parcel.fields?.county || null,
-      state: parcel.fields?.state_abbr || 'TX',
+      parcel_id: f.parno || f.parcelnumb || parcel.id || f.ogc_fid || '',
+      owner_name: f.owner || f.owner_name || null,
+      acres: f.gisacre || f.calc_acreage || f.ll_gisacre || f.acres || null,
+      address: f.address || f.saddno && f.saddstr ? `${f.saddno || ''} ${f.saddstr || ''}`.trim() || f.address : f.address || null,
+      county: f.county || f.county_name || null,
+      state: f.state_abbr || f.state || 'TX',
       latitude: parseFloat(lat || '0'),
       longitude: parseFloat(lng || '0'),
       geometry: parcel.geometry || null,
     };
-  } catch {
+  } catch (e: any) {
+    console.warn('[api/parcel] tryRegrid threw:', e?.message);
     return null;
   }
 }
