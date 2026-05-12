@@ -222,11 +222,32 @@ export default function MapPage() {
       try {
         const src1 = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource;
         const src2 = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
+        const src3 = map.current.getSource('tapped-parcel-highlight') as mapboxgl.GeoJSONSource;
         if (src1) src1.setData({ type: 'FeatureCollection', features: [] });
         if (src2) src2.setData({ type: 'FeatureCollection', features: [] });
+        if (src3) src3.setData({ type: 'FeatureCollection', features: [] });
       } catch (e) {}
     }
   }, [mapLoaded]);
+
+  // Push the tapped parcel's geometry into the highlight layer so the user
+  // can see which parcel they just clicked. Cleared when tappedParcel goes
+  // back to null (sheet closed, different workflow started, etc.).
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+    const src = map.current.getSource('tapped-parcel-highlight') as mapboxgl.GeoJSONSource | undefined;
+    if (!src) return;
+    if (tappedParcel?.geometry) {
+      src.setData({
+        type: 'FeatureCollection',
+        features: [
+          { type: 'Feature', properties: {}, geometry: tappedParcel.geometry as any },
+        ],
+      });
+    } else {
+      src.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, [tappedParcel, mapLoaded]);
 
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
@@ -466,6 +487,38 @@ export default function MapPage() {
         type: 'line',
         source: 'selected-parcels',
         paint: { 'line-color': '#34d399', 'line-width': 4 },
+      });
+
+      // Single-tap parcel highlight. When the user clicks a parcel to view
+      // its info (no selection / CMA / drawing flow active), we briefly
+      // light up the polygon so they can see what they clicked. Cyan to
+      // stay distinct from saved-comp red and multi-select green.
+      map.current!.addSource('tapped-parcel-highlight', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.current!.addLayer({
+        id: 'tapped-parcel-highlight-fill',
+        type: 'fill',
+        source: 'tapped-parcel-highlight',
+        paint: { 'fill-color': '#22d3ee', 'fill-opacity': 0.2 },
+      });
+      map.current!.addLayer({
+        id: 'tapped-parcel-highlight-halo',
+        type: 'line',
+        source: 'tapped-parcel-highlight',
+        paint: {
+          'line-color': '#22d3ee',
+          'line-width': 8,
+          'line-opacity': 0.5,
+          'line-blur': 1.5,
+        },
+      });
+      map.current!.addLayer({
+        id: 'tapped-parcel-highlight-line',
+        type: 'line',
+        source: 'tapped-parcel-highlight',
+        paint: { 'line-color': '#22d3ee', 'line-width': 3.5 },
       });
 
       // Merged boundary layer
