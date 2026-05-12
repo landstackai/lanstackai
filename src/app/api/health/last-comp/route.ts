@@ -36,9 +36,8 @@ export async function GET(req: NextRequest) {
     .select(
       'id, created_at, property_name, county, state, acres, ' +
       'latitude, longitude, parcel_id, ' +
-      'grantor, grantee, owner_name, ' +
+      'grantor, grantee, ' +
       'address, sale_price, sale_date, ' +
-      'location_confidence, boundary_warning, ' +
       'description'
     )
     .order('created_at', { ascending: false })
