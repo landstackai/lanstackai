@@ -613,6 +613,131 @@ export default function ImportPage() {
     }
   };
 
+  // Chunked PDF extraction for large appraisal reports. Splits images into
+  // 5-page batches, runs AI extraction on each separately, accumulates the
+  // unique comps, dedupes, then runs browser auto-locate on each.
+  //
+  // Why: GPT-4o vision has an input token budget that ~5 high-res images fits
+  // comfortably but 20+ images blows past, returning "no comps" silently.
+  // Chunking guarantees each call has enough budget to actually read the
+  // pages it's given.
+  const extractFromChunkedPdf = async (file: File, images: string[]) => {
+    const CHUNK_SIZE = 5;
+    const chunks: string[][] = [];
+    for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+      chunks.push(images.slice(i, i + CHUNK_SIZE));
+    }
+
+    // Show upload as one user message
+    const userMessage: Message = {
+      role: 'user',
+      content: `[Document uploaded]\nUploaded: ${file.name} (${images.length} pages, processing ${chunks.length} chunks)`,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, userMessage]);
+
+    const allComps: any[] = [];
+    let errorCount = 0;
+
+    for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+      const startPage = chunkIdx * CHUNK_SIZE + 1;
+      const endPage = Math.min((chunkIdx + 1) * CHUNK_SIZE, images.length);
+      const toastId = `chunk-${chunkIdx}`;
+      toast.loading(`Extracting comps from pages ${startPage}-${endPage} of ${images.length}…`, { id: toastId });
+
+      try {
+        const response = await fetch('/api/import-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{
+              role: 'user',
+              content: `[Document uploaded]\nExtract any comparable land sales visible on these pages. This is part ${chunkIdx + 1} of ${chunks.length} of a multi-page appraisal report.`,
+            }],
+            images: chunks[chunkIdx],
+          }),
+        });
+        toast.dismiss(toastId);
+
+        if (!response.ok) {
+          errorCount++;
+          console.warn(`Chunk ${chunkIdx + 1} HTTP ${response.status}`);
+          continue;
+        }
+        const data = await response.json();
+        if (Array.isArray(data.comps) && data.comps.length > 0) {
+          console.log(`[chunked] pages ${startPage}-${endPage}: ${data.comps.length} comps`);
+          allComps.push(...data.comps);
+        }
+      } catch (e: any) {
+        toast.dismiss(toastId);
+        errorCount++;
+        console.error(`Chunk ${chunkIdx + 1} threw:`, e);
+      }
+    }
+
+    // Deduplicate by (property_name + sale_date + sale_price) — these together
+    // uniquely identify a sale even if AI extracted it from overlapping pages.
+    const seen = new Set<string>();
+    const dedupedComps = allComps.filter((c) => {
+      const key = `${(c.property_name || '').toLowerCase().trim()}|${c.sale_date || ''}|${c.sale_price || 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (dedupedComps.length < allComps.length) {
+      console.log(`[chunked] deduped: ${allComps.length} raw → ${dedupedComps.length} unique`);
+    }
+
+    // Run browser auto-locate for each unique comp (overrides any AI-guessed
+    // coords for comps that don't have explicit "Geographic Location" fields).
+    for (let i = 0; i < dedupedComps.length; i++) {
+      const c = dedupedComps[i];
+      // Skip if comp already has explicit coords (from "Geographic Location" field)
+      if (c.latitude != null && c.longitude != null) {
+        console.log(`[chunked] ${c.property_name}: using explicit doc coords (${c.latitude}, ${c.longitude})`);
+        continue;
+      }
+      try {
+        const located = await autoLocateInBrowser(c);
+        if (located) {
+          dedupedComps[i] = {
+            ...c,
+            latitude: located.latitude,
+            longitude: located.longitude,
+            parcel_id: located.parcel_id ?? c.parcel_id,
+            geometry: located.geometry,
+            _auto_located_confidence: located.match_confidence,
+          };
+        }
+      } catch (e) {
+        console.error(`[chunked] autoLocate failed for ${c.property_name}:`, e);
+      }
+    }
+
+    // Build summary message
+    const summary = dedupedComps.length === 0
+      ? errorCount > 0
+        ? `Extraction failed for ${errorCount} of ${chunks.length} chunks. No comps recovered.`
+        : `No comparable sales found in this document.`
+      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}.`;
+
+    const assistantMessage: Message = {
+      role: 'assistant',
+      content: summary,
+      comps: dedupedComps,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, assistantMessage]);
+
+    if (dedupedComps.length > 0) {
+      setPendingComps(prev => [...prev, ...dedupedComps]);
+      toast.success(`Found ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'}`, { duration: 4000 });
+    } else {
+      toast.error('No comps extracted from this document');
+    }
+  };
+
   const handleFileUpload = async (file: File) => {
     if (!file) return;
     setLoading(true);
@@ -622,10 +747,19 @@ export default function ImportPage() {
       // Images (jpg/png): pass straight through as a single-image array.
       if (file.type === 'application/pdf') {
         toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
-        const images = await pdfToImages(file, { scale: 1.0, maxPages: 15 });
+        // Higher quality now that we chunk — no token-budget worry per call
+        const images = await pdfToImages(file, { scale: 1.5, maxPages: 60 });
         toast.dismiss('pdf-render');
         if (images.length === 0) {
           toast.error('Could not render PDF');
+          return;
+        }
+        // For PDFs with >5 pages: chunked extraction (5 pages per AI call,
+        // accumulate + dedupe comps from each chunk). Single-shot extraction
+        // hits GPT-4o's input limit on large appraisal reports (20+ pages)
+        // and returns "no comps" even when comps exist.
+        if (images.length > 5) {
+          await extractFromChunkedPdf(file, images);
           return;
         }
         await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images);
