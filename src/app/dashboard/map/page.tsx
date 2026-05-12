@@ -2056,59 +2056,102 @@ export default function MapPage() {
     }
   }, [ownerSearchQuery]);
 
+  // Expand TX-specific road abbreviations into their full names. Mapbox / OSM
+  // data is inconsistent about which form is indexed, so we generate variants:
+  //   "CR 2875"  → also "County Road 2875"
+  //   "FM 3176"  → also "Farm to Market 3176"
+  //   "RR 100"   → also "Ranch Road 100"
+  //   "Hwy 90"   → also "US Highway 90"
+  //   "County Rd 2875" → also "CR 2875"
+  // Tries each variant in order until Mapbox returns a usable result.
+  const expandTxRoadVariants = (query: string): string[] => {
+    const variants = new Set<string>([query]);
+    const subs: Array<[RegExp, string]> = [
+      [/\bCR\b\.?\s*(\d+)/i, 'County Road $1'],
+      [/\bCounty\s+Rd\b\.?\s*(\d+)/i, 'CR $1'],
+      [/\bCounty\s+Road\b\s*(\d+)/i, 'CR $1'],
+      [/\bFM\b\.?\s*(\d+)/i, 'Farm to Market $1'],
+      [/\bF\.?M\.?\b\s*(\d+)/i, 'Farm to Market $1'],
+      [/\bRR\b\.?\s*(\d+)/i, 'Ranch Road $1'],
+      [/\bRanch\s+Rd\b\.?\s*(\d+)/i, 'RR $1'],
+      [/\bRanch\s+Road\b\s*(\d+)/i, 'RR $1'],
+      [/\bRM\b\.?\s*(\d+)/i, 'Ranch to Market $1'],
+      [/\bPR\b\.?\s*(\d+)/i, 'Private Road $1'],
+      [/\bHwy\b\.?\s*(\d+)/i, 'US Highway $1'],
+      [/\bHighway\b\s*(\d+)/i, 'Hwy $1'],
+      [/\bUS\b\s+(\d+)/i, 'US Highway $1'],
+      [/\bSH\b\.?\s*(\d+)/i, 'State Highway $1'],
+      [/\bIH\b\.?\s*(\d+)/i, 'Interstate $1'],
+    ];
+    for (const [re, replacement] of subs) {
+      if (re.test(query)) {
+        variants.add(query.replace(re, replacement));
+      }
+    }
+    return Array.from(variants);
+  };
+
   // Geocode a place name via Mapbox forward geocoding and fly the map there.
   // Texas-biased: includes "Texas" in the query and uses a TX bounding box so
   // rural roads and city streets resolve to the TX instance, not (say) the
   // Brummett Road in California.
   //
+  // Tries multiple query variants (CR ↔ County Road, FM ↔ Farm to Market,
+  // etc.) since Mapbox's road index is inconsistent about TX-specific
+  // abbreviations.
+  //
   // Returns true if the fly succeeded, false if no usable result — so the
   // caller can fall through to AI for ambiguous queries.
   const flyToPlace = useCallback(async (name: string): Promise<boolean> => {
-    try {
-      // Append ", Texas" if not already present — this dramatically improves
-      // rural-address geocoding accuracy
-      const queryWithState = /\b(tx|texas)\b/i.test(name) ? name : `${name}, Texas`;
-      // TX bounding box (approximate): SW -107, 25.5  NE -93, 36.5
-      const url =
-        `https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(queryWithState)}` +
-        `&access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}` +
-        `&limit=1&country=us&bbox=-107,25.5,-93,36.5`;
-      const res = await fetch(url);
-      if (!res.ok) return false;
-      const json = await res.json();
-      const f = json.features?.[0];
-      const coords = f?.geometry?.coordinates;
-      if (!Array.isArray(coords) || coords.length < 2 || !map.current) return false;
-      const ftype = f.properties?.feature_type;
-      // Tighter zoom for addresses (street level), looser for places (town/county)
-      const zoom = ftype === 'address' ? 16 : ftype === 'place' ? 11 : ftype === 'street' ? 15 : 13;
-      map.current.flyTo({ center: [coords[0], coords[1]], zoom, duration: 1200 });
+    const variants = expandTxRoadVariants(name);
+    for (const variant of variants) {
+      try {
+        const queryWithState = /\b(tx|texas)\b/i.test(variant) ? variant : `${variant}, Texas`;
+        // TX bounding box (approximate): SW -107, 25.5  NE -93, 36.5
+        const url =
+          `https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(queryWithState)}` +
+          `&access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}` +
+          `&limit=1&country=us&bbox=-107,25.5,-93,36.5`;
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const json = await res.json();
+        const f = json.features?.[0];
+        const coords = f?.geometry?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2 || !map.current) continue;
+        const ftype = f.properties?.feature_type;
+        const zoom = ftype === 'address' ? 16 : ftype === 'place' ? 11 : ftype === 'street' ? 15 : 13;
+        map.current.flyTo({ center: [coords[0], coords[1]], zoom, duration: 1200 });
 
-      // After fly, also try to highlight the parcel at the destination — gives
-      // a visual anchor so users see which property they landed on. Best-effort;
-      // failures are silent (TxGIO may be slow / point may be on a road).
-      if (zoom >= 15) {
-        setTimeout(async () => {
-          try {
-            const parcelRes = await fetch(`/api/parcel?lat=${coords[1]}&lng=${coords[0]}`);
-            if (parcelRes.ok) {
-              const parcel = await parcelRes.json();
-              if (parcel && parcel.parcel_id && parcel.geometry) {
-                setTappedParcel({
-                  ...parcel,
-                  latitude: coords[1],
-                  longitude: coords[0],
-                });
-                setSheetMode('parcel');
+        if (variant !== name) {
+          console.log(`[flyToPlace] resolved "${name}" via variant "${variant}"`);
+        }
+
+        // After fly, try to highlight the parcel at the destination if zoomed
+        // close enough. Best-effort — TxGIO may be slow / point may be on a road.
+        if (zoom >= 15) {
+          setTimeout(async () => {
+            try {
+              const parcelRes = await fetch(`/api/parcel?lat=${coords[1]}&lng=${coords[0]}`);
+              if (parcelRes.ok) {
+                const parcel = await parcelRes.json();
+                if (parcel && parcel.parcel_id && parcel.geometry) {
+                  setTappedParcel({
+                    ...parcel,
+                    latitude: coords[1],
+                    longitude: coords[0],
+                  });
+                  setSheetMode('parcel');
+                }
               }
-            }
-          } catch {}
-        }, 1200);
+            } catch {}
+          }, 1200);
+        }
+        return true;
+      } catch {
+        continue;
       }
-      return true;
-    } catch {
-      return false;
     }
+    return false;
   }, []);
 
   // Heuristic: does this query look like an address or street name?
@@ -2124,8 +2167,12 @@ export default function MapPage() {
     if (/^\d+\s+[A-Za-z]/.test(trimmed)) return true;
     // ZIP code
     if (/\b\d{5}(-\d{4})?\b/.test(trimmed)) return true;
-    // TX-specific road type abbreviations (with word boundaries / dots)
+    // TX-specific road type abbreviations and full forms (with word boundaries)
     if (/\b(FM|CR|RR|RM|PR|US|SH|IH|I-\d+|Hwy|Highway|Loop)\.?\s*\d+/i.test(trimmed)) return true;
+    // Verbose road forms ("County Rd 2875", "Ranch Road 100", "Farm to Market 3176")
+    if (/\bCounty\s+(Rd|Road)\b\.?\s*\d+/i.test(trimmed)) return true;
+    if (/\bRanch\s+(Rd|Road)\b\s*\d+/i.test(trimmed)) return true;
+    if (/\bFarm\s+to\s+Market\b\s*\d+/i.test(trimmed)) return true;
     // Common road suffix words
     if (/\b(Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Lane|Ln|Boulevard|Blvd|Parkway|Pkwy|Trail|Trl|Court|Ct|Way)\b/i.test(trimmed)) return true;
     return false;
