@@ -282,15 +282,16 @@ export async function POST(request: NextRequest) {
     //   try { comps = await geocodeComps(comps); } catch (e) {}
     // }
 
-    // Auto-locate is now done BROWSER-SIDE in the import page (see
+    // Auto-locate is done BROWSER-SIDE in the import page (see
     // autoLocateInBrowser in src/app/dashboard/import/page.tsx). The browser
     // can hit our cached /api/parcels-by-owner endpoint in <200ms, whereas
-    // Vercel function-to-self calls bypass edge cache and take 15-30s.
+    // Vercel function-to-self calls bypass edge cache and take 15-30s+.
     //
-    // Server-side autoLocate is kept here as a fallback ONLY for non-browser
-    // import paths (programmatic/API imports). If you're seeing slow imports,
-    // it's this block. Set SKIP_SERVER_AUTOLOCATE=1 to disable.
-    if (Array.isArray(comps) && comps.length > 0 && process.env.SKIP_SERVER_AUTOLOCATE !== '1') {
+    // Server-side autoLocate is DEFAULT-OFF — it was making imports take
+    // 60-120s on slow TxGIO afternoons, exceeding Vercel function timeout
+    // and producing "no comps" errors. Opt in with RUN_SERVER_AUTOLOCATE=1
+    // ONLY if you have a reliable fast TxGIO connection.
+    if (Array.isArray(comps) && comps.length > 0 && process.env.RUN_SERVER_AUTOLOCATE === '1') {
       const aerialImage = Array.isArray(images) && images.length > 0 ? images[0] : null;
       for (let i = 0; i < comps.length; i++) {
         const c = comps[i];
