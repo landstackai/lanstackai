@@ -419,33 +419,43 @@ async function fetchOwnerParcels(
   const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
   if (allTokens.length === 0) return [];
 
-  // Use our own /api/parcels-by-owner endpoint — it has Vercel edge cache
-  // (24h), so 2nd+ call to the same area is <100ms even when TxGIO is slow.
-  // Direct TxGIO calls bypass cache and routinely time out on slow TxGIO days.
-  //
-  // Use the public alias URL (not VERCEL_URL which is the deployment-specific
-  // URL that sits behind Vercel auth in some configurations).
-  const aliasUrl = process.env.NEXT_PUBLIC_BASE_URL
-    || (process.env.VERCEL_ENV === 'production' ? 'https://lanstackai.vercel.app' : null)
-    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-
-  // Query with ONLY the longest single token. Multi-LIKE TxGIO queries are
-  // slow (each LIKE = a substring scan, multi-token can time out). Single-
-  // LIKE queries return in 2-15s. Plus the cache key is stable across name
-  // variations: "Jesse M. & Tracy B. Lindsey" and "Lindsey Jesse M IV" both
-  // query "LINDSEY" → same cache hit, same broad result set.
-  //
-  // We then filter the result set client-side to require ALL tokens (JESSE,
-  // TRACY, LINDSEY), narrowing to the actual right records.
+  // Query TxGIO DIRECTLY with a SINGLE LIKE clause on the longest token.
+  // - Direct TxGIO avoids the function-to-self loopback issue (Vercel
+  //   functions calling their own public URL don't hit edge cache, they
+  //   go to cold origin and time out on slow TxGIO).
+  // - Single LIKE keeps the query fast (multi-LIKE WHERE clauses time out
+  //   on busy TxGIO afternoons).
+  // - We filter the rest of the tokens client-side.
   const longestToken = [...allTokens].sort((a, b) => b.length - a.length)[0];
-  const url = `${aliasUrl}/api/parcels-by-owner?q=${encodeURIComponent(longestToken)}&county=${encodeURIComponent(countyParam)}`;
+
+  const counties = countyParam
+    .split(/[,&]/)
+    .map((c) => c.replace(/['\\]/g, '').replace(/\bcount(y|ies)\b/gi, '').trim().toUpperCase())
+    .filter((c) => c.length > 0);
+
+  const countyClause = counties.length > 0
+    ? ' AND (' + counties.map((c) =>
+        `UPPER(county) = '${c}' OR UPPER(county) = '${c} COUNTY'`
+      ).join(' OR ') + ')'
+    : '';
+  const where = `UPPER(owner_name) LIKE '%${longestToken.replace(/['\\]/g, '')}%'${countyClause}`;
+
+  const params = new URLSearchParams({
+    where,
+    outFields: 'prop_id,owner_name,gis_area,county',
+    returnGeometry: 'true',
+    outSR: '4326',
+    geometryPrecision: '6',
+    resultRecordCount: '200',
+    f: 'geojson',
+  });
 
   try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(25000),
+    const res = await fetch(`${TXGIO_QUERY}?${params}`, {
+      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
-      console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}" via ${aliasUrl}`);
+      console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}"`);
       return [];
     }
     const data = await res.json();
@@ -460,7 +470,7 @@ async function fetchOwnerParcels(
     console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} raw, ${tight.length} tight (query=${longestToken}, tokens=${JSON.stringify(allTokens)})`);
     return tight;
   } catch (e: any) {
-    console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message} (${aliasUrl})`);
+    console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message}`);
     return [];
   }
 }
