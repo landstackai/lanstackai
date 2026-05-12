@@ -1,0 +1,92 @@
+import { NextRequest, NextResponse } from 'next/server';
+
+/**
+ * GET /api/parcels-by-owner?q=Grundhoefer+Farms
+ *
+ * Search TxGIO statewide TX parcels for ones whose owner_name matches the
+ * query. Wildcard / partial match (case-insensitive), capped at 200 results
+ * to keep the map readable.
+ *
+ * Returns GeoJSON FeatureCollection with each match's geometry and a
+ * properties block { prop_id, owner_name, gis_area, county }.
+ *
+ * Slow: TxGIO sometimes takes 5-20s for owner-name LIKE queries. Cache the
+ * response for 1 hour client-side, 24h on Vercel edge — owners and parcels
+ * change at most monthly.
+ */
+
+export const maxDuration = 30;
+
+const TXGIO_QUERY =
+  'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const q = (searchParams.get('q') || '').trim();
+  if (q.length < 3) {
+    return NextResponse.json(
+      { error: 'q (query) must be at least 3 characters' },
+      { status: 400 }
+    );
+  }
+
+  // Sanitize for SQL-LIKE — strip single quotes and back-slashes. ArcGIS uses
+  // PostgreSQL-style LIKE under the hood. Wildcards on both ends so substring
+  // matches work ("Grundhoefer" matches "Grundhoefer Farms, Ltd").
+  const safe = q.replace(/['\\]/g, '').toUpperCase();
+  const where = `UPPER(owner_name) LIKE '%${safe}%'`;
+
+  const params = new URLSearchParams({
+    where,
+    outFields: 'prop_id,owner_name,gis_area,county',
+    returnGeometry: 'true',
+    outSR: '4326',
+    geometryPrecision: '6',
+    resultRecordCount: '200',
+    f: 'geojson',
+  });
+
+  async function fetchOnce(timeoutMs: number) {
+    const upstream = await fetch(`${TXGIO_QUERY}?${params}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!upstream.ok) throw new Error(`Upstream ${upstream.status}`);
+    return upstream.json();
+  }
+
+  let data: any = null;
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      data = await fetchOnce(attempt === 0 ? 18000 : 24000);
+      break;
+    } catch (e: any) {
+      lastErr = e;
+    }
+  }
+
+  if (!data) {
+    return NextResponse.json(
+      {
+        error: 'TxGIO upstream failed',
+        detail: lastErr?.message || 'timeout',
+        query: q,
+      },
+      { status: 502 }
+    );
+  }
+
+  const count = Array.isArray(data?.features) ? data.features.length : 0;
+  return new NextResponse(JSON.stringify({
+    ...data,
+    query: q,
+    match_count: count,
+    truncated: count >= 200,
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/geo+json',
+      'Cache-Control': 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400',
+    },
+  });
+}

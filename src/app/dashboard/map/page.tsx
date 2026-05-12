@@ -72,6 +72,12 @@ export default function MapPage() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [askingAi, setAskingAi] = useState(false);
+
+  // Parcel-owner search across TxGIO statewide.
+  const [ownerSearchQuery, setOwnerSearchQuery] = useState('');
+  const [ownerSearching, setOwnerSearching] = useState(false);
+  const [ownerSearchCount, setOwnerSearchCount] = useState<number | null>(null);
+  const [ownerSearchTruncated, setOwnerSearchTruncated] = useState(false);
   // When set, only these comp ids are emphasized; non-matching markers dim.
   const [aiHighlightedCompIds, setAiHighlightedCompIds] = useState<Set<string> | null>(null);
   const [aiResultMessage, setAiResultMessage] = useState<string | null>(null);
@@ -487,6 +493,37 @@ export default function MapPage() {
         type: 'line',
         source: 'selected-parcels',
         paint: { 'line-color': '#34d399', 'line-width': 4 },
+      });
+
+      // Owner-search results. When the user searches "Smith Family Ranch"
+      // we light up every parcel TxGIO returns as a match. Magenta so it
+      // stays distinct from cyan tap, green selection, red saved comps.
+      map.current!.addSource('owner-search-results', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.current!.addLayer({
+        id: 'owner-search-fill',
+        type: 'fill',
+        source: 'owner-search-results',
+        paint: { 'fill-color': '#e879f9', 'fill-opacity': 0.18 },
+      });
+      map.current!.addLayer({
+        id: 'owner-search-halo',
+        type: 'line',
+        source: 'owner-search-results',
+        paint: {
+          'line-color': '#e879f9',
+          'line-width': 9,
+          'line-opacity': 0.45,
+          'line-blur': 1.5,
+        },
+      });
+      map.current!.addLayer({
+        id: 'owner-search-line',
+        type: 'line',
+        source: 'owner-search-results',
+        paint: { 'line-color': '#e879f9', 'line-width': 3.5 },
       });
 
       // Single-tap parcel highlight. When the user clicks a parcel to view
@@ -1946,6 +1983,74 @@ export default function MapPage() {
     setAiResultMessage(null);
   }, []);
 
+  // Clear owner-search highlights + state. Called from the X button, when
+  // starting a new search, or when starting a different workflow.
+  const clearOwnerSearch = useCallback(() => {
+    setOwnerSearchQuery('');
+    setOwnerSearchCount(null);
+    setOwnerSearchTruncated(false);
+    if (map.current && mapLoaded) {
+      try {
+        const src = map.current.getSource('owner-search-results') as mapboxgl.GeoJSONSource | undefined;
+        if (src) src.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+  }, [mapLoaded]);
+
+  // Query TxGIO for all parcels with a matching owner_name, light them up
+  // on the map, and zoom out to fit them all if there are results.
+  const searchOwners = useCallback(async () => {
+    const q = ownerSearchQuery.trim();
+    if (q.length < 3) {
+      toast.error('Enter at least 3 characters');
+      return;
+    }
+    setOwnerSearching(true);
+    try {
+      const res = await fetch(`/api/parcels-by-owner?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data?.error || 'Owner search failed');
+        return;
+      }
+      const features = Array.isArray(data?.features) ? data.features : [];
+      const src = map.current?.getSource('owner-search-results') as mapboxgl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData({ type: 'FeatureCollection', features });
+      }
+      setOwnerSearchCount(features.length);
+      setOwnerSearchTruncated(Boolean(data?.truncated));
+
+      if (features.length === 0) {
+        toast(`No parcels found for "${q}"`, { icon: '🔍', duration: 3000 });
+        return;
+      }
+
+      // Fit map to result bounding box so the user can see all matches
+      try {
+        // @ts-expect-error — turf v6.5 .d.ts not exposed
+        const turf = (await import('@turf/turf')) as any;
+        const fc = { type: 'FeatureCollection', features };
+        const bbox = turf.bbox(fc) as [number, number, number, number];
+        if (bbox.every(Number.isFinite) && map.current) {
+          map.current.fitBounds(
+            [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+            { padding: 80, duration: 1200, maxZoom: 15 }
+          );
+        }
+      } catch {}
+
+      toast.success(
+        `${features.length} parcel${features.length === 1 ? '' : 's'} found${data?.truncated ? ' (showing first 200)' : ''}`,
+        { duration: 3000 }
+      );
+    } catch (e: any) {
+      toast.error(e?.message || 'Owner search failed');
+    } finally {
+      setOwnerSearching(false);
+    }
+  }, [ownerSearchQuery]);
+
   // Geocode a place name via Mapbox forward geocoding and fly the map there.
   // Used when the AI search detects a "location" intent rather than a filter.
   const flyToPlace = useCallback(async (name: string) => {
@@ -2540,6 +2645,60 @@ export default function MapPage() {
                   onClick={clearAiSearch}
                   className="text-purple-300/80 hover:text-purple-200 flex-shrink-0"
                   title="Clear filter"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Owner search — find every TX parcel matching an owner name */}
+          <div className="relative mt-2">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-fuchsia-300 pointer-events-none" />
+            <input
+              type="text"
+              value={ownerSearchQuery}
+              onChange={(e) => setOwnerSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  searchOwners();
+                }
+              }}
+              placeholder="Find parcels by owner (e.g. Grundhoefer Farms)"
+              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-fuchsia-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-fuchsia-400/30 transition-colors shadow-lg"
+            />
+            {(ownerSearchQuery || ownerSearchCount !== null) && (
+              <button
+                onClick={clearOwnerSearch}
+                title="Clear owner search"
+                className="absolute right-[5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+              >
+                <X size={12} />
+              </button>
+            )}
+            <button
+              onClick={searchOwners}
+              disabled={ownerSearching || ownerSearchQuery.trim().length < 3}
+              title="Search parcels by owner name"
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-fuchsia-500/25 hover:bg-fuchsia-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-fuchsia-400/40 hover:border-fuchsia-400 rounded-lg text-[11px] font-bold text-fuchsia-100 transition-colors flex items-center gap-1"
+            >
+              <Search size={11} />
+              {ownerSearching ? '…' : 'Find'}
+            </button>
+            {ownerSearchCount !== null && (
+              <div className="absolute top-full mt-1 left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-fuchsia-200 truncate">
+                  {ownerSearchCount === 0
+                    ? `No matches for "${ownerSearchQuery}"`
+                    : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched${ownerSearchTruncated ? ' (showing first 200)' : ''}`}
+                </p>
+                <button
+                  onClick={clearOwnerSearch}
+                  className="text-fuchsia-300/80 hover:text-fuchsia-200 flex-shrink-0"
+                  title="Clear search"
                 >
                   <X size={12} />
                 </button>
