@@ -241,10 +241,63 @@ export default function MapPage() {
     map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
     map.current.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 
-    // Drawing tools (polygon, line) — UI is custom; no built-in controls
+    // Drawing tools (polygon, line) — UI is custom; no built-in controls.
+    // Custom styles override MapboxDraw's default orange palette with the
+    // app's sage green, and use thicker strokes so the in-progress polygon
+    // is easy to see on satellite imagery.
+    const DRAW_GREEN = '#34d399';
+    const DRAW_GREEN_FILL_OPACITY = 0.22;
+    const DRAW_LINE_WIDTH = 4;
+    const DRAW_VERTEX_RADIUS = 7;
     drawRef.current = new MapboxDraw({
       displayControlsDefault: false,
       defaultMode: 'simple_select',
+      styles: [
+        // Polygon fill — active (being drawn/edited) AND inactive (just drawn)
+        {
+          id: 'gl-draw-polygon-fill',
+          type: 'fill',
+          filter: ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+          paint: { 'fill-color': DRAW_GREEN, 'fill-outline-color': DRAW_GREEN, 'fill-opacity': DRAW_GREEN_FILL_OPACITY },
+        },
+        // Polygon outer ring stroke
+        {
+          id: 'gl-draw-polygon-stroke',
+          type: 'line',
+          filter: ['all', ['==', '$type', 'Polygon'], ['!=', 'mode', 'static']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': DRAW_GREEN, 'line-width': DRAW_LINE_WIDTH },
+        },
+        // The "rubber band" line that follows the cursor while drawing
+        {
+          id: 'gl-draw-line',
+          type: 'line',
+          filter: ['all', ['==', '$type', 'LineString'], ['!=', 'mode', 'static']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': DRAW_GREEN, 'line-width': DRAW_LINE_WIDTH, 'line-dasharray': [2, 2] },
+        },
+        // Vertex halo (white ring around each corner — improves contrast on satellite)
+        {
+          id: 'gl-draw-polygon-and-line-vertex-stroke',
+          type: 'circle',
+          filter: ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point'], ['!=', 'mode', 'static']],
+          paint: { 'circle-radius': DRAW_VERTEX_RADIUS + 2, 'circle-color': '#ffffff' },
+        },
+        // Vertex dot (filled green)
+        {
+          id: 'gl-draw-polygon-and-line-vertex',
+          type: 'circle',
+          filter: ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point'], ['!=', 'mode', 'static']],
+          paint: { 'circle-radius': DRAW_VERTEX_RADIUS, 'circle-color': DRAW_GREEN },
+        },
+        // Midpoint marker (smaller, hollow — clicking these adds a new vertex)
+        {
+          id: 'gl-draw-polygon-midpoint',
+          type: 'circle',
+          filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'midpoint']],
+          paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-color': DRAW_GREEN, 'circle-stroke-width': 2 },
+        },
+      ],
     });
     map.current.addControl(drawRef.current as unknown as mapboxgl.IControl);
 
@@ -374,7 +427,7 @@ export default function MapPage() {
         id: 'comp-boundary-fill',
         type: 'fill',
         source: 'comp-boundaries',
-        paint: { 'fill-color': '#ef4444', 'fill-opacity': 0.12 },
+        paint: { 'fill-color': '#ef4444', 'fill-opacity': 0.14 },
       });
       // Halo (wider, semi-transparent red — gives the line a glow on satellite)
       map.current!.addLayer({
@@ -383,8 +436,8 @@ export default function MapPage() {
         source: 'comp-boundaries',
         paint: {
           'line-color': '#ef4444',
-          'line-width': 6,
-          'line-opacity': 0.35,
+          'line-width': 9,
+          'line-opacity': 0.4,
           'line-blur': 1.5,
         },
       });
@@ -392,7 +445,7 @@ export default function MapPage() {
         id: 'comp-boundary-line',
         type: 'line',
         source: 'comp-boundaries',
-        paint: { 'line-color': '#ef4444', 'line-width': 3, 'line-opacity': 1 },
+        paint: { 'line-color': '#ef4444', 'line-width': 5, 'line-opacity': 1 },
       });
 
       // Selected parcels layer
@@ -404,13 +457,13 @@ export default function MapPage() {
         id: 'selected-parcel-fill',
         type: 'fill',
         source: 'selected-parcels',
-        paint: { 'fill-color': '#34d399', 'fill-opacity': 0.12 },
+        paint: { 'fill-color': '#34d399', 'fill-opacity': 0.18 },
       });
       map.current!.addLayer({
         id: 'selected-parcel-outline',
         type: 'line',
         source: 'selected-parcels',
-        paint: { 'line-color': '#34d399', 'line-width': 2 },
+        paint: { 'line-color': '#34d399', 'line-width': 4 },
       });
 
       // Merged boundary layer
@@ -422,13 +475,26 @@ export default function MapPage() {
         id: 'merged-fill',
         type: 'fill',
         source: 'merged-boundary',
-        paint: { 'fill-color': '#34d399', 'fill-opacity': 0.2 },
+        paint: { 'fill-color': '#34d399', 'fill-opacity': 0.22 },
+      });
+      // Halo for consistency with saved (red) boundaries — adds a soft green
+      // glow that makes the boundary readable on busy satellite imagery.
+      map.current!.addLayer({
+        id: 'merged-halo',
+        type: 'line',
+        source: 'merged-boundary',
+        paint: {
+          'line-color': '#34d399',
+          'line-width': 9,
+          'line-opacity': 0.4,
+          'line-blur': 1.5,
+        },
       });
       map.current!.addLayer({
         id: 'merged-outline',
         type: 'line',
         source: 'merged-boundary',
-        paint: { 'line-color': '#34d399', 'line-width': 3 },
+        paint: { 'line-color': '#34d399', 'line-width': 5 },
       });
 
       setMapLoaded(true);
