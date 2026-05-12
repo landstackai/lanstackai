@@ -438,10 +438,11 @@ async function fetchOwnerParcels(
   const url = `${aliasUrl}/api/parcels-by-owner?q=${encodeURIComponent(fullQuery)}&county=${encodeURIComponent(countyParam)}`;
 
   try {
-    // 8s timeout fits Hobby plan's 10s function budget. After first call
-    // populates the edge cache, subsequent calls return in <100ms.
+    // 25s timeout — fits comfortably in Pro plan's 60s function budget.
+    // First call to a new area pays TxGIO's full latency (5-25s); subsequent
+    // calls return in <100ms from edge cache.
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(25000),
     });
     if (!res.ok) {
       console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}" via ${aliasUrl}`);

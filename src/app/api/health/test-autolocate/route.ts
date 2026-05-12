@@ -11,7 +11,7 @@ import { autoLocateFromMetadata } from '@/lib/utils/autoLocate';
  * Captures console output so we can see which phase fired.
  */
 
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
