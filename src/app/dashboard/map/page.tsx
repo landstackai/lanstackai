@@ -430,26 +430,34 @@ export default function MapPage() {
         }
       }
 
+      let lookupError: string | null = null;
       if (!parcel) {
         // TxGIO can be slow (10-25s). Show a loading toast so the click
         // doesn't feel dead, and dismiss it whether the request succeeds or fails.
         const loadingId = toast.loading('Looking up parcel…', { duration: 30000 });
         try {
           const res = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data && data.parcel_id) {
-              parcel = data;
-              parcel!.latitude = lat;
-              parcel!.longitude = lng;
-            }
+          const data = await res.json().catch(() => null);
+          if (res.ok && data && data.parcel_id) {
+            parcel = data;
+            parcel!.latitude = lat;
+            parcel!.longitude = lng;
+          } else if (data?.reason) {
+            lookupError = data.reason;
           }
-        } catch {}
+        } catch (e: any) {
+          lookupError = e?.message || 'network';
+        }
         toast.dismiss(loadingId);
       }
 
       if (!parcel) {
-        toast('No parcel data at this point', { icon: '🗺️', duration: 1800 });
+        if (lookupError && lookupError !== 'no_match') {
+          console.warn('[parcel-click] lookup failed:', lookupError);
+          toast(`Parcel lookup failed: ${lookupError}`, { icon: '⚠️', duration: 4000 });
+        } else {
+          toast('No parcel data at this point', { icon: '🗺️', duration: 1800 });
+        }
         return;
       }
 

@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// Allow the function to run up to 30s — needed when TxGIO is slow.
+// Note: requires Vercel Pro plan. On Hobby (10s cap) we'll still get
+// timed out at 10s no matter what fetch timeout we set internally.
+export const maxDuration = 30;
+
 const TXGIO_QUERY_URL =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
 
@@ -28,16 +33,18 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'lat/lng or parcel_id required' }, { status: 400 });
   }
 
+  let txGioErr: string | null = null;
   if (lat && lng) {
-    const txgio = await tryTxGIO(parseFloat(lat), parseFloat(lng));
-    if (txgio) {
-      return NextResponse.json(txgio, {
+    const result = await tryTxGIO(parseFloat(lat), parseFloat(lng));
+    if (result.parcel) {
+      return NextResponse.json(result.parcel, {
         headers: {
           // Lat/lng to ~10m precision → cache hits when user re-clicks same spot.
           'Cache-Control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=86400',
         },
       });
     }
+    txGioErr = result.error;
   }
 
   if (REGRID_API_KEY) {
@@ -49,10 +56,13 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  return NextResponse.json({ error: 'No parcel data at this location' }, { status: 404 });
+  return NextResponse.json(
+    { error: 'No parcel data at this location', reason: txGioErr || 'no_match' },
+    { status: 404 }
+  );
 }
 
-async function tryTxGIO(lat: number, lng: number): Promise<Parcel | null> {
+async function tryTxGIO(lat: number, lng: number): Promise<{ parcel: Parcel | null; error: string | null }> {
   // ~10m envelope around the click point
   const d = 0.0001;
   const params = new URLSearchParams({
@@ -79,32 +89,37 @@ async function tryTxGIO(lat: number, lng: number): Promise<Parcel | null> {
   }
 
   let data: any = null;
+  let lastErr: string | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      data = await fetchOnce(attempt === 0 ? 25000 : 30000);
+      data = await fetchOnce(attempt === 0 ? 12000 : 14000);
       break;
     } catch (e: any) {
-      if (attempt === 1) console.warn('[api/parcel] TxGIO failed after retry:', e?.message);
+      lastErr = `${e?.name || 'err'}: ${e?.message || 'unknown'}`;
+      if (attempt === 1) console.warn('[api/parcel] TxGIO failed after retry:', lastErr);
     }
   }
-  if (!data) return null;
+  if (!data) return { parcel: null, error: lastErr || 'no_data' };
 
   const f = data.features?.[0];
-  if (!f) return null;
+  if (!f) return { parcel: null, error: 'no_match' };
   const p = f.properties || {};
   const acres = parseFloat(p.gis_area);
   const cleanAddr = (p.situs_addr || '').replace(/[\s,]+/g, '').length === 0 ? null : p.situs_addr;
   const cleanState = (p.situs_stat || '').trim() || 'TX';
   return {
-    parcel_id: p.prop_id || String(f.id || ''),
-    owner_name: p.owner_name || null,
-    acres: Number.isFinite(acres) ? acres : null,
-    address: cleanAddr,
-    county: p.county || null,
-    state: cleanState,
-    latitude: lat,
-    longitude: lng,
-    geometry: f.geometry || null,
+    parcel: {
+      parcel_id: p.prop_id || String(f.id || ''),
+      owner_name: p.owner_name || null,
+      acres: Number.isFinite(acres) ? acres : null,
+      address: cleanAddr,
+      county: p.county || null,
+      state: cleanState,
+      latitude: lat,
+      longitude: lng,
+      geometry: f.geometry || null,
+    },
+    error: null,
   };
 }
 
