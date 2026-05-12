@@ -429,18 +429,18 @@ async function fetchOwnerParcels(
     || (process.env.VERCEL_ENV === 'production' ? 'https://lanstackai.vercel.app' : null)
     || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
 
-  // Build the query: longest token + county. The /api endpoint will then
-  // do its own multi-token AND filtering, returning narrow results.
-  // Actually we pass the FULL owner phrase so the endpoint's multi-token
-  // logic narrows server-side. Endpoint is cached so cost is fine.
-  const fullQuery = allTokens.join(' ');
-
-  const url = `${aliasUrl}/api/parcels-by-owner?q=${encodeURIComponent(fullQuery)}&county=${encodeURIComponent(countyParam)}`;
+  // Query with ONLY the longest single token. Multi-LIKE TxGIO queries are
+  // slow (each LIKE = a substring scan, multi-token can time out). Single-
+  // LIKE queries return in 2-15s. Plus the cache key is stable across name
+  // variations: "Jesse M. & Tracy B. Lindsey" and "Lindsey Jesse M IV" both
+  // query "LINDSEY" → same cache hit, same broad result set.
+  //
+  // We then filter the result set client-side to require ALL tokens (JESSE,
+  // TRACY, LINDSEY), narrowing to the actual right records.
+  const longestToken = [...allTokens].sort((a, b) => b.length - a.length)[0];
+  const url = `${aliasUrl}/api/parcels-by-owner?q=${encodeURIComponent(longestToken)}&county=${encodeURIComponent(countyParam)}`;
 
   try {
-    // 25s timeout — fits comfortably in Pro plan's 60s function budget.
-    // First call to a new area pays TxGIO's full latency (5-25s); subsequent
-    // calls return in <100ms from edge cache.
     const res = await fetch(url, {
       signal: AbortSignal.timeout(25000),
     });
@@ -451,8 +451,14 @@ async function fetchOwnerParcels(
     const data = await res.json();
     const features = Array.isArray(data?.features) ? data.features : [];
 
-    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} parcels (via cached API, tokens=${JSON.stringify(allTokens)})`);
-    return features;
+    // Client-side AND-filter: every token (≥3 chars) must appear in owner_name
+    const tight = features.filter((f: any) => {
+      const own = (f.properties?.owner_name || '').toString().toUpperCase();
+      return allTokens.every((t) => own.includes(t));
+    });
+
+    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} raw, ${tight.length} tight (query=${longestToken}, tokens=${JSON.stringify(allTokens)})`);
+    return tight;
   } catch (e: any) {
     console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message} (${aliasUrl})`);
     return [];
