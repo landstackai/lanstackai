@@ -402,36 +402,65 @@ async function pickClusterByLandmark(
   return best;
 }
 
-// Fetch parcels for a given owner + county set, then return the subset whose
-// owner_name contains every normalized token of the search owner. Extracted
-// as a helper so Phase 1 and Phase 2 of the strategy can reuse it without
-// duplicating fetch/filter code.
+// Fetch parcels for a given owner + county set. Queries TxGIO DIRECTLY
+// (not through our own /api/parcels-by-owner) to avoid the Vercel internal
+// auth wall — when called from a serverless function, VERCEL_URL points at
+// the deployment-specific URL which requires Vercel auth, causing internal
+// fetches to fail silently. Direct TxGIO query has no such issue.
+//
+// Returns the subset whose owner_name contains every normalized token of the
+// search owner (multi-token AND match, order-independent).
 async function fetchOwnerParcels(
-  base: string,
+  _base: string,
   owner: string,
   countyParam: string
 ): Promise<any[]> {
   const normalized = normalizeOwner(owner);
-  const tokens = normalized.split(/\s+/).filter((t) => t.length >= 4);
-  if (tokens.length === 0) return [];
-  const query = tokens.sort((a, b) => b.length - a.length)[0];
+  const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+  if (allTokens.length === 0) return [];
 
-  let features: any[] = [];
+  // Build TxGIO WHERE clause: AND-joined LIKE on each token + county filter
+  const counties = countyParam
+    .split(/[,&]/)
+    .map((c) => c.replace(/['\\]/g, '').replace(/\bcount(y|ies)\b/gi, '').trim().toUpperCase())
+    .filter((c) => c.length > 0);
+
+  const ownerClause = allTokens
+    .map((t) => `UPPER(owner_name) LIKE '%${t.replace(/['\\]/g, '')}%'`)
+    .join(' AND ');
+  const countyClause = counties.length > 0
+    ? ' AND (' + counties.map((c) =>
+        `UPPER(county) = '${c}' OR UPPER(county) = '${c} COUNTY'`
+      ).join(' OR ') + ')'
+    : '';
+  const where = `(${ownerClause})${countyClause}`;
+
+  const params = new URLSearchParams({
+    where,
+    outFields: 'prop_id,owner_name,gis_area,county',
+    returnGeometry: 'true',
+    outSR: '4326',
+    geometryPrecision: '6',
+    resultRecordCount: '200',
+    f: 'geojson',
+  });
+
   try {
-    const url = `${base}/api/parcels-by-owner?q=${encodeURIComponent(query)}&county=${encodeURIComponent(countyParam)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(28000) });
-    if (!res.ok) return [];
+    const res = await fetch(`${TXGIO_QUERY}?${params}`, {
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) {
+      console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}"`);
+      return [];
+    }
     const data = await res.json();
-    features = Array.isArray(data?.features) ? data.features : [];
-  } catch {
+    const features = Array.isArray(data?.features) ? data.features : [];
+    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} parcels (tokens=${JSON.stringify(allTokens)}, counties=${JSON.stringify(counties)})`);
+    return features;
+  } catch (e: any) {
+    console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message}`);
     return [];
   }
-
-  const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
-  return features.filter((f) => {
-    const own = (f.properties?.owner_name || '').toString().toUpperCase();
-    return allTokens.every((t) => own.includes(t));
-  });
 }
 
 // Owner-first strategy. Tries each owner signal (grantee → grantor → property_name)
@@ -477,11 +506,18 @@ async function tryOwnerSearchStrategy(
   // Cache tight matches per owner so Phase 2 (relaxed) doesn't refetch.
   const tightMatchesCache: Map<string, any[]> = new Map();
 
+  console.log(`[autoLocate] tryOwnerSearchStrategy: ${ownerSignals.length} signals, counties=${JSON.stringify(counties)}, target=${acres}ac`);
+
   // ── PHASE 1: Strict tolerance (existing behavior) ────────────────────
   for (const owner of ownerSignals) {
+    console.log(`[autoLocate] Phase 1 trying owner="${owner}"`);
     const tightMatches = await fetchOwnerParcels(base, owner, countyParam);
-    if (tightMatches.length === 0) continue;
+    if (tightMatches.length === 0) {
+      console.log(`[autoLocate] Phase 1: no matches for "${owner}"`);
+      continue;
+    }
     tightMatchesCache.set(owner, tightMatches);
+    console.log(`[autoLocate] Phase 1: ${tightMatches.length} tight matches for "${owner}"`);
 
     // (a) Single-parcel acreage match
     const singleMatches = tightMatches
@@ -549,16 +585,16 @@ async function tryOwnerSearchStrategy(
   }
 
   // ── PHASE 2 (NEW A+B): Relaxed acreage + spatial clustering ──────────
-  // Phase 1 found no strict-tolerance match. For each owner, cluster their
-  // parcels spatially and accept any cluster whose summed acreage is within
-  // 50% of target — wider than Phase 1's 10% tolerance, because TX appraisal
-  // vs CAD acreage routinely diverges by 20-40% (carve-outs, easements, road
-  // exclusions). Disambiguate multiple clusters via landmark proximity.
+  console.log(`[autoLocate] Phase 1 returned null. Starting Phase 2 (relaxed 50% acreage)...`);
   for (const owner of ownerSignals) {
     const tightMatches = tightMatchesCache.get(owner) || [];
-    if (tightMatches.length === 0) continue;
+    if (tightMatches.length === 0) {
+      console.log(`[autoLocate] Phase 2: no cached matches for "${owner}"`);
+      continue;
+    }
 
     const clusters = await clusterParcelsSpatially(tightMatches);
+    console.log(`[autoLocate] Phase 2: "${owner}" → ${clusters.length} clusters: ${clusters.map(c => `${c.totalAcres.toFixed(1)}ac (${c.parcels.length}p)`).join(', ')}`);
     if (clusters.length === 0) continue;
 
     // Find clusters within ±50% of target
