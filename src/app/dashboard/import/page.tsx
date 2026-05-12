@@ -653,6 +653,8 @@ export default function ImportPage() {
 
     const allComps: any[] = [];
     let errorCount = 0;
+    const perChunkCounts: number[] = [];
+    const perChunkMessages: string[] = [];
 
     for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
       const startPage = chunkIdx * STRIDE + 1;
@@ -676,17 +678,26 @@ export default function ImportPage() {
 
         if (!response.ok) {
           errorCount++;
+          perChunkCounts.push(0);
+          perChunkMessages.push(`HTTP ${response.status}`);
           console.warn(`Chunk ${chunkIdx + 1} HTTP ${response.status}`);
           continue;
         }
         const data = await response.json();
-        if (Array.isArray(data.comps) && data.comps.length > 0) {
-          console.log(`[chunked] pages ${startPage}-${endPage}: ${data.comps.length} comps`);
+        const compCount = Array.isArray(data.comps) ? data.comps.length : 0;
+        perChunkCounts.push(compCount);
+        perChunkMessages.push(data.message?.slice(0, 80) || '');
+        if (compCount > 0) {
+          console.log(`[chunked] pages ${startPage}-${endPage}: ${compCount} comps`);
           allComps.push(...data.comps);
+        } else {
+          console.log(`[chunked] pages ${startPage}-${endPage}: 0 comps — AI said: ${data.message?.slice(0, 100)}`);
         }
       } catch (e: any) {
         toast.dismiss(toastId);
         errorCount++;
+        perChunkCounts.push(0);
+        perChunkMessages.push(`threw: ${e?.message || 'unknown'}`);
         console.error(`Chunk ${chunkIdx + 1} threw:`, e);
       }
     }
@@ -730,12 +741,21 @@ export default function ImportPage() {
       }
     }
 
-    // Build summary message
+    // Build diagnostic summary message — shows per-chunk counts so we can
+    // see EXACTLY where extraction succeeded/failed across the document.
+    const chunkBreakdown = perChunkCounts.length > 0
+      ? `\n\nPer-chunk: ${perChunkCounts.map((n, i) => {
+          const sp = i * STRIDE + 1;
+          const ep = Math.min(i * STRIDE + CHUNK_SIZE, images.length);
+          return `pp${sp}-${ep}: ${n}${perChunkMessages[i] && n === 0 ? ` (${perChunkMessages[i]})` : ''}`;
+        }).join(' · ')}`
+      : '';
+
     const summary = dedupedComps.length === 0
       ? errorCount > 0
-        ? `Extraction failed for ${errorCount} of ${chunks.length} chunks. No comps recovered.`
-        : `No comparable sales found in this document.`
-      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}.`;
+        ? `Extraction failed for ${errorCount} of ${chunks.length} chunks. No comps recovered.${chunkBreakdown}`
+        : `No comps extracted from ${chunks.length} chunks across ${images.length} pages. AI didn't recognize comp structure.${chunkBreakdown}`
+      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}.${chunkBreakdown}`;
 
     const assistantMessage: Message = {
       role: 'assistant',
