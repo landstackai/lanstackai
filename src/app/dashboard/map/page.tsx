@@ -251,13 +251,48 @@ export default function MapPage() {
     const updateDrawnCount = () => {
       setDrawnCount(drawRef.current?.getAll().features.length || 0);
     };
-    map.current.on('draw.create', updateDrawnCount);
+    // After polygon is finished drawing, immediately switch to direct_select
+    // so the user can adjust vertices but cannot drag the whole shape. We
+    // never want simple_select to be active with a polygon present.
+    map.current.on('draw.create', (e: any) => {
+      updateDrawnCount();
+      const newId = e?.features?.[0]?.id;
+      if (newId) {
+        // Tiny delay so MapboxDraw finishes its internal post-create state
+        // transition before we override it.
+        setTimeout(() => {
+          if (drawRef.current && drawRef.current.get(newId)) {
+            drawRef.current.changeMode('direct_select', { featureId: newId });
+          }
+        }, 0);
+      }
+    });
     map.current.on('draw.update', updateDrawnCount);
     map.current.on('draw.delete', updateDrawnCount);
     map.current.on('draw.modechange', (e: any) => {
       const isDrawing = typeof e.mode === 'string' && e.mode.startsWith('draw_');
       setDrawingActive(isDrawing);
       if (!isDrawing) setDrawVertexCount(0);
+
+      // Block simple_select while a polygon exists — it allows whole-shape
+      // dragging which we never want. Auto-bounce back to direct_select.
+      // If no polygon exists (e.g. after Combine emptied MapboxDraw), allow
+      // simple_select since there's nothing to mis-drag anyway.
+      if (e.mode === 'simple_select') {
+        const features = drawRef.current?.getAll().features || [];
+        const polygon = features.find(
+          (f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon'
+        );
+        if (polygon && polygon.id) {
+          setTimeout(() => {
+            if (drawRef.current?.getMode() === 'simple_select') {
+              try {
+                drawRef.current.changeMode('direct_select', { featureId: polygon.id });
+              } catch {}
+            }
+          }, 0);
+        }
+      }
     });
     // Live vertex count during draw_polygon. draw.render fires on every frame
     // while drawing, so we read the in-progress polygon and count committed
