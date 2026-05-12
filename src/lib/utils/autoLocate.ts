@@ -26,7 +26,10 @@ export type AutoLocateResult = {
   longitude: number;
   parcel_id: string | null;
   boundary_geojson: any;
-  match_confidence: 'high' | 'medium';
+  // 'low' is used by carve-out detection (Phase 3) when we pin to grantor's
+  // parent tract because the actual subdivided parcel isn't recorded yet.
+  // Broker still needs to trace the actual boundary.
+  match_confidence: 'high' | 'medium' | 'low';
   match_reason: string;
 };
 
@@ -63,7 +66,7 @@ function sumAcres(parcels: any[]): number {
 
 function featureToResult(
   feature: any,
-  confidence: 'high' | 'medium',
+  confidence: 'high' | 'medium' | 'low',
   reason: string
 ): AutoLocateResult | null {
   if (!feature?.geometry) return null;
@@ -241,15 +244,223 @@ async function geocodeSearchHint(hint: string): Promise<{ lat: number; lng: numb
 // Main entry point
 // ──────────────────────────────────────────────────────────────────────────
 
+// Cluster type used by the spatial-clustering helper below.
+type ParcelCluster = {
+  parcels: any[];
+  centroid: [number, number]; // [lng, lat]
+  totalAcres: number;
+};
+
+// Group parcels into spatial clusters by centroid distance. Parcels whose
+// centroids are within ~1mi (0.015°) of an existing cluster's centroid join
+// that cluster; otherwise a new cluster is started.
+//
+// Why this matters: a TX rancher commonly owns multiple unrelated tracts in
+// the same county. Lumping them all into one "sum-all" check misses the
+// right tract. Clustering separates them so each tract is sized independently.
+async function clusterParcelsSpatially(features: any[]): Promise<ParcelCluster[]> {
+  if (features.length === 0) return [];
+  // @ts-expect-error — turf v6.5 .d.ts not fully exposed
+  const turf = (await import('@turf/turf')) as any;
+
+  const MAX_DEGREES = 0.015; // ~1 mile in TX latitudes
+
+  // Pre-compute centroid + acres for each feature
+  const items = features.map((f) => {
+    let centroid: [number, number] | null = null;
+    try {
+      const c = turf.centroid(f);
+      const coords = c?.geometry?.coordinates;
+      if (Array.isArray(coords) && coords.length >= 2) {
+        centroid = [coords[0], coords[1]];
+      }
+    } catch {}
+    return {
+      feature: f,
+      centroid,
+      acres: Number(f.properties?.gis_area) || 0,
+    };
+  }).filter((i) => i.centroid !== null) as Array<{
+    feature: any;
+    centroid: [number, number];
+    acres: number;
+  }>;
+
+  const clusters: ParcelCluster[] = [];
+  for (const item of items) {
+    // Find closest existing cluster within threshold
+    let bestCluster: ParcelCluster | null = null;
+    let bestDist = Infinity;
+    for (const cluster of clusters) {
+      const dx = item.centroid[0] - cluster.centroid[0];
+      const dy = item.centroid[1] - cluster.centroid[1];
+      const d = Math.hypot(dx, dy);
+      if (d < bestDist && d <= MAX_DEGREES) {
+        bestDist = d;
+        bestCluster = cluster;
+      }
+    }
+    if (bestCluster) {
+      bestCluster.parcels.push(item.feature);
+      bestCluster.totalAcres += item.acres;
+      // Running-average centroid update
+      const n = bestCluster.parcels.length;
+      bestCluster.centroid = [
+        (bestCluster.centroid[0] * (n - 1) + item.centroid[0]) / n,
+        (bestCluster.centroid[1] * (n - 1) + item.centroid[1]) / n,
+      ];
+    } else {
+      clusters.push({
+        parcels: [item.feature],
+        centroid: item.centroid,
+        totalAcres: item.acres,
+      });
+    }
+  }
+
+  // Recompute each cluster's totalAcres from the unioned polygon's actual area
+  // rather than the sum of gis_area fields. This handles a TxGIO data quirk
+  // where multiple "duplicate" records (abstract subdivisions, survey records
+  // describing the same physical parcel) all report the same gis_area —
+  // summing them would multiply the actual acreage by N.
+  // For genuine multi-parcel clusters, union returns one larger polygon and
+  // turf.area gives the correct combined acreage.
+  for (const cluster of clusters) {
+    if (cluster.parcels.length > 1) {
+      try {
+        let unioned: any = cluster.parcels[0];
+        for (let i = 1; i < cluster.parcels.length; i++) {
+          try {
+            const u = turf.union(unioned, cluster.parcels[i]);
+            if (u) unioned = u;
+          } catch {}
+        }
+        if (unioned?.geometry) {
+          // turf.area returns m² → convert to acres (1 acre = 4046.8564224 m²)
+          const acres = turf.area(unioned) / 4046.8564224;
+          if (Number.isFinite(acres) && acres > 0) {
+            cluster.totalAcres = acres;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return clusters;
+}
+
+// Convert a parcel cluster to a single merged feature for featureToResult.
+function clusterToMergedFeature(cluster: ParcelCluster): any {
+  if (cluster.parcels.length === 1) return cluster.parcels[0];
+  const merged = mergeFeatures(cluster.parcels);
+  if (merged) return merged;
+  // Fallback: just use the largest parcel
+  return cluster.parcels.reduce((a, b) =>
+    (Number(a.properties?.gis_area) || 0) > (Number(b.properties?.gis_area) || 0) ? a : b
+  );
+}
+
+// Pick the best cluster from a set of candidates using landmark proximity.
+// Calls aerialAnalysis to extract a search_hint from the comp's description/
+// image, geocodes it, then picks the cluster whose centroid is closest.
+//
+// Returns null if no landmark could be extracted or geocoded — caller should
+// fall back to alternate disambiguation.
+async function pickClusterByLandmark(
+  clusters: ParcelCluster[],
+  comp: { aerialImage?: string | null; description?: string | null; address?: string | null }
+): Promise<{ cluster: ParcelCluster; distMiles: number } | null> {
+  if (clusters.length === 0) return null;
+  if (clusters.length === 1) return { cluster: clusters[0], distMiles: 0 };
+
+  const { extractLocationSignals } = await import('./aerialAnalysis');
+  const signals = await extractLocationSignals(comp.aerialImage ?? null, {
+    description: comp.description,
+    address: comp.address,
+  });
+  if (!signals?.search_hint) return null;
+
+  const center = await geocodeSearchHint(signals.search_hint);
+  if (!center) return null;
+
+  // For each cluster, compute haversine distance from cluster centroid to
+  // the geocoded landmark. Pick the closest.
+  // @ts-expect-error — turf v6.5 .d.ts not fully exposed
+  const turf = (await import('@turf/turf')) as any;
+  const landmarkPt = turf.point([center.lng, center.lat]);
+
+  let best: { cluster: ParcelCluster; distMiles: number } | null = null;
+  for (const cluster of clusters) {
+    const clusterPt = turf.point(cluster.centroid);
+    try {
+      const distMiles = turf.distance(landmarkPt, clusterPt, { units: 'miles' });
+      if (!best || distMiles < best.distMiles) {
+        best = { cluster, distMiles };
+      }
+    } catch {}
+  }
+  return best;
+}
+
+// Fetch parcels for a given owner + county set, then return the subset whose
+// owner_name contains every normalized token of the search owner. Extracted
+// as a helper so Phase 1 and Phase 2 of the strategy can reuse it without
+// duplicating fetch/filter code.
+async function fetchOwnerParcels(
+  base: string,
+  owner: string,
+  countyParam: string
+): Promise<any[]> {
+  const normalized = normalizeOwner(owner);
+  const tokens = normalized.split(/\s+/).filter((t) => t.length >= 4);
+  if (tokens.length === 0) return [];
+  const query = tokens.sort((a, b) => b.length - a.length)[0];
+
+  let features: any[] = [];
+  try {
+    const url = `${base}/api/parcels-by-owner?q=${encodeURIComponent(query)}&county=${encodeURIComponent(countyParam)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(28000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    features = Array.isArray(data?.features) ? data.features : [];
+  } catch {
+    return [];
+  }
+
+  const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+  return features.filter((f) => {
+    const own = (f.properties?.owner_name || '').toString().toUpperCase();
+    return allTokens.every((t) => own.includes(t));
+  });
+}
+
 // Owner-first strategy. Tries each owner signal (grantee → grantor → property_name)
 // against TxGIO with a county filter, looking for either (a) a single-parcel
 // acreage match or (b) a multi-parcel subset whose summed acreage matches.
+//
+// Phases:
+//   1. Strict (current behavior): single-parcel and sum-all matches within 10%
+//      acreage tolerance, plus an existing MEDIUM-confidence vision-verify
+//      branch when 1-5 tight matches don't pass strict.
+//   2. NEW Relaxed + cluster (A+B): if Phase 1 fails for all owners, cluster
+//      each owner's parcels spatially and accept any cluster whose summed
+//      acreage is within 50% of target. Disambiguate multiple clusters using
+//      landmark proximity from aerialAnalysis + geocoding.
+//   3. NEW Carve-out (C): if grantor is set and grantor's largest cluster is
+//      ≥2× target acreage with ≤3 clusters total, treat as a carve-out — pin
+//      to the grantor's parcel cluster (best one by landmark proximity if
+//      multiple). LOW confidence so the broker traces the actual boundary.
 //
 // Returns null if no confident match was found, allowing the caller to fall
 // through to the existing pipeline. MEDIUM matches get a vision sanity-check
 // before being returned with 'medium' confidence; HIGH matches skip vision.
 async function tryOwnerSearchStrategy(
-  comp: { aerialImage?: string | null },
+  comp: {
+    aerialImage?: string | null;
+    description?: string | null;
+    address?: string | null;
+    grantor?: string | null;
+  },
   acres: number,
   counties: string[],
   ownerSignals: string[]
@@ -263,36 +474,14 @@ async function tryOwnerSearchStrategy(
     ? `https://${process.env.VERCEL_URL}`
     : process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
+  // Cache tight matches per owner so Phase 2 (relaxed) doesn't refetch.
+  const tightMatchesCache: Map<string, any[]> = new Map();
+
+  // ── PHASE 1: Strict tolerance (existing behavior) ────────────────────
   for (const owner of ownerSignals) {
-    const normalized = normalizeOwner(owner);
-    // Use the first significant token (longest piece >= 4 chars) for the query
-    // to maximize wildcard hits while staying specific. E.g., "GRUNDHOEFER FARMS"
-    // → query "GRUNDHOEFER" rather than "GRUNDHOEFER FARMS" so we catch
-    // "GRUNDHOEFER FARMS LLC" / "GRUNDHOEFER FAMILY LTD" / etc.
-    const tokens = normalized.split(/\s+/).filter((t) => t.length >= 4);
-    if (tokens.length === 0) continue;
-    const query = tokens.sort((a, b) => b.length - a.length)[0];
-
-    let features: any[] = [];
-    try {
-      const url = `${base}/api/parcels-by-owner?q=${encodeURIComponent(query)}&county=${encodeURIComponent(countyParam)}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(28000) });
-      if (!res.ok) continue;
-      const data = await res.json();
-      features = Array.isArray(data?.features) ? data.features : [];
-    } catch {
-      continue;
-    }
-    if (features.length === 0) continue;
-
-    // Require all tokens to appear in owner_name (the API uses single-token
-    // LIKE so a "FARMS" search returns ALL farms in the county — narrow it)
-    const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
-    const tightMatches = features.filter((f) => {
-      const own = (f.properties?.owner_name || '').toString().toUpperCase();
-      return allTokens.every((t) => own.includes(t));
-    });
+    const tightMatches = await fetchOwnerParcels(base, owner, countyParam);
     if (tightMatches.length === 0) continue;
+    tightMatchesCache.set(owner, tightMatches);
 
     // (a) Single-parcel acreage match
     const singleMatches = tightMatches
@@ -356,6 +545,113 @@ async function tryOwnerSearchStrategy(
       }
       // No vision, or vision said no → don't return medium yet, let
       // the existing pipeline take a shot.
+    }
+  }
+
+  // ── PHASE 2 (NEW A+B): Relaxed acreage + spatial clustering ──────────
+  // Phase 1 found no strict-tolerance match. For each owner, cluster their
+  // parcels spatially and accept any cluster whose summed acreage is within
+  // 50% of target — wider than Phase 1's 10% tolerance, because TX appraisal
+  // vs CAD acreage routinely diverges by 20-40% (carve-outs, easements, road
+  // exclusions). Disambiguate multiple clusters via landmark proximity.
+  for (const owner of ownerSignals) {
+    const tightMatches = tightMatchesCache.get(owner) || [];
+    if (tightMatches.length === 0) continue;
+
+    const clusters = await clusterParcelsSpatially(tightMatches);
+    if (clusters.length === 0) continue;
+
+    // Find clusters within ±50% of target
+    const relaxedMatches = clusters
+      .map((c) => ({ cluster: c, delta: Math.abs(c.totalAcres - acres) / acres }))
+      .filter(({ delta }) => delta <= 0.50)
+      .sort((a, b) => a.delta - b.delta);
+
+    if (relaxedMatches.length === 0) continue;
+
+    if (relaxedMatches.length === 1) {
+      // Single cluster within tolerance — pin to it
+      const { cluster, delta } = relaxedMatches[0];
+      const merged = clusterToMergedFeature(cluster);
+      return featureToResult(
+        merged,
+        'medium',
+        `Owner+relaxed-acreage: "${owner}" cluster of ${cluster.parcels.length} parcels totaling ${cluster.totalAcres.toFixed(1)} ac in ${counties.join('/')} County (target ${acres} ac, Δ${(delta * 100).toFixed(1)}%).`
+      );
+    }
+
+    // Multiple clusters within tolerance → disambiguate via landmark
+    const candidateClusters = relaxedMatches.map((m) => m.cluster);
+    const pick = await pickClusterByLandmark(candidateClusters, comp);
+    if (pick && pick.distMiles <= 10) {
+      const delta = Math.abs(pick.cluster.totalAcres - acres) / acres;
+      const merged = clusterToMergedFeature(pick.cluster);
+      // HIGH only if BOTH proximity is tight AND acreage delta is small
+      const confidence: 'high' | 'medium' = pick.distMiles < 2 && delta < 0.10 ? 'high' : 'medium';
+      return featureToResult(
+        merged,
+        confidence,
+        `Owner+landmark: "${owner}" cluster (${pick.cluster.totalAcres.toFixed(1)} ac, target ${acres}, Δ${(delta * 100).toFixed(1)}%) ${pick.distMiles.toFixed(1)}mi from landmark.`
+      );
+    }
+
+    // Landmark couldn't disambiguate — pick the closest acreage as best guess
+    // but only if owner is uniquely-enough identified (≤3 clusters)
+    if (clusters.length <= 3) {
+      const { cluster, delta } = relaxedMatches[0];
+      const merged = clusterToMergedFeature(cluster);
+      return featureToResult(
+        merged,
+        'medium',
+        `Owner-unique in county: "${owner}" — picking closest-acreage cluster (${cluster.totalAcres.toFixed(1)} ac, target ${acres}, Δ${(delta * 100).toFixed(1)}%). Verify boundary manually.`
+      );
+    }
+  }
+
+  // ── PHASE 3 (NEW C): Carve-out detection from grantor ────────────────
+  // Scenario: "Joe Smith sold 100 of his 1,000 acres". TxGIO still shows
+  // Joe owning the full parent tract; the 100 ac carve-out isn't recorded
+  // yet. Pin to grantor's parent cluster (best one by landmark if multiple).
+  // LOW confidence — broker traces the actual boundary.
+  if (comp.grantor) {
+    const grantorMatches = tightMatchesCache.get(comp.grantor)
+      || await fetchOwnerParcels(base, comp.grantor, countyParam);
+    if (grantorMatches.length > 0) {
+      const clusters = await clusterParcelsSpatially(grantorMatches);
+      // Grantor must be uniquely-enough identifiable in this county.
+      // More than 3 clusters = too noisy; we'd be guessing.
+      if (clusters.length > 0 && clusters.length <= 3) {
+        const largest = clusters.reduce((a, b) => a.totalAcres > b.totalAcres ? a : b);
+        // Target must be notably smaller than the largest cluster. If target
+        // is ≥50% of the largest cluster, Phase 2 should have caught it.
+        // 2× threshold (target < 50% of cluster) catches the real carve-outs.
+        if (acres < largest.totalAcres * 0.5) {
+          let pickedCluster: ParcelCluster | null = null;
+          let pickReason = '';
+          if (clusters.length === 1) {
+            pickedCluster = clusters[0];
+            pickReason = `grantor uniquely owns ${clusters[0].parcels.length} parcels in ${counties.join('/')}`;
+          } else {
+            const pick = await pickClusterByLandmark(clusters, comp);
+            if (pick) {
+              pickedCluster = pick.cluster;
+              pickReason = `grantor's cluster ${pick.distMiles.toFixed(1)}mi from landmark`;
+            } else {
+              // Without a landmark we can't safely pick — default to largest
+              pickedCluster = largest;
+              pickReason = `grantor's largest cluster (no landmark to disambiguate)`;
+            }
+          }
+          if (pickedCluster) {
+            const merged = clusterToMergedFeature(pickedCluster);
+            return featureToResult(
+              merged,
+              'low',
+              `Likely carve-out from grantor "${comp.grantor}": ${pickReason}. Grantor cluster ${pickedCluster.totalAcres.toFixed(1)} ac, appraisal ${acres} ac — pinning to parent tract. Trace actual boundary manually.`
+            );
+          }
+        }
+      }
     }
   }
 
