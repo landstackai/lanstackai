@@ -262,15 +262,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Auto-geocode comps that lack coordinates (Mapbox forward geocode —
-    // works for street addresses; rural appraiser addresses usually fall through).
-    if (Array.isArray(comps) && comps.length > 0) {
-      try {
-        comps = await geocodeComps(comps);
-      } catch (e) {
-        console.error('Geocoding failed:', e);
+    // CRITICAL: nuke any AI-provided or Mapbox-geocoded coordinates BEFORE
+    // any save/return. Two sources have been silently filling in coords from
+    // city/town names in the description (e.g. "near Pearsall" → returns
+    // Pearsall's coords, miles from the actual property):
+    //   1. AI extraction (already removed from prompt, but JSON mode doesn't
+    //      strictly enforce schema — AI can still include fields)
+    //   2. Mapbox forward geocoding on the address field — currently disabled
+    //
+    // Coordinates must come ONLY from autoLocate (server or browser), which
+    // grounds them in actual TxGIO parcel data via owner-name match.
+    if (Array.isArray(comps)) {
+      for (const c of comps) {
+        delete c.latitude;
+        delete c.longitude;
       }
     }
+    // geocodeComps disabled: it was setting Pearsall coords for properties
+    // located "4.25mi from Pearsall". Auto-locate via owner search handles
+    // real geocoding from parcel data.
+    // if (Array.isArray(comps) && comps.length > 0) {
+    //   try { comps = await geocodeComps(comps); } catch (e) {}
+    // }
 
     // Auto-locate is now done BROWSER-SIDE in the import page (see
     // autoLocateInBrowser in src/app/dashboard/import/page.tsx). The browser
