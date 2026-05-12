@@ -8,6 +8,155 @@ import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X } from 'lucid
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 
+// Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
+// (which the browser CAN cache, unlike Vercel function-to-self calls).
+// Mirrors the server-side autoLocateFromMetadata logic but runs in the
+// browser context to get the cache hits the manual search bar gets.
+//
+// Strategy: query by longest single owner-name token (cache-friendly),
+// filter client-side for all tokens, cluster spatially, pick the cluster
+// whose summed acreage matches the appraisal within 50%.
+//
+// Returns { latitude, longitude, parcel_id, geometry, match_reason } or null.
+async function autoLocateInBrowser(comp: any): Promise<{
+  latitude: number;
+  longitude: number;
+  parcel_id: string | null;
+  geometry: any;
+  match_reason: string;
+  match_confidence: 'high' | 'medium' | 'low';
+} | null> {
+  const acres = Number(comp?.acres);
+  const county = String(comp?.county || '').trim();
+  if (!Number.isFinite(acres) || acres <= 0 || !county) return null;
+
+  const ownerSignals = [comp.grantee, comp.grantor, comp.property_name]
+    .filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+  if (ownerSignals.length === 0) return null;
+
+  // @ts-expect-error — turf v6.5 .d.ts not exposed
+  const turf = await import('@turf/turf') as any;
+
+  const normalize = (s: string) => s.toUpperCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING|JR|SR)\b/g, '')
+    .replace(/\s+/g, ' ').trim();
+
+  for (const owner of ownerSignals) {
+    const normalized = normalize(owner);
+    const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+    if (allTokens.length === 0) continue;
+    const longest = [...allTokens].sort((a, b) => b.length - a.length)[0];
+
+    // Hit the cached endpoint. Browser fetch DOES hit the edge cache.
+    let features: any[] = [];
+    try {
+      const url = `/api/parcels-by-owner?q=${encodeURIComponent(longest)}&county=${encodeURIComponent(county)}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      features = Array.isArray(data?.features) ? data.features : [];
+    } catch {
+      continue;
+    }
+
+    // Filter to records that contain every owner token
+    const tight = features.filter((f: any) => {
+      const own = (f.properties?.owner_name || '').toString().toUpperCase();
+      return allTokens.every((t) => own.includes(t));
+    });
+    console.log(`[client-autoLocate] "${owner}" → ${features.length} raw, ${tight.length} tight`);
+    if (tight.length === 0) continue;
+
+    // Cluster by centroid distance (~1mi threshold)
+    const GRID_DEG = 0.015;
+    const items = tight.map((f: any) => {
+      let centroid: [number, number] | null = null;
+      try {
+        const c = turf.centroid(f);
+        const coords = c?.geometry?.coordinates;
+        if (Array.isArray(coords) && coords.length >= 2) centroid = [coords[0], coords[1]];
+      } catch {}
+      return {
+        feature: f,
+        centroid,
+        acres: Number(f.properties?.gis_area) || 0,
+      };
+    }).filter((i: any) => i.centroid) as Array<{ feature: any; centroid: [number, number]; acres: number }>;
+
+    const clusters: Array<{ parcels: any[]; centroid: [number, number]; totalAcres: number }> = [];
+    for (const it of items) {
+      let best: typeof clusters[number] | null = null;
+      let bestDist = Infinity;
+      for (const c of clusters) {
+        const d = Math.hypot(it.centroid[0] - c.centroid[0], it.centroid[1] - c.centroid[1]);
+        if (d < bestDist && d <= GRID_DEG) { bestDist = d; best = c; }
+      }
+      if (best) {
+        best.parcels.push(it.feature);
+        best.totalAcres += it.acres;
+        const n = best.parcels.length;
+        best.centroid = [
+          (best.centroid[0] * (n - 1) + it.centroid[0]) / n,
+          (best.centroid[1] * (n - 1) + it.centroid[1]) / n,
+        ];
+      } else {
+        clusters.push({ parcels: [it.feature], centroid: it.centroid, totalAcres: it.acres });
+      }
+    }
+
+    // Recompute cluster acreage from unioned area (handles TxGIO duplicates)
+    for (const c of clusters) {
+      if (c.parcels.length > 1) {
+        try {
+          let u = c.parcels[0];
+          for (let i = 1; i < c.parcels.length; i++) {
+            try { const next = turf.union(u, c.parcels[i]); if (next) u = next; } catch {}
+          }
+          if (u?.geometry) {
+            const a = turf.area(u) / 4046.8564224;
+            if (Number.isFinite(a) && a > 0) c.totalAcres = a;
+          }
+        } catch {}
+      }
+    }
+
+    console.log(`[client-autoLocate] clusters:`, clusters.map(c => `${c.totalAcres.toFixed(1)}ac(${c.parcels.length}p)`).join(', '));
+
+    // Find cluster within 50% acreage tolerance, closest delta wins
+    const matched = clusters
+      .map((c) => ({ c, delta: Math.abs(c.totalAcres - acres) / acres }))
+      .filter(({ delta }) => delta <= 0.50)
+      .sort((a, b) => a.delta - b.delta);
+
+    if (matched.length === 0) continue;
+
+    const winner = matched[0];
+    let merged: any = winner.c.parcels[0];
+    for (let i = 1; i < winner.c.parcels.length; i++) {
+      try { const u = turf.union(merged, winner.c.parcels[i]); if (u) merged = u; } catch {}
+    }
+
+    // Use turf centroid for the pin (more accurate than running average)
+    let pinCoords = winner.c.centroid;
+    try {
+      const c = turf.centroid(merged);
+      if (c?.geometry?.coordinates) pinCoords = c.geometry.coordinates;
+    } catch {}
+
+    return {
+      latitude: pinCoords[1],
+      longitude: pinCoords[0],
+      parcel_id: winner.c.parcels.map((p: any) => p.properties?.prop_id).filter(Boolean).join(',') || null,
+      geometry: merged.geometry || merged,
+      match_reason: `Owner "${owner}" → ${winner.c.parcels.length} parcels, ${winner.c.totalAcres.toFixed(1)}ac (target ${acres}, Δ${(winner.delta * 100).toFixed(1)}%)`,
+      match_confidence: winner.delta < 0.10 ? 'high' : 'medium',
+    };
+  }
+
+  return null;
+}
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
@@ -77,6 +226,29 @@ export default function ImportPage() {
       });
 
       const data = await response.json();
+
+      // Browser-side auto-locate: server-side auto-locate fails inside Vercel
+      // functions because function-to-self URL calls don't hit the edge cache.
+      // Re-run from the browser where /api/parcels-by-owner cache hits work.
+      if (Array.isArray(data.comps)) {
+        for (let i = 0; i < data.comps.length; i++) {
+          const c = data.comps[i];
+          const located = await autoLocateInBrowser(c);
+          if (located) {
+            console.log(`[import] auto-locate succeeded for ${c.property_name || c.county}: ${located.match_reason}`);
+            data.comps[i] = {
+              ...c,
+              latitude: located.latitude,
+              longitude: located.longitude,
+              parcel_id: located.parcel_id ?? c.parcel_id,
+              geometry: located.geometry,
+              _auto_located_confidence: located.match_confidence,
+            };
+          } else {
+            console.log(`[import] auto-locate returned null for ${c.property_name || c.county} — keeping server coords`);
+          }
+        }
+      }
 
       const assistantMessage: Message = {
         role: 'assistant',
@@ -190,8 +362,6 @@ export default function ImportPage() {
       const data = await response.json();
       const comps: ExtractedComp[] = Array.isArray(data?.comps) ? data.comps : [];
       if (comps.length === 0) {
-        // SECOND-CHANCE RETRY — only if we haven't already tried the
-        // aggressive prompt. AI was over-cautious; tell it to look harder.
         if (!retryAggressive) {
           return extractCompsFromFile(file, 1, true);
         }
@@ -202,6 +372,25 @@ export default function ImportPage() {
           filteredOut: data?.diagnostic?.filtered_out,
         };
       }
+
+      // Browser-side auto-locate — server-side fails inside Vercel functions
+      // because function-to-self URLs don't hit the edge cache. Re-run from
+      // here where /api/parcels-by-owner cache hits work.
+      for (let i = 0; i < comps.length; i++) {
+        const located = await autoLocateInBrowser(comps[i]);
+        if (located) {
+          console.log(`[batch] auto-located ${comps[i].property_name || comps[i].county}: ${located.match_reason}`);
+          comps[i] = {
+            ...comps[i],
+            latitude: located.latitude,
+            longitude: located.longitude,
+            parcel_id: located.parcel_id ?? comps[i].parcel_id,
+            geometry: located.geometry,
+            _auto_located_confidence: located.match_confidence,
+          } as ExtractedComp;
+        }
+      }
+
       return { kind: 'ok', comps };
     } catch (e: any) {
       if (attempt < 3) {
