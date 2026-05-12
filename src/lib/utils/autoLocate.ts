@@ -419,57 +419,41 @@ async function fetchOwnerParcels(
   const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
   if (allTokens.length === 0) return [];
 
-  // PERFORMANCE: TxGIO is slow with multi-LIKE WHERE clauses (each LIKE
-  // forces a substring scan). Query with the LONGEST single token only,
-  // then filter the rest client-side. Cuts query time from ~20s to ~3s
-  // while still finding the right records.
-  const longestToken = [...allTokens].sort((a, b) => b.length - a.length)[0];
+  // Use our own /api/parcels-by-owner endpoint — it has Vercel edge cache
+  // (24h), so 2nd+ call to the same area is <100ms even when TxGIO is slow.
+  // Direct TxGIO calls bypass cache and routinely time out on slow TxGIO days.
+  //
+  // Use the public alias URL (not VERCEL_URL which is the deployment-specific
+  // URL that sits behind Vercel auth in some configurations).
+  const aliasUrl = process.env.NEXT_PUBLIC_BASE_URL
+    || (process.env.VERCEL_ENV === 'production' ? 'https://lanstackai.vercel.app' : null)
+    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
 
-  const counties = countyParam
-    .split(/[,&]/)
-    .map((c) => c.replace(/['\\]/g, '').replace(/\bcount(y|ies)\b/gi, '').trim().toUpperCase())
-    .filter((c) => c.length > 0);
+  // Build the query: longest token + county. The /api endpoint will then
+  // do its own multi-token AND filtering, returning narrow results.
+  // Actually we pass the FULL owner phrase so the endpoint's multi-token
+  // logic narrows server-side. Endpoint is cached so cost is fine.
+  const fullQuery = allTokens.join(' ');
 
-  const countyClause = counties.length > 0
-    ? ' AND (' + counties.map((c) =>
-        `UPPER(county) = '${c}' OR UPPER(county) = '${c} COUNTY'`
-      ).join(' OR ') + ')'
-    : '';
-  const where = `UPPER(owner_name) LIKE '%${longestToken.replace(/['\\]/g, '')}%'${countyClause}`;
-
-  const params = new URLSearchParams({
-    where,
-    outFields: 'prop_id,owner_name,gis_area,county',
-    returnGeometry: 'true',
-    outSR: '4326',
-    geometryPrecision: '6',
-    resultRecordCount: '200',
-    f: 'geojson',
-  });
+  const url = `${aliasUrl}/api/parcels-by-owner?q=${encodeURIComponent(fullQuery)}&county=${encodeURIComponent(countyParam)}`;
 
   try {
-    // Tight 8s timeout — fits in Hobby plan's 10s function budget when
-    // queries run in parallel (Promise.all in tryOwnerSearchStrategy).
-    const res = await fetch(`${TXGIO_QUERY}?${params}`, {
+    // 8s timeout fits Hobby plan's 10s function budget. After first call
+    // populates the edge cache, subsequent calls return in <100ms.
+    const res = await fetch(url, {
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {
-      console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}"`);
+      console.warn(`[autoLocate] fetchOwnerParcels HTTP ${res.status} for owner="${owner}" via ${aliasUrl}`);
       return [];
     }
     const data = await res.json();
     const features = Array.isArray(data?.features) ? data.features : [];
 
-    // Client-side filter: enforce all other tokens (not just the longest)
-    const tight = features.filter((f: any) => {
-      const own = (f.properties?.owner_name || '').toString().toUpperCase();
-      return allTokens.every((t) => own.includes(t));
-    });
-
-    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} raw, ${tight.length} tight (query=${longestToken}, tokens=${JSON.stringify(allTokens)}, counties=${JSON.stringify(counties)})`);
-    return tight;
+    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} parcels (via cached API, tokens=${JSON.stringify(allTokens)})`);
+    return features;
   } catch (e: any) {
-    console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message}`);
+    console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message} (${aliasUrl})`);
     return [];
   }
 }
