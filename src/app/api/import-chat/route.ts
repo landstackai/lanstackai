@@ -105,12 +105,18 @@ Each comp should have these fields:
   "ppa_land_only": number or null,
   "sale_date": "YYYY-MM-DD" or null,
   "address": string or null,
+  "latitude": number or null,
+  "longitude": number or null,
+  // CRITICAL — ONLY extract latitude/longitude when the document EXPLICITLY
+  // prints them under a labeled field like "Geographic Location: X; Y",
+  // "Coordinates: lat, lng", "Lat/Lng:", or similar.
+  // NEVER geocode from city names, town proximity, or distance descriptions.
+  //   ✗ "Approximately 4.25 miles southeast of Pearsall" → DO NOT return Pearsall's coords
+  //   ✗ "Near Devine, TX" → DO NOT look up Devine's coords
+  //   ✓ "Geographic Location: 30.10129929; -98.59020233" → DO extract those exact numbers
+  //   ✓ "Lat 28.84, Lng -99.06" → DO extract
+  // If no explicit coordinates are printed, return latitude:null, longitude:null.
   "parcel_id": string or null,
-  // NOTE: latitude/longitude intentionally omitted. The AI tends to
-  // hallucinate coordinates from city/town names mentioned in the description
-  // (e.g., "5mi southeast of Pearsall" → returns Pearsall's coords). The
-  // server-side autoLocate + browser-side autoLocateInBrowser handle real
-  // geocoding from owner/county/acreage; AI must NOT provide coordinates.
   "recording_number": string or null,
   "grantor": string or null,
   "grantee": string or null,
@@ -262,25 +268,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // CRITICAL: nuke any AI-provided or Mapbox-geocoded coordinates BEFORE
-    // any save/return. Two sources have been silently filling in coords from
-    // city/town names in the description (e.g. "near Pearsall" → returns
-    // Pearsall's coords, miles from the actual property):
-    //   1. AI extraction (already removed from prompt, but JSON mode doesn't
-    //      strictly enforce schema — AI can still include fields)
-    //   2. Mapbox forward geocoding on the address field — currently disabled
+    // Coords from AI extraction are trusted ONLY when they came from an
+    // explicitly-printed "Geographic Location" or similar field in the
+    // document (per prompt instructions above). Mapbox forward-geocoding
+    // on address remains DISABLED — it returned city centroids for
+    // "near Pearsall" descriptions, which masked the real property location.
     //
-    // Coordinates must come ONLY from autoLocate (server or browser), which
-    // grounds them in actual TxGIO parcel data via owner-name match.
-    if (Array.isArray(comps)) {
-      for (const c of comps) {
-        delete c.latitude;
-        delete c.longitude;
-      }
-    }
-    // geocodeComps disabled: it was setting Pearsall coords for properties
-    // located "4.25mi from Pearsall". Auto-locate via owner search handles
-    // real geocoding from parcel data.
+    // If the AI returned null coords (no printed field in doc), autoLocate
+    // — server-side and/or browser-side — handles geocoding from owner+county.
+    //
+    // geocodeComps disabled intentionally:
     // if (Array.isArray(comps) && comps.length > 0) {
     //   try { comps = await geocodeComps(comps); } catch (e) {}
     // }
