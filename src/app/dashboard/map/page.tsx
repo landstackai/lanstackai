@@ -1150,9 +1150,9 @@ export default function MapPage() {
   }, [selectedComp, fetchComps]);
 
   // Viewport-based TxGIO vector parcels — covers all of TX, only loads what's
-  // visible. Kicks in at zoom 14 (parcels appear as you zoom in from county
-  // view). Below zoom 14 the raster layer shows boundaries visually and map
-  // clicks fall back to /api/parcel point query.
+  // visible. Kicks in at zoom 13 (parcels appear at county-overview distance).
+  // Below zoom 13 the raster layer shows boundaries visually and map clicks
+  // fall back to /api/parcel point query.
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
 
@@ -1166,18 +1166,18 @@ export default function MapPage() {
         id: 'txgio-bbox-line',
         type: 'line',
         source: 'txgio-bbox',
-        minzoom: 14,
+        minzoom: 13,
         paint: {
           'line-color': '#fbbf24',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 1.2, 15, 1.5, 16, 1.8, 19, 2.5],
-          'line-opacity': 1,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 13, 1, 14, 1.3, 15, 1.6, 16, 1.9, 19, 2.5],
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.85, 14, 1],
         },
       });
       map.current.addLayer({
         id: 'txgio-bbox-fill',
         type: 'fill',
         source: 'txgio-bbox',
-        minzoom: 14,
+        minzoom: 13,
         paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0 }, // invisible click target
       });
       map.current.addLayer({
@@ -1217,11 +1217,11 @@ export default function MapPage() {
     const update = () => {
       if (!map.current) return;
       const zoom = map.current.getZoom();
-      // Fetch vector overlay at zoom 14+ — broader area, but still small
-      // enough that TxGIO usually responds in 2-5s when healthy. Below 14,
-      // raster layer shows boundaries and clicks fall through to /api/parcel.
-      if (zoom < 14) {
-        console.log(`[txgio-bbox] skipped — zoom ${zoom.toFixed(1)} < 14 (click anyway: falls back to point query)`);
+      // Fetch vector overlay at zoom 13+ — bbox is ~5km across at z13,
+      // which may have hundreds of rural parcels but stays under TxGIO's
+      // 2000 record cap for typical rural Texas land.
+      if (zoom < 13) {
+        console.log(`[txgio-bbox] skipped — zoom ${zoom.toFixed(1)} < 13 (click anyway: falls back to point query)`);
         return;
       }
       const b = map.current.getBounds();
