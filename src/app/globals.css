@@ -67,6 +67,23 @@ html, body {
   border-bottom-color: var(--panel) !important;
 }
 
+/* Comp hover preview — scoped class beats Mapbox CDN's white default.
+   Applied to popup instances built in the comp marker effects. */
+.comp-hover-popup .mapboxgl-popup-content {
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 10px !important;
+  padding: 0 !important;
+  color: var(--text) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.45) !important;
+}
+.comp-hover-popup .mapboxgl-popup-tip {
+  border-top-color: var(--panel) !important;
+  border-bottom-color: var(--panel) !important;
+  border-left-color: var(--panel) !important;
+  border-right-color: var(--panel) !important;
+}
+
 .mapboxgl-ctrl-group {
   background: var(--panel) !important;
   border: 1px solid var(--border) !important;
@@ -103,4 +120,60 @@ html, body {
 
 .animate-fade-in {
   animation: fadeIn 0.2s ease forwards;
+}
+
+/* ========================================================================
+   PRINT STYLES — for the share report's "Print / Save PDF" button.
+   Goal: a clean, dense, readable static document. Map gets dropped (it's
+   interactive only); comp cards become flat blocks with everything visible.
+   ======================================================================== */
+@media print {
+  html, body {
+    background: white !important;
+    color: black !important;
+    height: auto !important;
+  }
+
+  /* Show the report at full width — no fixed map column. */
+  .print\:report-stack {
+    display: block !important;
+    flex-direction: column !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .print\:full-width {
+    width: 100% !important;
+    max-width: none !important;
+    border: none !important;
+    overflow: visible !important;
+  }
+  .print\:hide {
+    display: none !important;
+  }
+  /* Cards should print as blocks, not break across pages. */
+  .print\:break-inside-avoid {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  /* Make sure expanded content shows even if state says collapsed. */
+  .print\:force-show {
+    display: block !important;
+    visibility: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  /* Tone the dark theme down for paper. */
+  .bg-night, .bg-panel, .bg-card {
+    background: white !important;
+  }
+  .text-white, .text-slate-200, .text-slate-300 {
+    color: #0f172a !important;
+  }
+  .text-slate-400, .text-slate-500, .text-slate-600 {
+    color: #475569 !important;
+  }
+  .border-border {
+    border-color: #cbd5e1 !important;
+  }
 }

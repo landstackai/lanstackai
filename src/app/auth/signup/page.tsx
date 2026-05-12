@@ -38,7 +38,7 @@ export default function SignupPage() {
       setLoading(false);
     } else {
       toast.success('Account created! Welcome to Landstack AI.');
-      router.push('/dashboard/vault');
+      router.push('/dashboard/map');
       router.refresh();
     }
   };

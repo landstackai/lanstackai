@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { X, Plus, Map, Check, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
+import { X, Plus, Map, Check, Trash2, ChevronUp, ChevronDown, FileText } from 'lucide-react';
 import { formatAcres } from '@/lib/utils';
 
 export interface ParcelFeature {
@@ -25,6 +25,7 @@ interface ParcelBottomSheetProps {
   onAddParcel: (parcel: ParcelFeature) => void;
   onRemoveParcel: (parcelId: string) => void;
   onCancel: () => void;
+  onCreateAsSubject?: (parcel: ParcelFeature) => void;
 }
 
 export function ParcelBottomSheet({
@@ -36,6 +37,7 @@ export function ParcelBottomSheet({
   onAddParcel,
   onRemoveParcel,
   onCancel,
+  onCreateAsSubject,
 }: ParcelBottomSheetProps) {
   const [expanded, setExpanded] = useState(false);
   const isSelected = selectedParcels.some(p => p.parcel_id === parcel.parcel_id);
@@ -165,25 +167,36 @@ export function ParcelBottomSheet({
           </div>
         </div>
 
-        {/* Two main action buttons — exactly like LandID */}
-        <div className="px-4 py-3 grid grid-cols-2 gap-2">
-          <button
-            onClick={() => onCreateBoundary([parcel])}
-            className="flex items-center justify-center gap-2 py-3 bg-card border border-border hover:border-sage rounded-xl text-xs font-bold text-white hover:text-sage transition-all"
-          >
-            <Map size={14} />
-            <span>Create Map<br />Boundary</span>
-          </button>
-          <button
-            onClick={() => {
-              onAddParcel(parcel);
-              onSelectMore();
-            }}
-            className="flex items-center justify-center gap-2 py-3 bg-card border border-border hover:border-sage rounded-xl text-xs font-bold text-white hover:text-sage transition-all"
-          >
-            <Plus size={14} />
-            <span>Select More<br />Parcels</span>
-          </button>
+        {/* Action grid — Create Boundary / Select More / Start CMA as subject */}
+        <div className="px-4 py-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => onCreateBoundary([parcel])}
+              className="flex items-center justify-center gap-2 py-3 bg-card border border-border hover:border-sage rounded-xl text-xs font-bold text-white hover:text-sage transition-all"
+            >
+              <Map size={14} />
+              <span>Create Map<br />Boundary</span>
+            </button>
+            <button
+              onClick={() => {
+                onAddParcel(parcel);
+                onSelectMore();
+              }}
+              className="flex items-center justify-center gap-2 py-3 bg-card border border-border hover:border-sage rounded-xl text-xs font-bold text-white hover:text-sage transition-all"
+            >
+              <Plus size={14} />
+              <span>Select More<br />Parcels</span>
+            </button>
+          </div>
+          {onCreateAsSubject && (
+            <button
+              onClick={() => onCreateAsSubject(parcel)}
+              className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-500/15 hover:bg-blue-500/25 border border-blue-400/40 hover:border-blue-400 rounded-xl text-xs font-bold text-blue-200 transition-all"
+            >
+              <FileText size={13} />
+              Use as CMA Subject
+            </button>
+          )}
         </div>
 
         {/* Owner info */}
@@ -225,6 +238,7 @@ interface BoundaryCreatedSheetProps {
   onAttachToComp: () => void;
   onSaveBoundaryOnly: () => void;
   onClose: () => void;
+  onUseAsSubject?: () => void;
 }
 
 export function BoundaryCreatedSheet({
@@ -234,6 +248,7 @@ export function BoundaryCreatedSheet({
   onAttachToComp,
   onSaveBoundaryOnly,
   onClose,
+  onUseAsSubject,
 }: BoundaryCreatedSheetProps) {
   return (
     <div className="fixed bottom-0 left-0 right-0 md:left-auto md:right-4 md:bottom-4 md:w-80 z-50 animate-slide-up">
@@ -272,6 +287,15 @@ export function BoundaryCreatedSheet({
           >
             📎 Attach to Existing Comp
           </button>
+          {onUseAsSubject && (
+            <button
+              onClick={onUseAsSubject}
+              className="w-full py-3 bg-blue-500/15 hover:bg-blue-500/25 border border-blue-400/40 hover:border-blue-400 text-blue-200 rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <FileText size={14} />
+              Use as CMA Subject
+            </button>
+          )}
           <button
             onClick={onSaveBoundaryOnly}
             className="w-full py-2.5 text-xs text-slate-400 hover:text-white transition-colors"

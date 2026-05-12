@@ -56,6 +56,17 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
             {comp.has_improvements && (
               <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded">IMPROVED</span>
             )}
+            {(comp as any).irrigation === 'Strong' && (
+              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded">IRRIGATION</span>
+            )}
+            {comp.improvement_source === 'agent_verified' && (
+              <span
+                className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded"
+                title="An agent involved in this transaction verified the improvement value."
+              >
+                AGENT-VERIFIED
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3 mt-0.5">
             <span className="text-xs text-slate-500 flex items-center gap-1">

@@ -34,7 +34,7 @@ export default function AppNav() {
   return (
     <>
       {/* Desktop sidebar */}
-      <nav className="hidden md:flex flex-col w-56 bg-panel border-r border-border flex-shrink-0">
+      <nav className="hidden md:flex flex-col w-44 bg-panel border-r border-border flex-shrink-0">
         {/* Logo */}
         <div className="p-4 border-b border-border">
           <div className="flex items-center gap-2">

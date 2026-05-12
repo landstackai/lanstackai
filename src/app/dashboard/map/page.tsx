@@ -1,12 +1,17 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
-import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
-import { X, Edit, MousePointer } from 'lucide-react';
+import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
+import MapboxDraw from '@mapbox/mapbox-gl-draw';
+// @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
+import * as turf from '@turf/turf';
 import CompModal from '@/components/comp/CompModal';
+import { FeatureChip, isStrongFeature } from '@/components/comp/FeatureChip';
 import {
   ParcelBottomSheet,
   BoundaryCreatedSheet,
@@ -26,10 +31,29 @@ const STATUS_COLORS: Record<string, string> = {
 type MapMode = 'view' | 'parcel_select';
 type SheetMode = 'none' | 'parcel' | 'selecting' | 'boundary_created';
 
+type GeocodeFeature = {
+  id?: string;
+  geometry: { type: 'Point'; coordinates: [number, number] };
+  properties: {
+    mapbox_id?: string;
+    name?: string;
+    full_address?: string;
+    place_formatted?: string;
+    feature_type?: string;
+  };
+};
+
 export default function MapPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
+  // Per-marker hover popups — manually managed (shown on mouseenter, hidden on
+  // mouseleave). Tracked separately so we can clean them up on marker rebuild.
+  const popupsRef = useRef<mapboxgl.Popup[]>([]);
+  // Pin DOM elements keyed by comp id — used by the hover-highlight effect to
+  // update styling imperatively without rebuilding markers.
+  const markerElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const drawRef = useRef<MapboxDraw | null>(null);
 
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
@@ -46,7 +70,136 @@ export default function MapPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [prefilledComp, setPrefilledComp] = useState<any>(null);
 
+  const [searchQuery, setSearchQuery] = useState('');
+  const [askingAi, setAskingAi] = useState(false);
+  // When set, only these comp ids are emphasized; non-matching markers dim.
+  const [aiHighlightedCompIds, setAiHighlightedCompIds] = useState<Set<string> | null>(null);
+  const [aiResultMessage, setAiResultMessage] = useState<string | null>(null);
+
+  const [drawnCount, setDrawnCount] = useState(0);
+  const [drawingActive, setDrawingActive] = useState(false);
+  // Comp pin label mode — toggleable on the map
+  const [pinLabelMode, setPinLabelMode] = useState<'ppa' | 'total'>('ppa');
+  // Scope filter for the map: All (everything visible) / Company (only
+  // is_company_transaction comps) / Mine (only comps created by current user).
+  const [mapScope, setMapScope] = useState<'all' | 'company' | 'mine'>('all');
+
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [detectingBoundary, setDetectingBoundary] = useState(false);
+  // Hover-highlighted comp in the workspace panel — drives a pulsing pin
+  const [hoveredCompId, setHoveredCompId] = useState<string | null>(null);
+  const [expandedCompIds, setExpandedCompIds] = useState<Set<string>>(new Set());
+  // CMA per-comp adjustment drafts. Stored on the CMA, never on the comp.
+  type CompAdjustment = {
+    improvement_value?: number | null;
+    improvement_source?: 'appraiser' | 'agent_verified' | 'broker_estimate' | null;
+    // Per-comp broker note rendered on both the workspace and the share report.
+    // Stored in cmas.comp_adjustments JSONB so it lives at the CMA level
+    // (the same comp can carry different notes in different CMAs).
+    broker_note?: string | null;
+  };
+  const [compAdjustmentsDraft, setCompAdjustmentsDraft] = useState<Record<string, CompAdjustment>>({});
+  // Per-comp UI state for the inline "Add adjustment" editor
+  const [adjustmentEditorOpen, setAdjustmentEditorOpen] = useState<Set<string>>(new Set());
+  // Set of comp ids currently waiting on the listing-search response
+  const [findingListingFor, setFindingListingFor] = useState<Set<string>>(new Set());
+  // Live (transient, not persisted) listing-search results per comp id.
+  // Cleared on workspace exit / refresh.
+  const [liveListings, setLiveListings] = useState<Record<string, { url: string | null; reason: string | null }>>({});
+  // Per-comp "saving / just saved" indicator for the Save-listing button.
+  const [savingListingFor, setSavingListingFor] = useState<Set<string>>(new Set());
+  const [savedListingFor, setSavedListingFor] = useState<Set<string>>(new Set());
+  // Per-comp expand-description toggle (CMA workspace expanded view)
+  const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
+
+  // Broker Opinion of Value: dual-input (per-acre + total) with bidirectional
+  // calculation. Stored as a single broker_opinion_value (total) on the CMA.
+  // We hold local string inputs so the user's typing isn't clobbered by the
+  // optimistic state round-trip.
+  const [bovPpaInput, setBovPpaInput] = useState<string>('');
+  const [bovTotalInput, setBovTotalInput] = useState<string>('');
+
+  // Share + collaboration state for the CMA workspace right panel.
+  const [shareCopied, setShareCopied] = useState(false);
+  const [collabOpen, setCollabOpen] = useState(false);
+  type TeamMember = { id: string; full_name: string | null; email: string | null };
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [collaboratorUserIds, setCollaboratorUserIds] = useState<Set<string>>(new Set());
+  const [collabLoading, setCollabLoading] = useState(false);
+  const [editingBoundaryComp, setEditingBoundaryComp] = useState<Comp | null>(null);
+  const [savingBoundary, setSavingBoundary] = useState(false);
+  const editingDrawIdRef = useRef<string | null>(null);
+  // When set, parcel-select mode + Combine writes to this comp's boundary
+  // instead of opening the New Boundary sheet.
+  const [reselectingComp, setReselectingComp] = useState<Comp | null>(null);
+
+  // CMA build mode — tap parcels to assemble the subject (merged), then tap
+  // comp pins to add comps to the analysis.
+  const [cmaMode, setCmaMode] = useState(false);
+  const [cmaSubjectParcels, setCmaSubjectParcels] = useState<ParcelFeature[]>([]);
+  const [cmaSubjectMeta, setCmaSubjectMeta] = useState<{ name: string; county: string; state: string }>({
+    name: '',
+    county: '',
+    state: 'TX',
+  });
+  const [cmaCompIds, setCmaCompIds] = useState<string[]>([]);
+  const [savingCMA, setSavingCMA] = useState(false);
+  const [suggestingComps, setSuggestingComps] = useState(false);
+  // When set, saveCMA UPDATEs this row instead of INSERTing a new one
+  const [cmaEditingId, setCmaEditingId] = useState<string | null>(null);
+  // 'subject' = tapping parcels assembles the subject tract.
+  // 'comps'   = subject is locked; tapping comp pins selects comps.
+  const [cmaPhase, setCmaPhase] = useState<'subject' | 'comps'>('subject');
+  const cmaPhaseRef = useRef<'subject' | 'comps'>('subject');
+  useEffect(() => { cmaPhaseRef.current = cmaPhase; }, [cmaPhase]);
+
+  // CMA workspace view: when ?cma=<id> is in the URL, the page filters to
+  // only that CMA's subject + selected comps and shows a workspace banner.
+  const [viewingCMA, setViewingCMA] = useState<any | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Reset expansion whenever a different comp is selected
+  useEffect(() => { setDescriptionExpanded(false); }, [selectedComp?.id]);
+
+  // Rule: description's acreage is authoritative. When viewing a comp the
+  // current user owns, if the description names a different acreage than
+  // what's saved (beyond rounding), reconcile silently — write the
+  // description value to the DB so all downstream views are consistent.
+  useEffect(() => {
+    if (!selectedComp || !currentUserId) return;
+    if (selectedComp.created_by !== currentUserId) return;
+    const desc = selectedComp.description || '';
+    const m = desc.match(/([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*(?:acres?|ac)\b/i);
+    if (!m) return;
+    const fromDesc = parseFloat(m[1].replace(/,/g, ''));
+    if (!Number.isFinite(fromDesc)) return;
+    const saved = selectedComp.acres || 0;
+    if (Math.abs(fromDesc - saved) <= 0.5) return; // already matches (within rounding)
+    let cancelled = false;
+    (async () => {
+      const { error } = await supabase
+        .from('comps')
+        .update({ acres: fromDesc })
+        .eq('id', selectedComp.id);
+      if (cancelled || error) return;
+      toast(`Acres reconciled to ${fromDesc.toLocaleString()} from description`, {
+        icon: '🔁', duration: 2500,
+      });
+      await fetchComps();
+    })();
+    return () => { cancelled = true; };
+  }, [selectedComp?.id, currentUserId]);
+
   const supabase = createClient();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!cancelled) setCurrentUserId(user?.id ?? null);
+    });
+    return () => { cancelled = true; };
+  }, [supabase]);
 
   const STYLE_URLS = {
     satellite: 'mapbox://styles/mapbox/satellite-streets-v12',
@@ -59,6 +212,8 @@ export default function MapPage() {
     setTappedParcel(null);
     setMergedAcres(0);
     setMapMode('view');
+    setReselectingComp(null);
+    setSettingSubjectForCma(null);
     if (map.current && mapLoaded) {
       try {
         const src1 = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource;
@@ -82,7 +237,104 @@ export default function MapPage() {
     map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
     map.current.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 
+    // Drawing tools (polygon, line) — UI is custom; no built-in controls
+    drawRef.current = new MapboxDraw({
+      displayControlsDefault: false,
+      defaultMode: 'simple_select',
+    });
+    map.current.addControl(drawRef.current as unknown as mapboxgl.IControl);
+
+    const updateDrawnCount = () => {
+      setDrawnCount(drawRef.current?.getAll().features.length || 0);
+    };
+    map.current.on('draw.create', updateDrawnCount);
+    map.current.on('draw.update', updateDrawnCount);
+    map.current.on('draw.delete', updateDrawnCount);
+    map.current.on('draw.modechange', (e: any) => {
+      setDrawingActive(typeof e.mode === 'string' && e.mode.startsWith('draw_'));
+    });
+
     map.current.on('load', () => {
+      // TxGIO statewide TX parcel boundaries (dynamic ArcGIS export → raster tiles)
+      map.current!.addSource('txgio-parcels', {
+        type: 'raster',
+        tiles: [
+          'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+        ],
+        tileSize: 512,
+        minzoom: 11,
+        maxzoom: 19,
+        attribution: 'Parcels © TxGIO + TX Appraisal Districts',
+      });
+      map.current!.addLayer({
+        id: 'txgio-parcels-layer',
+        type: 'raster',
+        source: 'txgio-parcels',
+        minzoom: 13,
+        paint: {
+          'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1],
+        },
+      });
+
+      // CMA subject boundary (only populated in workspace view)
+      map.current!.addSource('cma-subject', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.current!.addLayer({
+        id: 'cma-subject-fill',
+        type: 'fill',
+        source: 'cma-subject',
+        paint: { 'fill-color': '#facc15', 'fill-opacity': 0.18 },
+      });
+      map.current!.addLayer({
+        id: 'cma-subject-halo',
+        type: 'line',
+        source: 'cma-subject',
+        paint: {
+          'line-color': '#facc15',
+          'line-width': 7,
+          'line-opacity': 0.35,
+          'line-blur': 1.5,
+        },
+      });
+      map.current!.addLayer({
+        id: 'cma-subject-line',
+        type: 'line',
+        source: 'cma-subject',
+        paint: { 'line-color': '#facc15', 'line-width': 3, 'line-opacity': 1 },
+      });
+
+      // Saved comp boundaries (rendered from comps.boundary_geojson)
+      map.current!.addSource('comp-boundaries', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.current!.addLayer({
+        id: 'comp-boundary-fill',
+        type: 'fill',
+        source: 'comp-boundaries',
+        paint: { 'fill-color': '#ef4444', 'fill-opacity': 0.12 },
+      });
+      // Halo (wider, semi-transparent red — gives the line a glow on satellite)
+      map.current!.addLayer({
+        id: 'comp-boundary-halo',
+        type: 'line',
+        source: 'comp-boundaries',
+        paint: {
+          'line-color': '#ef4444',
+          'line-width': 6,
+          'line-opacity': 0.35,
+          'line-blur': 1.5,
+        },
+      });
+      map.current!.addLayer({
+        id: 'comp-boundary-line',
+        type: 'line',
+        source: 'comp-boundaries',
+        paint: { 'line-color': '#ef4444', 'line-width': 3, 'line-opacity': 1 },
+      });
+
       // Selected parcels layer
       map.current!.addSource('selected-parcels', {
         type: 'geojson',
@@ -122,23 +374,99 @@ export default function MapPage() {
       setMapLoaded(true);
     });
 
-    // Map click — fetch parcel info
+    // Map click — try county CAD vector layers first, then TxGIO via /api/parcel
     map.current.on('click', async (e) => {
       const { lng, lat } = e.lngLat;
-      try {
-        const res = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
-        const parcel: ParcelFeature = await res.json();
-        parcel.latitude = lat;
-        parcel.longitude = lng;
+      let parcel: ParcelFeature | null = null;
 
-        if (mapMode === 'parcel_select') {
-          handleAddParcelToSelection(parcel);
+      if (map.current) {
+        // Check Blanco CAD first (highest quality), then statewide TxGIO vector
+        const blancoHits = map.current.queryRenderedFeatures(e.point, {
+          layers: ['cad-blanco-fill'],
+        });
+        if (blancoHits.length > 0) {
+          const f = blancoHits[0];
+          const p: any = f.properties || {};
+          const acres = parseFloat(p.legal_acreage);
+          const addressParts = [
+            p.situs_num,
+            p.situs_street_prefx,
+            p.situs_street,
+            p.situs_street_sufix,
+          ].map(s => (s == null ? '' : String(s).trim())).filter(Boolean);
+          const street = addressParts.join(' ').trim();
+          const fullAddress = [street, p.situs_city].filter(Boolean).join(', ').trim() || null;
+          parcel = {
+            parcel_id: String(p.prop_id || p.prop_id_text || f.id || ''),
+            owner_name: p.file_as_name || null,
+            acres: Number.isFinite(acres) ? acres : null,
+            address: fullAddress,
+            county: 'Blanco',
+            state: 'TX',
+            latitude: lat,
+            longitude: lng,
+            geometry: f.geometry as any,
+          };
         } else {
-          setTappedParcel(parcel);
-          setSheetMode('parcel');
-          setSelectedComp(null);
+          const txgioHits = map.current.queryRenderedFeatures(e.point, {
+            layers: ['txgio-bbox-fill'],
+          });
+          if (txgioHits.length > 0) {
+            const f = txgioHits[0];
+            const p: any = f.properties || {};
+            const acres = parseFloat(p.gis_area);
+            parcel = {
+              parcel_id: String(p.prop_id || ''),
+              owner_name: p.owner_name || null,
+              acres: Number.isFinite(acres) ? acres : null,
+              address: null,
+              county: p.county ? String(p.county).replace(/\b\w/g, c => c.toUpperCase()) : null,
+              state: 'TX',
+              latitude: lat,
+              longitude: lng,
+              geometry: f.geometry as any,
+            };
+          }
         }
-      } catch {}
+      }
+
+      if (!parcel) {
+        try {
+          const res = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.parcel_id) {
+              parcel = data;
+              parcel!.latitude = lat;
+              parcel!.longitude = lng;
+            }
+          }
+        } catch {}
+      }
+
+      if (!parcel) {
+        toast('No parcel data at this point', { icon: '🗺️', duration: 1800 });
+        return;
+      }
+
+      // CMA mode, subject phase: tapping a parcel toggles it into the subject.
+      // After Lock Subject, we ignore parcel taps and only react to comp pins.
+      if (cmaModeRef.current && cmaPhaseRef.current === 'subject') {
+        toggleCmaSubjectParcel(parcel);
+        return;
+      }
+      if (cmaModeRef.current && cmaPhaseRef.current === 'comps') {
+        toast('Subject is locked. Tap a comp pin to add it. Use Edit Subject to adjust parcels.', { duration: 2200 });
+        return;
+      }
+
+      if (mapModeRef.current === 'parcel_select') {
+        handleAddParcelToSelection(parcel);
+      } else {
+        setTappedParcel(parcel);
+        setSheetMode('parcel');
+        setSelectedComp(null);
+      }
     });
 
     return () => {
@@ -149,14 +477,18 @@ export default function MapPage() {
   // Update map mode ref for click handler
   const mapModeRef = useRef(mapMode);
   useEffect(() => { mapModeRef.current = mapMode; }, [mapMode]);
+  // Same trick for CMA-mode reads inside the once-mounted click handler
+  const cmaModeRef = useRef(cmaMode);
+  useEffect(() => { cmaModeRef.current = cmaMode; }, [cmaMode]);
 
+  // Toggle: clicking a parcel in selection mode adds it; clicking an
+  // already-selected parcel removes it.
   const handleAddParcelToSelection = useCallback((parcel: ParcelFeature) => {
     setSelectedParcels(prev => {
-      if (prev.some(p => p.parcel_id === parcel.parcel_id)) {
-        toast('Already selected', { duration: 1000 });
-        return prev;
-      }
-      const next = [...prev, parcel];
+      const already = prev.some(p => p.parcel_id === parcel.parcel_id);
+      const next = already
+        ? prev.filter(p => p.parcel_id !== parcel.parcel_id)
+        : [...prev, parcel];
 
       // Update map layer
       if (map.current) {
@@ -172,7 +504,12 @@ export default function MapPage() {
           });
         }
       }
-      toast.success(`Added: ${parcel.owner_name || 'Parcel'}`, { duration: 1200 });
+
+      if (already) {
+        toast(`Removed: ${parcel.owner_name || 'Parcel'}`, { duration: 1200, icon: '➖' });
+      } else {
+        toast.success(`Added: ${parcel.owner_name || 'Parcel'}`, { duration: 1200 });
+      }
       return next;
     });
   }, []);
@@ -189,29 +526,1476 @@ export default function MapPage() {
 
   useEffect(() => { fetchComps(); }, [fetchComps]);
 
+  const findListingForComp = useCallback(async (compId: string) => {
+    setFindingListingFor(prev => new Set(prev).add(compId));
+    try {
+      const res = await fetch(`/api/comp/${compId}/find-listing`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Search failed');
+        return;
+      }
+      setLiveListings(prev => ({
+        ...prev,
+        [compId]: { url: data.url ?? null, reason: data.reason ?? null },
+      }));
+      if (data.url) {
+        toast.success('Listing found — link below');
+      } else {
+        toast(data.reason || 'No matching listing found', { icon: '🔍', duration: 4000 });
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Search failed');
+    } finally {
+      setFindingListingFor(prev => {
+        const next = new Set(prev);
+        next.delete(compId);
+        return next;
+      });
+    }
+  }, []);
+
+  // Persist a live-found listing URL onto the comp so it shows up on the
+  // share report. If a different source_url is already set, confirm overwrite.
+  const saveListingForComp = useCallback(async (compId: string) => {
+    const live = liveListings[compId];
+    if (!live?.url) {
+      toast.error('No listing URL to save');
+      return;
+    }
+    const existing = comps.find(c => c.id === compId);
+    const existingUrl = (existing as any)?.source_url as string | null | undefined;
+    if (existingUrl && existingUrl !== live.url) {
+      const ok = window.confirm(
+        `This comp already has a saved URL:\n\n${existingUrl}\n\nReplace with the new one?`
+      );
+      if (!ok) return;
+    } else if (existingUrl === live.url) {
+      // Already saved — just flash the saved state for confirmation
+      setSavedListingFor(prev => new Set(prev).add(compId));
+      setTimeout(() => {
+        setSavedListingFor(prev => {
+          const next = new Set(prev);
+          next.delete(compId);
+          return next;
+        });
+      }, 2500);
+      return;
+    }
+
+    setSavingListingFor(prev => new Set(prev).add(compId));
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: live.url })
+        .eq('id', compId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      // Optimistic local update so the comp card reflects the saved URL.
+      setComps(prev =>
+        prev.map(c => (c.id === compId ? ({ ...c, source_url: live.url } as any) : c))
+      );
+      setSavedListingFor(prev => new Set(prev).add(compId));
+      toast.success('Saved — appears on share report');
+      setTimeout(() => {
+        setSavedListingFor(prev => {
+          const next = new Set(prev);
+          next.delete(compId);
+          return next;
+        });
+      }, 2500);
+    } finally {
+      setSavingListingFor(prev => {
+        const next = new Set(prev);
+        next.delete(compId);
+        return next;
+      });
+    }
+  }, [liveListings, comps, supabase]);
+
+  const startEditBoundary = useCallback((comp: Comp) => {
+    if (!drawRef.current || !map.current) return;
+    const geom = (comp as any).boundary_geojson;
+    if (!geom) {
+      toast.error('Comp has no boundary to edit');
+      return;
+    }
+    drawRef.current.deleteAll();
+    const ids = drawRef.current.add({
+      type: 'Feature',
+      properties: { compId: comp.id },
+      geometry: geom,
+    } as any);
+    editingDrawIdRef.current = ids[0];
+    setEditingBoundaryComp(comp);
+    setSelectedComp(null); // hide the panel while editing
+    drawRef.current.changeMode('direct_select', { featureId: ids[0] });
+    if (comp.latitude != null && comp.longitude != null) {
+      map.current.flyTo({ center: [comp.longitude, comp.latitude], zoom: 15, duration: 800 });
+    }
+    toast('Drag vertices to edit · click between vertices to add new ones', {
+      icon: '✏️', duration: 4000,
+    });
+  }, []);
+
+  const cancelEditBoundary = useCallback(() => {
+    if (drawRef.current) drawRef.current.deleteAll();
+    editingDrawIdRef.current = null;
+    setEditingBoundaryComp(null);
+  }, []);
+
+  const saveEditedBoundary = useCallback(async () => {
+    if (!drawRef.current || !editingBoundaryComp) return;
+    const id = editingDrawIdRef.current;
+    if (!id) return;
+    const feature: any = drawRef.current.get(id);
+    if (!feature?.geometry) {
+      toast.error('No geometry to save');
+      return;
+    }
+    setSavingBoundary(true);
+    try {
+      const res = await fetch(`/api/comp/${editingBoundaryComp.id}/boundary`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geometry: feature.geometry }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to save boundary');
+        return;
+      }
+      toast.success('Boundary updated');
+      drawRef.current.deleteAll();
+      editingDrawIdRef.current = null;
+      setEditingBoundaryComp(null);
+      await fetchComps();
+    } catch (e: any) {
+      toast.error(e?.message || 'Save failed');
+    } finally {
+      setSavingBoundary(false);
+    }
+  }, [editingBoundaryComp, fetchComps]);
+
+  const startCMA = useCallback(() => {
+    setCmaMode(true);
+    setCmaSubjectParcels([]);
+    setCmaSubjectMeta({ name: '', county: '', state: 'TX' });
+    setCmaCompIds([]);
+    setCmaPhase('subject');
+    setSelectedComp(null);
+    setMapMode('view');
+    setSheetMode('none');
+    toast('Tap parcels to assemble the subject tract. Multiple = merged.', {
+      icon: '📋', duration: 4500,
+    });
+  }, []);
+
+  const cancelCMA = useCallback(() => {
+    setCmaMode(false);
+    setCmaSubjectParcels([]);
+    setCmaSubjectMeta({ name: '', county: '', state: 'TX' });
+    setCmaCompIds([]);
+    setCmaPhase('subject');
+    setCmaEditingId(null);
+    // Clear visual layers
+    if (map.current && mapLoaded) {
+      try {
+        const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+        const merged = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+        if (merged) merged.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+  }, [mapLoaded]);
+
+  // Lock the selected parcels into a single merged subject tract. Renders the
+  // union into the merged-boundary source and transitions to comp-picking phase.
+  const lockSubjectTract = useCallback(async () => {
+    if (cmaSubjectParcels.length === 0) {
+      toast.error('Tap parcels first to build the subject tract');
+      return;
+    }
+    // @ts-expect-error — turf v6.5 .d.ts not exposed
+    const turf = (await import('@turf/turf')) as any;
+    const features = cmaSubjectParcels
+      .filter((p) => p.geometry)
+      .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+    let merged: any = features[0];
+    for (let i = 1; i < features.length; i++) {
+      try {
+        const u = turf.union(merged, features[i]);
+        if (u) merged = u;
+      } catch {}
+    }
+    if (map.current && mapLoaded) {
+      try {
+        const mergedSrc = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+        if (mergedSrc && merged) {
+          mergedSrc.setData({
+            type: 'FeatureCollection',
+            features: [{ type: 'Feature', properties: {}, geometry: merged.geometry || merged }],
+          });
+        }
+        // Clear individual parcel highlights now that they're merged
+        const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+    setCmaPhase('comps');
+    const totalAcres = cmaSubjectParcels.reduce((s, p) => s + (p.acres || 0), 0);
+    toast.success(
+      `Subject locked — ${cmaSubjectParcels.length} parcel${cmaSubjectParcels.length === 1 ? '' : 's'}, ${totalAcres.toFixed(1)} ac. Now tap comp pins.`
+    );
+  }, [cmaSubjectParcels, mapLoaded]);
+
+  const unlockSubjectTract = useCallback(() => {
+    setCmaPhase('subject');
+    // Re-show individual parcels in the selected layer
+    if (map.current && mapLoaded) {
+      try {
+        const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        if (sel) {
+          sel.setData({
+            type: 'FeatureCollection',
+            features: cmaSubjectParcels.filter(p => p.geometry).map(p => ({
+              type: 'Feature' as const,
+              properties: { id: p.parcel_id },
+              geometry: p.geometry,
+            })),
+          });
+        }
+        const merged = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+        if (merged) merged.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+  }, [cmaSubjectParcels, mapLoaded]);
+
+  const toggleCmaSubjectParcel = useCallback((parcel: ParcelFeature) => {
+    setCmaSubjectParcels(prev => {
+      const already = prev.some(p => p.parcel_id === parcel.parcel_id);
+      const next = already
+        ? prev.filter(p => p.parcel_id !== parcel.parcel_id)
+        : [...prev, parcel];
+      // Reflect on the map via the existing selected-parcels source
+      if (map.current) {
+        const src = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        if (src) {
+          src.setData({
+            type: 'FeatureCollection',
+            features: next.filter(p => p.geometry).map(p => ({
+              type: 'Feature' as const,
+              properties: { id: p.parcel_id },
+              geometry: p.geometry,
+            })),
+          });
+        }
+      }
+      return next;
+    });
+    // Also seed metadata from the first parcel if blank
+    setCmaSubjectMeta(meta => {
+      if (meta.county && meta.name) return meta;
+      return {
+        name: meta.name || parcel.owner_name || `${parcel.county || 'TX'} subject`,
+        county: meta.county || parcel.county || '',
+        state: meta.state || parcel.state || 'TX',
+      };
+    });
+  }, []);
+
+  const toggleCmaComp = useCallback((compId: string) => {
+    setCmaCompIds(prev =>
+      prev.includes(compId) ? prev.filter(i => i !== compId) : [...prev, compId]
+    );
+  }, []);
+
+  const saveCMA = useCallback(async () => {
+    const isEditing = !!cmaEditingId;
+    if (cmaCompIds.length === 0) {
+      toast.error('Tap at least one comp pin to include in the CMA');
+      return;
+    }
+    // For new CMAs, we need fresh subject parcels. When editing existing,
+    // the subject is frozen — we only update comp selection + recompute values.
+    const subjAcres = isEditing
+      ? (parseFloat(String(cmaSubjectMeta.county ? viewingCMA?.subject_acres ?? 0 : 0)) || 0)
+      : cmaSubjectParcels.reduce((s, p) => s + (p.acres || 0), 0);
+    if (!isEditing) {
+      if (cmaSubjectParcels.length === 0) {
+        toast.error('Tap one or more parcels to define the subject tract');
+        return;
+      }
+      if (!cmaSubjectMeta.county) {
+        toast.error('Subject county is required');
+        return;
+      }
+      if (subjAcres <= 0) {
+        toast.error('Subject acreage is missing — set acres on the subject parcels');
+        return;
+      }
+    }
+    setSavingCMA(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        toast.error('Not signed in');
+        return;
+      }
+      const ppas = comps
+        .filter(c => cmaCompIds.includes(c.id))
+        .map(c => c.ppa_land_only || c.price_per_acre || 0)
+        .filter(v => v > 0);
+      const ppaLow = ppas.length ? Math.min(...ppas) : null;
+      const ppaMid = ppas.length ? ppas.reduce((a, b) => a + b, 0) / ppas.length : null;
+      const ppaHigh = ppas.length ? Math.max(...ppas) : null;
+
+      // For new CMAs, compute subject centroid + merged boundary from the
+      // selected parcels. Editing existing leaves the stored geometry alone.
+      let subjectLat: number | null = null;
+      let subjectLng: number | null = null;
+      let subjectGeom: any = null;
+      if (!isEditing && cmaSubjectParcels.length > 0) {
+        // @ts-expect-error — turf v6.5 .d.ts not exposed
+        const turf = (await import('@turf/turf')) as any;
+        const features = cmaSubjectParcels
+          .filter((p) => p.geometry)
+          .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+        if (features.length > 0) {
+          let merged: any = features[0];
+          for (let i = 1; i < features.length; i++) {
+            try {
+              const u = turf.union(merged, features[i]);
+              if (u) merged = u;
+            } catch {}
+          }
+          subjectGeom = merged?.geometry || merged;
+          try {
+            const c = turf.centroid(merged);
+            subjectLng = c.geometry.coordinates[0];
+            subjectLat = c.geometry.coordinates[1];
+          } catch {}
+        }
+        // Fallback to first parcel's lat/lng if turf failed
+        if (subjectLat == null) {
+          subjectLat = cmaSubjectParcels[0].latitude ?? null;
+          subjectLng = cmaSubjectParcels[0].longitude ?? null;
+        }
+      }
+
+      let savedId: string | null = null;
+      if (isEditing && cmaEditingId) {
+        const acresForCalc = viewingCMA?.subject_acres ?? subjAcres;
+        const { error } = await supabase
+          .from('cmas')
+          .update({
+            selected_comp_ids: cmaCompIds,
+            subject_name: cmaSubjectMeta.name || `${cmaSubjectMeta.county} subject`,
+            subject_county: cmaSubjectMeta.county,
+            subject_state: cmaSubjectMeta.state || 'TX',
+            ppa_low: ppaLow,
+            ppa_mid: ppaMid,
+            ppa_high: ppaHigh,
+            value_low: ppaLow != null ? ppaLow * acresForCalc : null,
+            value_mid: ppaMid != null ? ppaMid * acresForCalc : null,
+            value_high: ppaHigh != null ? ppaHigh * acresForCalc : null,
+          })
+          .eq('id', cmaEditingId);
+        if (error) {
+          toast.error(error.message);
+          return;
+        }
+        savedId = cmaEditingId;
+        toast.success(`CMA updated — ${cmaCompIds.length} comps`);
+      } else {
+        const { data, error } = await supabase
+          .from('cmas')
+          .insert({
+            created_by: user.id,
+            subject_name: cmaSubjectMeta.name || `${cmaSubjectMeta.county} subject`,
+            subject_county: cmaSubjectMeta.county,
+            subject_state: cmaSubjectMeta.state || 'TX',
+            subject_acres: subjAcres,
+            subject_latitude: subjectLat,
+            subject_longitude: subjectLng,
+            subject_boundary_geojson: subjectGeom,
+            selected_comp_ids: cmaCompIds,
+            ppa_low: ppaLow,
+            ppa_mid: ppaMid,
+            ppa_high: ppaHigh,
+            value_low: ppaLow != null ? ppaLow * subjAcres : null,
+            value_mid: ppaMid != null ? ppaMid * subjAcres : null,
+            value_high: ppaHigh != null ? ppaHigh * subjAcres : null,
+          })
+          .select()
+          .single();
+        if (error) {
+          toast.error(error.message);
+          return;
+        }
+        savedId = data?.id ?? null;
+        toast.success(`CMA created — ${cmaSubjectParcels.length} subject parcel${cmaSubjectParcels.length === 1 ? '' : 's'}, ${cmaCompIds.length} comps`);
+      }
+      cancelCMA();
+      if (savedId) {
+        router.push(`/dashboard/map?cma=${savedId}`);
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Save failed');
+    } finally {
+      setSavingCMA(false);
+    }
+  }, [cmaEditingId, cmaSubjectParcels, cmaSubjectMeta, cmaCompIds, comps, viewingCMA, supabase, cancelCMA, router]);
+
+  // Ask the server for top similar comps, then auto-add them to the CMA
+  // selection. Uses the locked subject's lat/lng/acres/county. Already-selected
+  // comps are excluded so repeated clicks expand the set.
+  const suggestComps = useCallback(async () => {
+    let lat: number | null = null, lng: number | null = null;
+    let county = cmaSubjectMeta.county;
+    let acres = 0;
+
+    if (cmaEditingId && viewingCMA) {
+      lat = viewingCMA.subject_latitude ?? null;
+      lng = viewingCMA.subject_longitude ?? null;
+      acres = Number(viewingCMA.subject_acres) || 0;
+      county = county || viewingCMA.subject_county || '';
+    } else if (cmaSubjectParcels.length > 0) {
+      acres = cmaSubjectParcels.reduce((s, p) => s + (p.acres || 0), 0);
+      // Centroid of subject parcels
+      const lats = cmaSubjectParcels.map(p => p.latitude).filter(v => v != null) as number[];
+      const lngs = cmaSubjectParcels.map(p => p.longitude).filter(v => v != null) as number[];
+      if (lats.length && lngs.length) {
+        lat = lats.reduce((a, b) => a + b, 0) / lats.length;
+        lng = lngs.reduce((a, b) => a + b, 0) / lngs.length;
+      }
+    }
+
+    if (lat == null || lng == null || !acres) {
+      toast.error('Lock a subject tract first');
+      return;
+    }
+
+    setSuggestingComps(true);
+    try {
+      const res = await fetch('/api/cma/suggest-comps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject: { latitude: lat, longitude: lng, county, state: cmaSubjectMeta.state || 'TX', acres },
+          limit: 8,
+          exclude_ids: cmaCompIds,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Suggest failed');
+        return;
+      }
+      const ids: string[] = (data.suggestions || []).map((s: any) => s.id);
+      if (ids.length === 0) {
+        toast(`No similar comps found in ${data.total_candidates} sold comps`, { duration: 3000 });
+        return;
+      }
+      setCmaCompIds(prev => Array.from(new Set([...prev, ...ids])));
+      toast.success(`Added ${ids.length} suggested comp${ids.length === 1 ? '' : 's'}`);
+    } catch (e: any) {
+      toast.error(e?.message || 'Suggest failed');
+    } finally {
+      setSuggestingComps(false);
+    }
+  }, [cmaEditingId, viewingCMA, cmaSubjectMeta, cmaSubjectParcels, cmaCompIds]);
+
+  const startReselectParcels = useCallback((comp: Comp) => {
+    setReselectingComp(comp);
+    setSelectedParcels([]);
+    setMapMode('parcel_select');
+    setSheetMode('selecting');
+    setSelectedComp(null);
+    setTappedParcel(null);
+    if (map.current && comp.latitude != null && comp.longitude != null) {
+      map.current.flyTo({ center: [comp.longitude, comp.latitude], zoom: 15, duration: 800 });
+    }
+    toast(
+      `Re-selecting parcels for "${comp.property_name || comp.county || 'comp'}". ` +
+      `Tap parcels to toggle, then Combine.`,
+      { icon: '🗺️', duration: 4500 }
+    );
+  }, []);
+
+  const saveReselectedParcelsToComp = useCallback(
+    async (comp: Comp, parcels: ParcelFeature[]) => {
+      if (parcels.length === 0) {
+        toast.error('No parcels selected');
+        return;
+      }
+      // @ts-expect-error — turf v6.5 .d.ts not exposed
+      const turf = (await import('@turf/turf')) as any;
+      const features = parcels
+        .filter((p) => p.geometry)
+        .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+      let merged: any = features[0];
+      for (let i = 1; i < features.length; i++) {
+        try {
+          const u = turf.union(merged, features[i]);
+          if (u) merged = u;
+        } catch {}
+      }
+      const geometry = merged?.geometry || merged;
+      try {
+        const res = await fetch(`/api/comp/${comp.id}/boundary`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ geometry }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          toast.error(data.error || 'Failed to save boundary');
+          return;
+        }
+        toast.success(
+          `Boundary updated — ${parcels.length} parcel${parcels.length === 1 ? '' : 's'}`
+        );
+        setReselectingComp(null);
+        resetParcelState();
+        setSheetMode('none');
+        await fetchComps();
+      } catch (e: any) {
+        toast.error(e?.message || 'Save failed');
+      }
+    },
+    [resetParcelState, fetchComps]
+  );
+
+  const fixAcresFromDescription = useCallback(
+    async (compId: string, newAcres: number) => {
+      try {
+        const { error } = await supabase
+          .from('comps')
+          .update({ acres: newAcres })
+          .eq('id', compId);
+        if (error) {
+          toast.error(error.message);
+          return;
+        }
+        toast.success(`Acres updated to ${newAcres.toLocaleString()}`);
+        await fetchComps();
+      } catch (e: any) {
+        toast.error(e?.message || 'Update failed');
+      }
+    },
+    [supabase, fetchComps]
+  );
+
+  const clearBoundary = useCallback(async () => {
+    if (!selectedComp) return;
+    if (!confirm('Remove the saved boundary for this comp?')) return;
+    try {
+      const res = await fetch(`/api/comp/${selectedComp.id}/boundary`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geometry: null }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to clear boundary');
+        return;
+      }
+      toast.success('Boundary cleared');
+      await fetchComps();
+    } catch (e: any) {
+      toast.error(e?.message || 'Clear failed');
+    }
+  }, [selectedComp, fetchComps]);
+
+  const detectBoundary = useCallback(async () => {
+    if (!selectedComp) return;
+    setDetectingBoundary(true);
+    try {
+      const res = await fetch(`/api/comp/${selectedComp.id}/enrich-boundary`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Could not detect boundary');
+        return;
+      }
+      const summary = `${data.holding_parcel_count} parcel${data.holding_parcel_count === 1 ? '' : 's'}, ${data.acres?.toFixed?.(1) ?? '?'} ac`;
+      if (data.partial_sale) {
+        toast(
+          `⚠️ Partial sale detected — used seed parcel only (${summary}). Verify the boundary matches the report.`,
+          { duration: 6000, icon: '⚠️' }
+        );
+      } else {
+        toast.success(`Boundary detected — ${summary}`);
+      }
+      await fetchComps();
+    } catch (e: any) {
+      toast.error(e?.message || 'Boundary detection failed');
+    } finally {
+      setDetectingBoundary(false);
+    }
+  }, [selectedComp, fetchComps]);
+
+  // Viewport-based TxGIO vector parcels — covers all of TX, only loads what's
+  // visible. Kicks in at zoom 13 (matches when raster boundaries are readable),
+  // labels held back to zoom 14 to avoid clutter.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+
+    if (!map.current.getSource('txgio-bbox')) {
+      map.current.addSource('txgio-bbox', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+        attribution: 'Parcels © TxGIO',
+      });
+      map.current.addLayer({
+        id: 'txgio-bbox-line',
+        type: 'line',
+        source: 'txgio-bbox',
+        minzoom: 13,
+        paint: {
+          'line-color': '#fbbf24',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 13, 1.2, 14, 1.6, 16, 2, 19, 2.5],
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.9, 14, 1],
+        },
+      });
+      map.current.addLayer({
+        id: 'txgio-bbox-fill',
+        type: 'fill',
+        source: 'txgio-bbox',
+        minzoom: 13,
+        paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0 }, // invisible click target
+      });
+      map.current.addLayer({
+        id: 'txgio-bbox-labels',
+        type: 'symbol',
+        source: 'txgio-bbox',
+        minzoom: 14,
+        layout: {
+          'text-field': ['get', 'owner_name'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 9, 16, 11, 19, 13],
+          'text-allow-overlap': false,
+          'text-padding': 2,
+          'text-max-width': 9,
+          'symbol-placement': 'point',
+        },
+        paint: {
+          'text-color': '#f8fafc',
+          'text-halo-color': '#0b0f14',
+          'text-halo-width': 1.6,
+          'text-halo-blur': 0.4,
+        },
+      });
+    }
+
+    let timer: any = null;
+    let lastBbox = '';
+    const update = () => {
+      if (!map.current) return;
+      const zoom = map.current.getZoom();
+      if (zoom < 13) {
+        console.log(`[txgio-bbox] skipped — zoom ${zoom.toFixed(1)} < 13 (zoom in further)`);
+        return;
+      }
+      const b = map.current.getBounds();
+      if (!b) return;
+      const bbox = `${b.getWest().toFixed(5)},${b.getSouth().toFixed(5)},${b.getEast().toFixed(5)},${b.getNorth().toFixed(5)}`;
+      if (bbox === lastBbox) return;
+      lastBbox = bbox;
+      console.log(`[txgio-bbox] fetching parcels at zoom ${zoom.toFixed(1)} bbox=${bbox}`);
+      fetch(`/api/parcels-bbox?bbox=${bbox}`)
+        .then((r) => {
+          if (!r.ok) {
+            console.warn(`[txgio-bbox] HTTP ${r.status} from /api/parcels-bbox`);
+            return Promise.reject(r.status);
+          }
+          return r.json();
+        })
+        .then((data: any) => {
+          const count = Array.isArray(data?.features) ? data.features.length : 0;
+          console.log(`[txgio-bbox] received ${count} parcels`);
+          if (!data?.features) return;
+          const src = map.current?.getSource('txgio-bbox') as mapboxgl.GeoJSONSource | undefined;
+          if (src) src.setData(data);
+        })
+        .catch((e) => {
+          console.warn('[txgio-bbox] fetch failed:', e);
+        });
+    };
+    const onMoveEnd = () => {
+      clearTimeout(timer);
+      timer = setTimeout(update, 350);
+    };
+    map.current.on('moveend', onMoveEnd);
+    update();
+    return () => {
+      clearTimeout(timer);
+      map.current?.off('moveend', onMoveEnd);
+    };
+  }, [mapLoaded]);
+
+  // Load Blanco CAD parcels and add source+layers together once data arrives.
+  // Adding the source before its data is loaded leads to silent rendering
+  // failures in some Mapbox-gl versions, so we do both atomically here.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    if (map.current.getSource('cad-blanco')) return; // already loaded
+    let cancelled = false;
+    const t = toast.loading('Loading Blanco CAD parcels…', { id: 'cad-blanco' });
+
+    fetch('/api/county-parcels/blanco')
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: any) => {
+        if (cancelled || !map.current) return;
+        const featureCount = data?.features?.length || 0;
+        if (featureCount === 0) {
+          toast.error('Blanco: 0 parcels (upstream blank)', { id: 'cad-blanco' });
+          return;
+        }
+        try {
+          map.current.addSource('cad-blanco', {
+            type: 'geojson',
+            data,
+            attribution: 'Parcels © Blanco CAD',
+          });
+          map.current.addLayer({
+            id: 'cad-blanco-fill',
+            type: 'fill',
+            source: 'cad-blanco',
+            minzoom: 14,
+            paint: { 'fill-color': '#34d399', 'fill-opacity': 0.06 },
+          });
+          map.current.addLayer({
+            id: 'cad-blanco-line',
+            type: 'line',
+            source: 'cad-blanco',
+            minzoom: 14,
+            paint: {
+              'line-color': '#34d399',
+              'line-opacity': 0.95,
+              'line-width': ['interpolate', ['linear'], ['zoom'], 14, 1.4, 17, 2, 19, 2.8],
+            },
+          });
+          map.current.addLayer({
+            id: 'cad-blanco-labels',
+            type: 'symbol',
+            source: 'cad-blanco',
+            minzoom: 14,
+            layout: {
+              'text-field': ['get', 'file_as_name'],
+              'text-size': ['interpolate', ['linear'], ['zoom'], 13, 9, 16, 11, 19, 14],
+              'text-allow-overlap': false,
+              'text-padding': 2,
+              'text-max-width': 9,
+              'text-letter-spacing': 0.02,
+              'symbol-placement': 'point',
+            },
+            paint: {
+              'text-color': '#f8fafc',
+              'text-halo-color': '#0b0f14',
+              'text-halo-width': 1.8,
+              'text-halo-blur': 0.6,
+            },
+          });
+          toast.success(`Blanco: ${featureCount} parcels`, { id: 'cad-blanco', duration: 2500 });
+        } catch (e: any) {
+          toast.error(`Layer add failed: ${e?.message || e}`, { id: 'cad-blanco' });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast.error(`Blanco load failed: ${err.message || err}`, { id: 'cad-blanco' });
+      });
+    return () => { cancelled = true; toast.dismiss(t); };
+  }, [mapLoaded]);
+
+  // Honor ?cma=<id> — load that CMA into workspace view (filters comps to
+  // just the ones in this CMA, shows a banner). Clears when ?cma is removed.
+  useEffect(() => {
+    const cmaId = searchParams?.get('cma');
+    if (!cmaId) {
+      setViewingCMA(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.from('cmas').select('*').eq('id', cmaId).single();
+      if (cancelled) return;
+      if (error || !data) {
+        toast.error('CMA not found');
+        return;
+      }
+      setViewingCMA(data);
+    })();
+    return () => { cancelled = true; };
+  }, [searchParams, supabase]);
+
+  // Copy the active CMA's share URL to clipboard. Falls back to a long toast
+  // showing the URL if the clipboard API isn't available (e.g. Safari without
+  // user-gesture context).
+  const copyShareLink = useCallback(async () => {
+    if (!viewingCMA?.share_token) {
+      toast.error('No share link available on this CMA');
+      return;
+    }
+    const url = `${window.location.origin}/report/${viewingCMA.share_token}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      toast.success('Share link copied to clipboard');
+      setTimeout(() => setShareCopied(false), 2500);
+    } catch {
+      toast(url, { duration: 8000 });
+    }
+  }, [viewingCMA]);
+
+  // Load the broker's team members + current collaborators when the Collaborate
+  // modal opens. Team is derived from profiles.team_id of the current user.
+  const openCollaboratorModal = useCallback(async () => {
+    if (!viewingCMA?.id || !currentUserId) return;
+    setCollabOpen(true);
+    setCollabLoading(true);
+    try {
+      // Find the current user's team_id
+      const { data: me } = await supabase
+        .from('profiles')
+        .select('team_id')
+        .eq('id', currentUserId)
+        .maybeSingle();
+      const teamId = (me as any)?.team_id;
+
+      // Team members on the same team (excluding the current user)
+      let members: TeamMember[] = [];
+      if (teamId) {
+        const { data: m } = await supabase
+          .from('profiles')
+          .select('id,full_name,email')
+          .eq('team_id', teamId)
+          .neq('id', currentUserId);
+        members = (m as any) || [];
+      }
+      setTeamMembers(members);
+
+      // Already-added collaborators on this CMA
+      const { data: existing } = await supabase
+        .from('cma_collaborators')
+        .select('user_id')
+        .eq('cma_id', viewingCMA.id);
+      setCollaboratorUserIds(new Set(((existing as any) || []).map((r: any) => r.user_id)));
+    } catch (e: any) {
+      toast.error(e?.message || 'Could not load team');
+    } finally {
+      setCollabLoading(false);
+    }
+  }, [viewingCMA, currentUserId, supabase]);
+
+  // Add or remove a teammate as a collaborator. Optimistic UI updates the
+  // Set immediately, then writes through to the DB.
+  const toggleCollaborator = useCallback(async (userId: string) => {
+    if (!viewingCMA?.id) return;
+    const wasIn = collaboratorUserIds.has(userId);
+    // Optimistic
+    setCollaboratorUserIds(prev => {
+      const next = new Set(prev);
+      if (wasIn) next.delete(userId); else next.add(userId);
+      return next;
+    });
+    if (wasIn) {
+      const { error } = await supabase
+        .from('cma_collaborators')
+        .delete()
+        .eq('cma_id', viewingCMA.id)
+        .eq('user_id', userId);
+      if (error) {
+        toast.error(error.message);
+        setCollaboratorUserIds(prev => new Set(prev).add(userId)); // rollback
+      }
+    } else {
+      const { error } = await supabase
+        .from('cma_collaborators')
+        .insert({
+          cma_id: viewingCMA.id,
+          user_id: userId,
+          role: 'editor',
+          added_by: currentUserId,
+        });
+      if (error) {
+        toast.error(error.message);
+        setCollaboratorUserIds(prev => {
+          const next = new Set(prev);
+          next.delete(userId);
+          return next;
+        });
+      }
+    }
+  }, [viewingCMA, currentUserId, collaboratorUserIds, supabase]);
+
+  const exitCmaWorkspace = useCallback(() => {
+    router.replace('/dashboard/map');
+  }, [router]);
+
+  // Hydrate adjustment draft when a CMA loads
+  useEffect(() => {
+    if (!viewingCMA) {
+      setCompAdjustmentsDraft({});
+      return;
+    }
+    setCompAdjustmentsDraft(
+      (viewingCMA.comp_adjustments && typeof viewingCMA.comp_adjustments === 'object')
+        ? { ...viewingCMA.comp_adjustments }
+        : {}
+    );
+  }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync the dual BOV inputs when a different CMA loads. We bind to id only
+  // (not broker_opinion_value) so live typing isn't overwritten by the
+  // optimistic state round-trip during keystrokes.
+  useEffect(() => {
+    const total = (viewingCMA as any)?.broker_opinion_value;
+    const acres = Number(viewingCMA?.subject_acres) || 0;
+    const totalNum = total != null ? Number(total) : NaN;
+    if (Number.isFinite(totalNum) && totalNum > 0) {
+      setBovTotalInput(String(Math.round(totalNum)));
+      setBovPpaInput(acres > 0 ? String(Math.round(totalNum / acres)) : '');
+    } else {
+      setBovTotalInput('');
+      setBovPpaInput('');
+    }
+  }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Immediate save — used by Save button and effect cleanup so pending edits
+  // never get cancelled by debounce when the user navigates away.
+  const flushAdjustments = useCallback(
+    async (cmaId: string, draft: Record<string, CompAdjustment>) => {
+      const { error } = await supabase
+        .from('cmas')
+        .update({ comp_adjustments: draft })
+        .eq('id', cmaId);
+      if (error) {
+        toast.error(error.message);
+        return false;
+      }
+      setViewingCMA((prev: any) =>
+        prev && prev.id === cmaId ? { ...prev, comp_adjustments: draft } : prev
+      );
+      return true;
+    },
+    [supabase]
+  );
+
+  // Debounced auto-save (600ms). Cleanup flushes any pending change so
+  // exiting the report mid-edit still persists.
+  useEffect(() => {
+    if (!viewingCMA?.id) return;
+    const cmaId = viewingCMA.id;
+    const stored = (viewingCMA.comp_adjustments || {}) as Record<string, CompAdjustment>;
+    const draftSnapshot = compAdjustmentsDraft;
+    if (JSON.stringify(stored) === JSON.stringify(draftSnapshot)) return;
+    const t = setTimeout(() => { flushAdjustments(cmaId, draftSnapshot); }, 600);
+    return () => {
+      // The 600ms timer hadn't fired yet — flush immediately on cleanup.
+      clearTimeout(t);
+      flushAdjustments(cmaId, draftSnapshot);
+    };
+  }, [compAdjustmentsDraft, viewingCMA, flushAdjustments]);
+
+  const updateAdjustment = useCallback((compId: string, patch: Partial<CompAdjustment>) => {
+    setCompAdjustmentsDraft(prev => ({
+      ...prev,
+      [compId]: { ...(prev[compId] || {}), ...patch },
+    }));
+  }, []);
+
+  // Enter parcel-select mode tied to the active CMA's subject. When the user
+  // hits Combine, we save the merged geometry + centroid to the CMA's
+  // subject_boundary_geojson / subject_latitude / subject_longitude columns.
+  const [settingSubjectForCma, setSettingSubjectForCma] = useState<string | null>(null);
+  const startMapSubjectForCMA = useCallback(() => {
+    if (!viewingCMA) return;
+    setSettingSubjectForCma(viewingCMA.id);
+    setSelectedParcels([]);
+    setMapMode('parcel_select');
+    setSheetMode('selecting');
+    setSelectedComp(null);
+    setTappedParcel(null);
+    toast(
+      `Tap parcels for the subject of "${viewingCMA.subject_name || 'CMA'}". Combine to save.`,
+      { icon: '📍', duration: 4500 }
+    );
+  }, [viewingCMA]);
+
+  const saveSubjectFromParcels = useCallback(
+    async (cmaId: string, parcels: ParcelFeature[]) => {
+      if (parcels.length === 0) {
+        toast.error('No parcels selected');
+        return;
+      }
+      // @ts-expect-error — turf v6.5 .d.ts not exposed
+      const turf = (await import('@turf/turf')) as any;
+      const features = parcels
+        .filter((p) => p.geometry)
+        .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+      let merged: any = features[0];
+      for (let i = 1; i < features.length; i++) {
+        try {
+          const u = turf.union(merged, features[i]);
+          if (u) merged = u;
+        } catch {}
+      }
+      let lat: number | null = null, lng: number | null = null;
+      try {
+        const c = turf.centroid(merged);
+        lng = c.geometry.coordinates[0];
+        lat = c.geometry.coordinates[1];
+      } catch {}
+      if (lat == null) { lat = parcels[0].latitude ?? null; lng = parcels[0].longitude ?? null; }
+      const totalAcres = parcels.reduce((s, p) => s + (p.acres || 0), 0);
+      const { error } = await supabase
+        .from('cmas')
+        .update({
+          subject_latitude: lat,
+          subject_longitude: lng,
+          subject_boundary_geojson: merged?.geometry || merged,
+          // also keep subject_acres in sync
+          subject_acres: totalAcres > 0 ? totalAcres : undefined,
+        })
+        .eq('id', cmaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success(`Subject mapped — ${parcels.length} parcel${parcels.length === 1 ? '' : 's'}, ${totalAcres.toFixed(1)} ac`);
+      setSettingSubjectForCma(null);
+      resetParcelState();
+      setSheetMode('none');
+      // Force re-fetch of the CMA to refresh subject pin/boundary
+      const { data } = await supabase.from('cmas').select('*').eq('id', cmaId).single();
+      if (data) setViewingCMA(data);
+    },
+    [supabase, resetParcelState]
+  );
+
+  // Re-open the active CMA in build mode so the user can add/remove comps.
+  // We don't have the original subject parcels stored, so the subject is
+  // shown as a frozen meta card; only comp selection is editable.
+  const editCmaComps = useCallback(() => {
+    if (!viewingCMA) return;
+    setCmaMode(true);
+    setCmaEditingId(viewingCMA.id);
+    setCmaSubjectParcels([]);
+    setCmaSubjectMeta({
+      name: viewingCMA.subject_name || '',
+      county: viewingCMA.subject_county || '',
+      state: viewingCMA.subject_state || 'TX',
+    });
+    setCmaCompIds(viewingCMA.selected_comp_ids || []);
+    setCmaPhase('comps');
+    setSelectedComp(null);
+    // Exit the workspace filter so all comps are visible again
+    router.replace('/dashboard/map');
+    toast(`Editing CMA — already-selected comps are highlighted blue. Tap pins to toggle.`, {
+      icon: '✏️', duration: 4000,
+    });
+  }, [viewingCMA, router]);
+
+  // Render subject boundary in workspace view
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const src = map.current.getSource('cma-subject') as mapboxgl.GeoJSONSource | undefined;
+    if (!src) return;
+    if (viewingCMA?.subject_boundary_geojson) {
+      src.setData({
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry: viewingCMA.subject_boundary_geojson }],
+      });
+    } else {
+      src.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, [viewingCMA, mapLoaded]);
+
+  // For legacy CMAs missing subject coords, set a fallback pin from comp
+  // centroid so it at least shows on the map. Boundary stays empty until the
+  // user uses Map Subject Tract — we never guess polygons we weren't given.
+  useEffect(() => {
+    if (!viewingCMA) return;
+    if (viewingCMA.subject_latitude != null && viewingCMA.subject_longitude != null) return;
+    if (!viewingCMA.id) return;
+    const ids: string[] = viewingCMA.selected_comp_ids || [];
+    const pts = comps
+      .filter((c) => ids.includes(c.id) && c.latitude != null && c.longitude != null)
+      .map((c) => [c.longitude as number, c.latitude as number] as [number, number]);
+    if (pts.length === 0) return;
+    const lng = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const lat = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    let cancelled = false;
+    (async () => {
+      const { error } = await supabase
+        .from('cmas')
+        .update({ subject_latitude: lat, subject_longitude: lng })
+        .eq('id', viewingCMA.id);
+      if (cancelled || error) return;
+      setViewingCMA((prev: any) =>
+        prev && prev.id === viewingCMA.id
+          ? { ...prev, subject_latitude: lat, subject_longitude: lng }
+          : prev
+      );
+    })();
+    return () => { cancelled = true; };
+  }, [viewingCMA, comps, supabase]);
+
+  // Subject marker (yellow pin) in workspace view
+  const subjectMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    if (subjectMarkerRef.current) {
+      subjectMarkerRef.current.remove();
+      subjectMarkerRef.current = null;
+    }
+    if (!viewingCMA?.subject_latitude || !viewingCMA?.subject_longitude) return;
+    const el = document.createElement('div');
+    el.style.cssText = `
+      background:#facc15;border:3px solid #0b0f14;border-radius:50%;
+      width:18px;height:18px;cursor:pointer;
+      box-shadow:0 0 0 3px #facc15aa, 0 4px 14px rgba(0,0,0,.6);
+    `;
+    el.title = viewingCMA.subject_name || 'Subject';
+    subjectMarkerRef.current = new mapboxgl.Marker({ element: el })
+      .setLngLat([viewingCMA.subject_longitude, viewingCMA.subject_latitude])
+      .addTo(map.current);
+    return () => {
+      if (subjectMarkerRef.current) {
+        subjectMarkerRef.current.remove();
+        subjectMarkerRef.current = null;
+      }
+    };
+  }, [viewingCMA, mapLoaded]);
+
+  // Fit the map to the subject + comps belonging to the active CMA
+  useEffect(() => {
+    if (!viewingCMA || !mapLoaded || !map.current) return;
+    const ids: string[] = viewingCMA.selected_comp_ids || [];
+    const points: [number, number][] = comps
+      .filter((c) => ids.includes(c.id) && c.latitude != null && c.longitude != null)
+      .map((c) => [c.longitude as number, c.latitude as number]);
+    if (viewingCMA.subject_latitude != null && viewingCMA.subject_longitude != null) {
+      points.push([viewingCMA.subject_longitude, viewingCMA.subject_latitude]);
+    }
+    if (points.length === 0) return;
+    if (points.length === 1) {
+      map.current.flyTo({ center: points[0], zoom: 13, duration: 1000 });
+      return;
+    }
+    let minLng = points[0][0], maxLng = points[0][0], minLat = points[0][1], maxLat = points[0][1];
+    for (const [lng, lat] of points) {
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+    map.current.fitBounds([[minLng, minLat], [maxLng, maxLat]], {
+      padding: 80, duration: 1000, maxZoom: 13,
+    });
+  }, [viewingCMA, mapLoaded, comps]);
+
+  // Honor ?focus=lat,lng,zoom — flies the map there once it's loaded
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const focus = searchParams?.get('focus');
+    if (!focus) return;
+    const [latStr, lngStr, zoomStr] = focus.split(',');
+    const lat = parseFloat(latStr);
+    const lng = parseFloat(lngStr);
+    const zoom = parseFloat(zoomStr || '14');
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      map.current.flyTo({ center: [lng, lat], zoom: Number.isFinite(zoom) ? zoom : 14, duration: 1200 });
+    }
+  }, [mapLoaded, searchParams]);
+
+  const clearAiSearch = useCallback(() => {
+    setAiHighlightedCompIds(null);
+    setAiResultMessage(null);
+  }, []);
+
+  // Geocode a place name via Mapbox forward geocoding and fly the map there.
+  // Used when the AI search detects a "location" intent rather than a filter.
+  const flyToPlace = useCallback(async (name: string) => {
+    try {
+      const url =
+        `https://api.mapbox.com/search/geocode/v6/forward?q=${encodeURIComponent(name)}` +
+        `&access_token=${process.env.NEXT_PUBLIC_MAPBOX_TOKEN}&limit=1&country=us`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const json = await res.json();
+      const f = json.features?.[0];
+      const coords = f?.geometry?.coordinates;
+      if (!Array.isArray(coords) || coords.length < 2 || !map.current) return;
+      const ftype = f.properties?.feature_type;
+      const zoom = ftype === 'address' ? 16 : ftype === 'place' ? 11 : 13;
+      map.current.flyTo({ center: [coords[0], coords[1]], zoom, duration: 1200 });
+    } catch {}
+  }, []);
+
+  const askAi = useCallback(async () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    setAskingAi(true);
+    try {
+      const res = await fetch('/api/ai-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'AI search failed');
+        return;
+      }
+      if (data.mode === 'location' && data.location?.name) {
+        clearAiSearch();
+        await flyToPlace(data.location.name);
+        return;
+      }
+      if (data.mode !== 'filter' || !data.criteria) {
+        toast(`I'm not sure what you meant. ${data.message || ''}`.trim(), { duration: 4500 });
+        return;
+      }
+      const c = data.criteria;
+      const matchesArr = (val: any, allowed: string[] | null | undefined) =>
+        !allowed || allowed.length === 0 || (val != null && allowed.map(s => s.toLowerCase()).includes(String(val).toLowerCase()));
+      const matchesNumRange = (val: any, min: number | null | undefined, max: number | null | undefined) => {
+        if (val == null) return min == null && max == null;
+        if (min != null && val < min) return false;
+        if (max != null && val > max) return false;
+        return true;
+      };
+      const matchesDateRange = (val: any, after: string | null | undefined, before: string | null | undefined) => {
+        if (!after && !before) return true;
+        if (!val) return false;
+        const t = new Date(val).getTime();
+        if (after && t < new Date(after).getTime()) return false;
+        if (before && t > new Date(before).getTime()) return false;
+        return true;
+      };
+
+      const matchingIds = new Set<string>();
+      for (const comp of comps) {
+        if (!matchesArr(comp.county, c.counties)) continue;
+        if (!matchesArr(comp.state, c.states)) continue;
+        if (!matchesArr(comp.water, c.water)) continue;
+        if (!matchesArr(comp.road_frontage, c.road_frontage)) continue;
+        if (!matchesArr(comp.dev_potential, c.dev_potential)) continue;
+        if (c.has_improvements != null && Boolean(comp.has_improvements) !== Boolean(c.has_improvements)) continue;
+        if (Array.isArray(c.irrigation) && c.irrigation.length > 0) {
+          const v = (comp as any).irrigation as string | null;
+          if (!v || !c.irrigation.includes(v)) continue;
+        }
+        if (c.has_water_rights != null && Boolean((comp as any).has_water_rights) !== Boolean(c.has_water_rights)) continue;
+        if (Array.isArray(c.minerals_sold) && c.minerals_sold.length > 0) {
+          const m = String(comp.minerals_sold || '').toLowerCase();
+          const ok = c.minerals_sold.some((v: string) => m.includes(String(v).toLowerCase()));
+          if (!ok) continue;
+        }
+        if (Array.isArray(c.best_use) && c.best_use.length > 0) {
+          const compUses = Array.isArray(comp.best_use) ? comp.best_use : [];
+          const ok = c.best_use.some((u: string) => compUses.includes(u as any));
+          if (!ok) continue;
+        }
+        if (!matchesNumRange(comp.acres, c.min_acres, c.max_acres)) continue;
+        const ppa = comp.ppa_land_only || comp.price_per_acre || null;
+        if ((c.min_ppa != null || c.max_ppa != null) && !matchesNumRange(ppa, c.min_ppa, c.max_ppa)) continue;
+        if (!matchesDateRange(comp.sale_date, c.sold_after_date, c.sold_before_date)) continue;
+        if (Array.isArray(c.keywords_in_description) && c.keywords_in_description.length > 0) {
+          const desc = (comp.description || '').toLowerCase();
+          const ok = c.keywords_in_description.some((k: string) => desc.includes(String(k).toLowerCase()));
+          if (!ok) continue;
+        }
+        matchingIds.add(comp.id);
+      }
+
+      if (matchingIds.size === 0) {
+        toast(`No matching comps. ${data.message || ''}`.trim(), { duration: 4000, icon: '🔎' });
+        setAiHighlightedCompIds(new Set());
+        setAiResultMessage(data.message || 'No matches');
+        return;
+      }
+      setAiHighlightedCompIds(matchingIds);
+      setAiResultMessage(`${matchingIds.size} comp${matchingIds.size === 1 ? '' : 's'} · ${data.message || q}`);
+      toast.success(`Found ${matchingIds.size} comp${matchingIds.size === 1 ? '' : 's'}`);
+
+      // Fit map bounds to matches
+      if (map.current) {
+        const points: [number, number][] = comps
+          .filter(c => matchingIds.has(c.id) && c.latitude != null && c.longitude != null)
+          .map(c => [c.longitude as number, c.latitude as number]);
+        if (points.length === 1) {
+          map.current.flyTo({ center: points[0], zoom: 12, duration: 1200 });
+        } else if (points.length > 1) {
+          let minLng = points[0][0], maxLng = points[0][0], minLat = points[0][1], maxLat = points[0][1];
+          for (const [lng, lat] of points) {
+            if (lng < minLng) minLng = lng;
+            if (lng > maxLng) maxLng = lng;
+            if (lat < minLat) minLat = lat;
+            if (lat > maxLat) maxLat = lat;
+          }
+          map.current.fitBounds([[minLng, minLat], [maxLng, maxLat]], {
+            padding: 100, duration: 1200, maxZoom: 12,
+          });
+        }
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'AI search failed');
+    } finally {
+      setAskingAi(false);
+    }
+  }, [searchQuery, comps, clearAiSearch, flyToPlace]);
+
+  // When viewing a CMA, restrict everything to its selected comps. Otherwise
+  // apply the map-level scope filter: All / Company / Mine.
+  const displayComps = viewingCMA?.selected_comp_ids?.length
+    ? comps.filter((c) => viewingCMA.selected_comp_ids.includes(c.id))
+    : comps.filter((c) => {
+        if (mapScope === 'company') return Boolean((c as any).is_company_transaction);
+        // "My Sales" reads transaction_agent_id (who closed the deal), NOT
+        // created_by (who typed it in). Research comps you entered but didn't
+        // sell stay out of this view.
+        if (mapScope === 'mine') return currentUserId != null && (c as any).transaction_agent_id === currentUserId;
+        return true;
+      });
+
+  // Comp boundaries (saved polygons from boundary_geojson). Hides the comp
+  // currently being edited so we don't render its boundary twice (the draw
+  // layer is showing it editable). Filters to the active CMA in workspace view.
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+    const features = displayComps
+      .filter((c: any) => c.boundary_geojson && c.id !== editingBoundaryComp?.id)
+      .map((c: any) => ({
+        type: 'Feature' as const,
+        properties: { id: c.id, owner_name: c.owner_name },
+        geometry: c.boundary_geojson,
+      }));
+    const src = map.current.getSource('comp-boundaries') as mapboxgl.GeoJSONSource | undefined;
+    if (src) src.setData({ type: 'FeatureCollection', features });
+  }, [displayComps, mapLoaded, editingBoundaryComp]);
+
   // Comp markers
   useEffect(() => {
     if (!map.current || !mapLoaded) return;
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
+    popupsRef.current.forEach(p => p.remove());
+    popupsRef.current = [];
 
-    comps.forEach(comp => {
+    displayComps.forEach(comp => {
       if (!comp.latitude || !comp.longitude) return;
       const ppa = comp.ppa_land_only || comp.price_per_acre || 0;
-      const color = STATUS_COLORS[comp.status] || '#94a3b8';
+      const baseColor = STATUS_COLORS[comp.status] || '#94a3b8';
+      const isCmaSelected = cmaMode && cmaCompIds.includes(comp.id);
+      const color = isCmaSelected ? '#60a5fa' : baseColor;
 
+      // Base styling. Hover highlight is applied imperatively in a separate
+      // effect (so we don't rebuild markers on every hover change).
       const el = document.createElement('div');
+      el.dataset.compId = comp.id;
+      el.dataset.baseColor = baseColor;
+      el.dataset.isCmaSelected = String(isCmaSelected);
       el.style.cssText = `
-        background:#0b0f14;border:2px solid ${color};border-radius:20px;
+        background:${isCmaSelected ? '#1e3a5f' : '#0b0f14'};border:2px solid ${color};border-radius:20px;
         padding:4px 9px;font-family:'DM Mono',monospace;font-size:11px;
-        font-weight:700;color:${color};cursor:pointer;white-space:nowrap;
-        box-shadow:0 2px 8px rgba(0,0,0,.5);transition:transform .15s;
+        font-weight:700;color:${color};white-space:nowrap;cursor:pointer;
+        box-shadow:${isCmaSelected ? '0 0 0 3px #60a5fa33, ' : ''}0 2px 8px rgba(0,0,0,.5);
+        transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s;
       `;
-      el.textContent = `$${Math.round(ppa / 1000)}k`;
-      el.addEventListener('mouseenter', () => { el.style.transform = 'scale(1.2)'; });
-      el.addEventListener('mouseleave', () => { el.style.transform = 'scale(1)'; });
+      const total = comp.sale_price || 0;
+      const formatPinAmount = (n: number) => {
+        if (!Number.isFinite(n) || n <= 0) return '—';
+        if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+        if (n >= 1_000) return `$${Math.round(n / 1_000)}k`;
+        return `$${Math.round(n)}`;
+      };
+      el.textContent = pinLabelMode === 'total' ? formatPinAmount(total) : formatPinAmount(ppa);
+
+      // Build a hover preview popup that mirrors the collapsed comp card from
+      // the CMA workspace right panel — same header (name + badges) and same
+      // 4-col grid (Acres / Total / Total $/Ac / Adjusted $/Ac). Click still
+      // opens the full Comp Detail panel on the right.
+      const totalPpa = comp.price_per_acre || 0;
+      const adjustedPpa = comp.ppa_land_only || 0;
+      const hasAdjustment = adjustedPpa > 0 && totalPpa > 0 && Math.abs(totalPpa - adjustedPpa) > 1;
+      const isImproved = !!comp.has_improvements;
+      const isStrongIrrigation = (comp as any).irrigation === 'Strong';
+      const isAgentVerified = comp.improvement_source === 'agent_verified';
+      const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
+      const purplePill = (label: string) =>
+        `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(192,132,252,0.1);color:#c084fc;border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+      const improvedBadge = isImproved ? purplePill('IMPROVED') : '';
+      const irrigationBadge = isStrongIrrigation ? purplePill('IRRIGATION') : '';
+      const adjBadge = hasAdjustment
+        ? `<span style="font-size:9px;color:#fbbf24;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+        : '';
+      const agentBadge = isAgentVerified
+        ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(52,211,153,0.1);color:#6ee7b7;border:1px solid rgba(52,211,153,0.3);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+        : '';
+      const adjustedColor = hasAdjustment ? '#fcd34d' : 'rgba(253,230,138,0.45)';
+      const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
+      const popupHtml = `
+        <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+            <span style="font-weight:700;font-size:12px;color:#fff;letter-spacing:-0.01em;">${propertyName}</span>
+            ${improvedBadge}
+            ${irrigationBadge}
+            ${adjBadge}
+            ${agentBadge}
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
+            <div style="color:#64748b;">Acres</div>
+            <div style="color:#64748b;">Total</div>
+            <div style="color:#64748b;">Total $/Ac</div>
+            <div style="color:#64748b;">Adjusted $/Ac</div>
+            <div style="color:#fff;font-weight:700;">${formatAcres(comp.acres)}</div>
+            <div style="color:#fff;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+            <div style="color:#34d399;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+            <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
+          </div>
+        </div>
+      `;
+      const popup = new mapboxgl.Popup({
+        closeButton: false,
+        closeOnClick: false,
+        anchor: 'bottom',
+        offset: 18,
+        className: 'comp-hover-popup',
+        // Mapbox defaults this to 240px which squashes the 4-col grid. Let
+        // the popup size to its content via the inner div's natural width.
+        maxWidth: 'none',
+      })
+        .setLngLat([comp.longitude!, comp.latitude!])
+        .setHTML(popupHtml);
+
+      el.addEventListener('mouseenter', () => {
+        setHoveredCompId(comp.id);
+        if (map.current) popup.addTo(map.current);
+      });
+      el.addEventListener('mouseleave', () => {
+        setHoveredCompId((prev) => (prev === comp.id ? null : prev));
+        popup.remove();
+      });
       el.addEventListener('click', (e) => {
         e.stopPropagation();
+        // Hide the hover popup so it doesn't sit on top of the detail panel.
+        popup.remove();
+        if (cmaModeRef.current) {
+          if (cmaPhaseRef.current === 'subject') {
+            toast('Lock the subject tract first, then tap comps.', { duration: 2000 });
+            return;
+          }
+          toggleCmaComp(comp.id);
+          return;
+        }
         setSelectedComp(comp);
         setSheetMode('none');
         setTappedParcel(null);
@@ -222,10 +2006,62 @@ export default function MapPage() {
         .setLngLat([comp.longitude!, comp.latitude!])
         .addTo(map.current!);
       markersRef.current.push(marker);
+      popupsRef.current.push(popup);
+      markerElsRef.current.set(comp.id, el);
     });
-  }, [comps, mapLoaded]);
+  }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode]);
+
+  // Imperative styling: applies hover-highlight + AI-search dim/highlight to
+  // the existing marker DOM elements without rebuilding them.
+  useEffect(() => {
+    markerElsRef.current.forEach((el, id) => {
+      const baseColor = el.dataset.baseColor || '#94a3b8';
+      const isCmaSelected = el.dataset.isCmaSelected === 'true';
+      const isHovered = id === hoveredCompId;
+      const isAiHighlighted = aiHighlightedCompIds?.has(id) ?? null;
+      const isAiDimmed = aiHighlightedCompIds != null && !aiHighlightedCompIds.has(id);
+
+      // Hide non-matching pins entirely when an AI filter is active
+      el.style.display = isAiDimmed ? 'none' : '';
+      if (isHovered) {
+        el.style.boxShadow = '0 0 0 5px #60a5fa55, 0 6px 18px rgba(0,0,0,.7)';
+        el.style.borderColor = '#60a5fa';
+        el.style.color = '#60a5fa';
+        el.style.zIndex = '10';
+        el.style.opacity = '1';
+      } else if (isAiHighlighted) {
+        el.style.boxShadow = '0 0 0 4px #c084fc55, 0 4px 14px rgba(0,0,0,.6)';
+        el.style.borderColor = '#c084fc';
+        el.style.color = '#c084fc';
+        el.style.zIndex = '5';
+        el.style.opacity = '1';
+      } else {
+        el.style.boxShadow = isCmaSelected
+          ? '0 0 0 3px #60a5fa33, 0 2px 8px rgba(0,0,0,.5)'
+          : '0 2px 8px rgba(0,0,0,.5)';
+        el.style.borderColor = isCmaSelected ? '#60a5fa' : baseColor;
+        el.style.color = isCmaSelected ? '#60a5fa' : baseColor;
+        el.style.zIndex = '1';
+        el.style.opacity = '1';
+      }
+    });
+  }, [hoveredCompId, aiHighlightedCompIds]);
+
 
   const handleCreateBoundary = useCallback((parcels: ParcelFeature[]) => {
+    // If we're mapping the subject for an existing CMA, save to that CMA's
+    // subject geometry columns.
+    if (settingSubjectForCma) {
+      saveSubjectFromParcels(settingSubjectForCma, parcels);
+      return;
+    }
+    // If we're re-selecting parcels for an existing comp, save directly to it
+    // instead of opening the New Boundary sheet.
+    if (reselectingComp) {
+      saveReselectedParcelsToComp(reselectingComp, parcels);
+      return;
+    }
+
     const total = parcels.reduce((sum, p) => sum + (p.acres || 0), 0);
     setMergedAcres(total);
 
@@ -248,7 +2084,77 @@ export default function MapPage() {
 
     setMapMode('view');
     setSheetMode('boundary_created');
-  }, [mapLoaded]);
+  }, [mapLoaded, reselectingComp, saveReselectedParcelsToComp, settingSubjectForCma, saveSubjectFromParcels]);
+
+  const startDrawing = useCallback(() => {
+    if (!drawRef.current) return;
+    drawRef.current.changeMode('draw_polygon');
+    setDrawingActive(true);
+    setMapMode('view');
+    setSheetMode('none');
+    setSelectedComp(null);
+    setTappedParcel(null);
+    toast('Click vertices · double-click to finish', { icon: '✏️', duration: 2500 });
+  }, []);
+
+  const stopDrawing = useCallback(() => {
+    if (!drawRef.current) return;
+    drawRef.current.changeMode('simple_select');
+    setDrawingActive(false);
+  }, []);
+
+  const clearDrawings = useCallback(() => {
+    if (!drawRef.current) return;
+    drawRef.current.deleteAll();
+    setDrawnCount(0);
+    setDrawingActive(false);
+  }, []);
+
+  const combineAll = useCallback(() => {
+    if (!map.current || !mapLoaded) return;
+
+    const drawn = (drawRef.current?.getAll().features || [])
+      .filter((f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon');
+    const parcels = selectedParcels
+      .filter(p => p.geometry)
+      .map(p => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+
+    const all = [...drawn, ...parcels];
+    if (all.length === 0) {
+      toast.error('Nothing to combine — draw or select parcels first');
+      return;
+    }
+
+    let merged: any = all[0];
+    for (let i = 1; i < all.length; i++) {
+      try {
+        const u = turf.union(merged as any, all[i] as any);
+        if (u) merged = u;
+      } catch {}
+    }
+
+    let totalAcres = 0;
+    try { totalAcres = turf.area(merged) / 4046.8564224; } catch {}
+    setMergedAcres(totalAcres);
+
+    const src = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
+    if (src) {
+      src.setData({
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry: merged.geometry || merged }],
+      });
+    }
+    // Clear staging visuals so the merged result is the only one shown
+    const selSrc = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource;
+    if (selSrc) selSrc.setData({ type: 'FeatureCollection', features: [] });
+    if (drawRef.current) drawRef.current.deleteAll();
+    setDrawnCount(0);
+    setDrawingActive(false);
+
+    setMapMode('view');
+    setSheetMode('boundary_created');
+    toast.success(`Combined into ${totalAcres.toFixed(1)} acres`);
+  }, [selectedParcels, mapLoaded]);
 
   const handleAddAsNewComp = useCallback(() => {
     const primary = selectedParcels[0] || tappedParcel;
@@ -286,8 +2192,86 @@ export default function MapPage() {
           style={{ cursor: mapMode === 'parcel_select' ? 'crosshair' : 'default' }}
         />
 
+        {/* Edit Boundary toolbar — appears when actively editing a saved boundary */}
+        {editingBoundaryComp && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30">
+            <div className="bg-amber-500/15 backdrop-blur-md border border-amber-500/40 rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2">
+              <Pencil size={14} className="text-amber-400" />
+              <span className="text-xs font-bold text-amber-200 mr-1">
+                Editing: {editingBoundaryComp.property_name || `${editingBoundaryComp.county} comp`}
+              </span>
+              <button
+                onClick={cancelEditBoundary}
+                disabled={savingBoundary}
+                className="px-3 py-1.5 border border-border bg-panel/70 hover:border-red-400 hover:text-red-400 text-xs font-bold text-slate-300 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEditedBoundary}
+                disabled={savingBoundary}
+                className="px-3 py-1.5 bg-sage hover:bg-sage2 text-black text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
+              >
+                {savingBoundary ? 'Saving…' : 'Save Boundary'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Chat bar — natural-language queries to filter comps or fly to places */}
+        <div className="absolute top-3 left-3 right-3 md:left-1/2 md:right-auto md:-translate-x-1/2 md:w-[36rem] z-20">
+          <div className="relative">
+            <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-300 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  askAi();
+                }
+              }}
+              placeholder="Ask: show me all 400+ acre comps in Real County"
+              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => { setSearchQuery(''); clearAiSearch(); }}
+                title="Clear"
+                className="absolute right-[5.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+              >
+                <X size={12} />
+              </button>
+            )}
+            <button
+              onClick={askAi}
+              disabled={askingAi || !searchQuery.trim()}
+              title="Ask AI"
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-purple-500/25 hover:bg-purple-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-purple-400/40 hover:border-purple-400 rounded-lg text-[11px] font-bold text-purple-100 transition-colors flex items-center gap-1"
+            >
+              <Sparkles size={11} />
+              {askingAi ? '…' : 'Ask'}
+            </button>
+            {aiResultMessage && (
+              <div className="absolute top-full mt-1 left-0 right-0 bg-purple-500/15 backdrop-blur-sm border border-purple-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-purple-200 truncate">{aiResultMessage}</p>
+                <button
+                  onClick={clearAiSearch}
+                  className="text-purple-300/80 hover:text-purple-200 flex-shrink-0"
+                  title="Clear filter"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Map controls */}
-        <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
+        <div className="absolute top-16 left-3 z-10 flex flex-col gap-2">
           {/* Style switcher */}
           <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden flex">
             {(['satellite', 'streets', 'terrain'] as const).map(s => (
@@ -299,8 +2283,64 @@ export default function MapPage() {
             ))}
           </div>
 
+          {/* Pin label toggle — $/Ac vs Total Price */}
+          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[10rem]">
+            <button
+              onClick={() => setPinLabelMode('ppa')}
+              className={`py-2 text-xs font-bold transition-colors text-center ${
+                pinLabelMode === 'ppa' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Show price per acre on pins"
+            >
+              $/Ac
+            </button>
+            <button
+              onClick={() => setPinLabelMode('total')}
+              className={`py-2 text-xs font-bold transition-colors text-center ${
+                pinLabelMode === 'total' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Show total sale price on pins"
+            >
+              Total
+            </button>
+          </div>
+
+          {/* Scope filter — All / Company / Mine. Hidden in CMA workspace
+              (which already filters to its own comps). */}
+          {!viewingCMA && (
+            <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-3 w-[17rem]">
+              <button
+                onClick={() => setMapScope('all')}
+                className={`py-2 text-xs font-bold transition-colors text-center ${
+                  mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                }`}
+                title="Show every comp you have access to"
+              >
+                All
+              </button>
+              <button
+                onClick={() => setMapScope('company')}
+                className={`py-2 text-xs font-bold transition-colors text-center ${
+                  mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                }`}
+                title="Only comps marked as Company Transaction (deals the firm handled)"
+              >
+                Company
+              </button>
+              <button
+                onClick={() => setMapScope('mine')}
+                className={`py-2 text-xs font-bold transition-colors text-center ${
+                  mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                }`}
+                title="Only deals you personally closed (tagged as the transaction agent)"
+              >
+                My Sales
+              </button>
+            </div>
+          )}
+
           {/* Parcel mode button */}
-          {mapMode === 'view' && (
+          {mapMode === 'view' && !drawingActive && (
             <button
               onClick={() => {
                 setMapMode('parcel_select');
@@ -317,9 +2357,78 @@ export default function MapPage() {
           )}
 
           {mapMode === 'parcel_select' && (
-            <div className="bg-sage/10 border border-sage/30 rounded-xl px-3 py-2 text-xs font-bold text-sage flex items-center gap-1.5">
+            <div className={`${settingSubjectForCma ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-300' : 'bg-sage/10 border-sage/30 text-sage'} border rounded-xl px-3 py-2 text-xs font-bold flex items-center gap-1.5`}>
               <MousePointer size={12} />
-              Tap to select parcels
+              {settingSubjectForCma
+                ? `Mapping subject for "${viewingCMA?.subject_name || 'CMA'}"`
+                : reselectingComp
+                ? `Re-selecting: ${reselectingComp.property_name || reselectingComp.county || 'comp'}`
+                : 'Tap to select parcels'}
+            </div>
+          )}
+
+          {/* Draw mode */}
+          {mapMode === 'view' && !drawingActive && (
+            <button
+              onClick={startDrawing}
+              className="bg-panel/90 backdrop-blur-sm border border-border hover:border-sage rounded-xl px-3 py-2 text-xs font-bold text-slate-300 hover:text-sage transition-colors flex items-center gap-1.5"
+            >
+              <Pencil size={12} />
+              Draw Boundary
+            </button>
+          )}
+
+          {drawingActive && (
+            <div className="flex gap-1.5">
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                <Pencil size={12} />
+                Drawing — dbl-click to finish
+              </div>
+              <button
+                onClick={stopDrawing}
+                className="bg-panel/90 border border-border hover:border-red-400 rounded-xl px-2 text-xs font-bold text-slate-400 hover:text-red-400 transition-colors"
+                title="Stop drawing"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+
+          {/* Build CMA mode toggle */}
+          {mapMode === 'view' && !drawingActive && !cmaMode && (
+            <button
+              onClick={startCMA}
+              className="bg-panel/90 backdrop-blur-sm border border-border hover:border-blue-400 rounded-xl px-3 py-2 text-xs font-bold text-slate-300 hover:text-blue-400 transition-colors flex items-center gap-1.5"
+            >
+              <FileText size={12} />
+              Build CMA
+            </button>
+          )}
+
+          {cmaMode && (
+            <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl px-3 py-2 text-xs font-bold text-blue-400 flex items-center gap-1.5">
+              <FileText size={12} />
+              {cmaPhase === 'subject' ? 'CMA · Tap subject parcels' : 'CMA · Tap comp pins'}
+            </div>
+          )}
+
+          {/* Combine + Clear (when something exists) */}
+          {(drawnCount > 0 || selectedParcels.length > 0) && !drawingActive && (
+            <div className="flex gap-1.5">
+              <button
+                onClick={combineAll}
+                className="bg-sage/10 backdrop-blur-sm border border-sage/30 hover:border-sage hover:bg-sage/20 rounded-xl px-3 py-2 text-xs font-bold text-sage transition-colors flex items-center gap-1.5"
+              >
+                <Combine size={12} />
+                Combine ({drawnCount + selectedParcels.length})
+              </button>
+              <button
+                onClick={clearDrawings}
+                className="bg-panel/90 border border-border hover:border-red-400 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-400 hover:text-red-400 transition-colors"
+                title="Clear drawings"
+              >
+                <Trash2 size={12} />
+              </button>
             </div>
           )}
         </div>
@@ -341,8 +2450,946 @@ export default function MapPage() {
         </div>
       </div>
 
+      {/* CMA build panel */}
+      {cmaMode && (() => {
+        const selectedComps = comps.filter(c => cmaCompIds.includes(c.id));
+        const ppas = selectedComps
+          .map(c => c.ppa_land_only || c.price_per_acre || 0)
+          .filter(v => v > 0);
+        const acres = cmaSubjectParcels.reduce((s, p) => s + (p.acres || 0), 0);
+        const ppaLow = ppas.length ? Math.min(...ppas) : 0;
+        const ppaMid = ppas.length ? ppas.reduce((a, b) => a + b, 0) / ppas.length : 0;
+        const ppaHigh = ppas.length ? Math.max(...ppas) : 0;
+
+        return (
+          <div className="hidden md:flex w-80 bg-panel border-l border-border flex-col overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <FileText size={14} className="text-blue-400" />
+                <span className="font-bold text-sm">Build CMA</span>
+              </div>
+              <button onClick={cancelCMA} className="text-slate-500 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              {/* Subject */}
+              <div className="bg-card border border-border rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                    {cmaEditingId ? 'Subject Tract (locked)' : 'Subject Tract'}
+                  </p>
+                  {cmaSubjectParcels.length > 0 && (
+                    <span className="text-[10px] font-bold text-blue-400 font-mono">
+                      {cmaSubjectParcels.length} parcel{cmaSubjectParcels.length === 1 ? '' : 's'} · {acres.toFixed(1)} ac
+                    </span>
+                  )}
+                </div>
+                {cmaEditingId ? (
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-white">{cmaSubjectMeta.name}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {cmaSubjectMeta.county}, {cmaSubjectMeta.state}
+                      {viewingCMA?.subject_acres != null && ` · ${viewingCMA.subject_acres} ac`}
+                    </p>
+                    <p className="text-[10px] text-slate-500 italic mt-1">
+                      Subject is locked. Editing comp selection only.
+                    </p>
+                  </div>
+                ) : cmaSubjectParcels.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">
+                    Tap one or more parcels on the map. Multiple parcels merge into a single subject tract.
+                  </p>
+                ) : (
+                  <>
+                    <input
+                      value={cmaSubjectMeta.name}
+                      onChange={(e) => setCmaSubjectMeta(m => ({ ...m, name: e.target.value }))}
+                      placeholder="Subject name"
+                      className="w-full bg-night border border-border rounded-md px-2 py-1.5 text-xs text-white placeholder-slate-500 outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={cmaSubjectMeta.county}
+                      onChange={(e) => setCmaSubjectMeta(m => ({ ...m, county: e.target.value }))}
+                      placeholder="County"
+                      className="w-full bg-night border border-border rounded-md px-2 py-1.5 text-xs text-white placeholder-slate-500 outline-none focus:border-blue-400"
+                    />
+                    <div className="space-y-1 max-h-32 overflow-y-auto pt-1">
+                      {cmaSubjectParcels.map((p, i) => (
+                        <div key={p.parcel_id} className="flex items-center justify-between bg-night border border-border rounded-md px-2 py-1">
+                          <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                            <span className="text-[9px] font-bold text-blue-400 font-mono">{i + 1}</span>
+                            <span className="text-[11px] text-slate-300 truncate">{p.owner_name || p.parcel_id || 'parcel'}</span>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono mr-1.5">
+                            {p.acres ? p.acres.toFixed(1) + ' ac' : '—'}
+                          </span>
+                          {cmaPhase === 'subject' && (
+                            <button
+                              onClick={() => toggleCmaSubjectParcel(p)}
+                              className="text-slate-500 hover:text-red-400"
+                              title="Remove"
+                            >
+                              <X size={10} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {cmaPhase === 'subject' ? (
+                      <button
+                        onClick={lockSubjectTract}
+                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-400/40 hover:border-blue-400 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <Combine size={12} /> Lock Subject Tract → Pick Comps
+                      </button>
+                    ) : (
+                      <button
+                        onClick={unlockSubjectTract}
+                        className="w-full mt-1 py-1.5 bg-card border border-border hover:border-blue-400 text-[11px] font-bold text-slate-400 hover:text-blue-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <Pencil size={11} /> Edit Subject Parcels
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Smart suggest — visible when subject is locked or editing */}
+              {(cmaPhase === 'comps' || cmaEditingId) && (
+                <button
+                  onClick={suggestComps}
+                  disabled={suggestingComps}
+                  className="w-full py-2.5 bg-gradient-to-r from-purple-500/20 to-blue-500/20 hover:from-purple-500/30 hover:to-blue-500/30 border border-purple-400/40 hover:border-purple-400 text-xs font-bold text-purple-200 rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Sparkles size={12} />
+                  {suggestingComps ? 'Finding similar comps…' : 'Suggest Best Comps'}
+                </button>
+              )}
+
+              {/* Comp picker */}
+              <div className="bg-card border border-border rounded-xl p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Selected Comps</p>
+                  <span className="text-[10px] font-bold text-blue-400 font-mono">{cmaCompIds.length}</span>
+                </div>
+                {cmaCompIds.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">Click comp pins on the map to add them.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {selectedComps.map(c => (
+                      <div key={c.id} className="flex items-center justify-between bg-night border border-border rounded-md px-2 py-1.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-bold text-white truncate">{c.property_name || `${c.county} County`}</p>
+                          <p className="text-[10px] text-slate-500 font-mono">
+                            {formatAcres(c.acres)} · {formatPPA(c.ppa_land_only || c.price_per_acre || 0)}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => toggleCmaComp(c.id)}
+                          className="text-slate-500 hover:text-red-400 ml-2"
+                          title="Remove"
+                        >
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Value range */}
+              {ppas.length > 0 && acres > 0 && (
+                <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl p-3 space-y-1">
+                  <p className="text-[10px] font-bold text-blue-300/80 uppercase tracking-wider mb-1">Estimated Value</p>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-400">Low</span>
+                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaLow * acres)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-slate-200 font-bold">Mid</span>
+                    <span className="font-mono font-bold text-blue-200">{formatCurrency(ppaMid * acres)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-400">High</span>
+                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaHigh * acres)}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 font-mono mt-1.5 pt-1.5 border-t border-blue-400/20">
+                    Range from {formatPPA(ppaLow)} to {formatPPA(ppaHigh)} · {acres.toFixed(0)} ac
+                  </p>
+                </div>
+              )}
+
+              {/* Save */}
+              <button
+                onClick={saveCMA}
+                disabled={savingCMA || cmaCompIds.length === 0 || (!cmaEditingId && cmaSubjectParcels.length === 0)}
+                className="w-full py-2.5 bg-blue-500 hover:bg-blue-400 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Save size={14} />
+                {savingCMA ? 'Saving…' : 'Save CMA'}
+              </button>
+              <button
+                onClick={cancelCMA}
+                className="w-full py-2 text-xs text-slate-500 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* CMA Workspace panel — replaces the comp detail panel when ?cma=ID */}
+      {viewingCMA && !cmaMode && (() => {
+        const ids: string[] = viewingCMA.selected_comp_ids || [];
+        const cmaComps = comps.filter(c => ids.includes(c.id));
+
+        // Effective improvement value for a comp in this CMA: CMA-level
+        // adjustment wins, else the comp's own improvement_value, else null.
+        const effectiveImprovement = (c: Comp): { value: number | null; source: 'appraiser' | 'agent_verified' | 'broker_estimate' | null } => {
+          const adj = compAdjustmentsDraft[c.id] || {};
+          if (adj.improvement_value != null) {
+            return { value: Number(adj.improvement_value), source: adj.improvement_source ?? null };
+          }
+          if (c.improvement_value != null) {
+            return { value: Number(c.improvement_value), source: c.improvement_source ?? null };
+          }
+          return { value: null, source: null };
+        };
+
+        // All-in $/acre: existing logic, sale_price / acres
+        const allInPpa = (c: Comp): number => {
+          const acres = Number(c.acres) || 0;
+          if (acres <= 0) return 0;
+          const total = Number(c.sale_price) || 0;
+          return total > 0 ? total / acres : (c.price_per_acre || 0);
+        };
+        // Land-only $/acre: subtract improvement_value when set; when not set,
+        // assume zero improvements so the comp still contributes to the
+        // land-only average (it'll equal all-in for that comp).
+        const landOnlyPpa = (c: Comp): number | null => {
+          const acres = Number(c.acres) || 0;
+          if (acres <= 0) return null;
+          const total = Number(c.sale_price) || 0;
+          if (total <= 0) return null;
+          const { value: imp } = effectiveImprovement(c);
+          const adjusted = total - (imp ?? 0);
+          return adjusted > 0 ? adjusted / acres : null;
+        };
+
+        // Stats
+        const allInPpas = cmaComps.map(allInPpa).filter((v): v is number => v > 0);
+        const landOnlyPpas = cmaComps
+          .map(c => landOnlyPpa(c))
+          .filter((v): v is number => v != null && v > 0);
+        const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+        const allInLow = allInPpas.length ? Math.min(...allInPpas) : 0;
+        const allInMid = avg(allInPpas);
+        const allInHigh = allInPpas.length ? Math.max(...allInPpas) : 0;
+        const landLow = landOnlyPpas.length ? Math.min(...landOnlyPpas) : 0;
+        const landMid = avg(landOnlyPpas);
+        const landHigh = landOnlyPpas.length ? Math.max(...landOnlyPpas) : 0;
+
+        const subjAcres = Number(viewingCMA.subject_acres) || 0;
+        const allInValue = allInMid * subjAcres;
+        const landOnlyValue = landMid * subjAcres;
+        const landOnlySampleSize = landOnlyPpas.length;
+
+        const toggleExpanded = (id: string) => {
+          setExpandedCompIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+          });
+        };
+
+        return (
+          <div className="hidden md:flex w-96 bg-panel border-l border-border flex-col overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText size={14} className="text-blue-400 flex-shrink-0" />
+                <span className="font-bold text-sm truncate">{viewingCMA.subject_name}</span>
+              </div>
+              <button onClick={exitCmaWorkspace} className="text-slate-500 hover:text-white flex-shrink-0">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {/* Subject summary */}
+              <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-xl p-3 space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 ring-2 ring-yellow-400/40" />
+                  <p className="text-[10px] font-bold text-yellow-300/90 uppercase tracking-wider">Subject</p>
+                </div>
+                <p className="text-sm font-bold text-white">{viewingCMA.subject_name}</p>
+                <p className="text-xs text-slate-400 font-mono">
+                  {viewingCMA.subject_county}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
+                </p>
+              </div>
+
+              {/* Action row */}
+              <div className="grid grid-cols-2 gap-2">
+                {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
+                  <button
+                    onClick={startMapSubjectForCMA}
+                    className="col-span-2 py-2 border border-yellow-400/40 bg-yellow-400/15 hover:bg-yellow-400/25 text-xs font-bold text-yellow-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <MapPin size={12} /> Map Subject Tract
+                  </button>
+                ) : null}
+                <button
+                  onClick={editCmaComps}
+                  className="py-2 border border-blue-400/40 bg-blue-500/15 hover:bg-blue-500/25 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Pencil size={12} /> Edit / Add Comps
+                </button>
+                <button
+                  onClick={copyShareLink}
+                  className={`py-2 border text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
+                    shareCopied
+                      ? 'border-sage bg-sage/20 text-sage'
+                      : 'border-sage/40 bg-sage/15 hover:bg-sage/25 text-sage'
+                  }`}
+                >
+                  {shareCopied ? <><Check size={12} /> Copied</> : <><Share2 size={12} /> Share Report</>}
+                </button>
+                <button
+                  onClick={openCollaboratorModal}
+                  className="py-2 border border-purple-400/40 bg-purple-500/15 hover:bg-purple-500/25 text-xs font-bold text-purple-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Users size={12} />
+                  Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
+                </button>
+                <button
+                  onClick={exitCmaWorkspace}
+                  className="col-span-2 py-2 border border-border bg-card hover:border-slate-400 text-xs font-bold text-slate-300 rounded-lg transition-colors"
+                >
+                  Exit Report
+                </button>
+              </div>
+
+              {/* All-in average */}
+              {allInPpas.length > 0 && (
+                <div className="bg-card border border-border rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-border bg-night/40 flex items-center justify-between">
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Average Total Price Per Acre</p>
+                    <p className="text-[9px] text-slate-500 font-mono">{cmaComps.length} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      <tr><td className="px-3 py-1.5 text-slate-400">Low</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(allInLow * subjAcres)}</td></tr>
+                      <tr className="bg-emerald-400/5 border-t border-border"><td className="px-3 py-2 text-emerald-300 font-bold">Mid</td><td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatCurrency(allInValue)}</td></tr>
+                      <tr className="border-t border-border"><td className="px-3 py-1.5 text-slate-400">High</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(allInHigh * subjAcres)}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Land-only average — only shown if at least one comp has an improvement value */}
+              {landOnlyPpas.length > 0 && (
+                <div className="bg-card border border-amber-400/30 rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-amber-400/20 bg-amber-400/5 flex items-center justify-between">
+                    <p className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
+                    <p className="text-[9px] text-slate-400 font-mono">Based on {landOnlySampleSize} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      <tr><td className="px-3 py-1.5 text-slate-400">Low</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(landLow * subjAcres)}</td></tr>
+                      <tr className="bg-amber-400/5 border-t border-amber-400/15"><td className="px-3 py-2 text-amber-200 font-bold">Mid</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatCurrency(landOnlyValue)}</td></tr>
+                      <tr className="border-t border-amber-400/15"><td className="px-3 py-1.5 text-slate-400">High</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(landHigh * subjAcres)}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Broker Opinion of Value — dual input.
+                  Edit either field; the partner field auto-calculates from
+                  the subject acreage. The total ($) is what gets persisted to
+                  cmas.broker_opinion_value, which the share report reads. */}
+              {(() => {
+                const saveBov = async (total: number | null) => {
+                  setViewingCMA((prev: any) => (prev ? { ...prev, broker_opinion_value: total } : prev));
+                  const { error } = await supabase
+                    .from('cmas')
+                    .update({ broker_opinion_value: total })
+                    .eq('id', viewingCMA.id);
+                  if (error) toast.error(error.message);
+                };
+
+                const onPpaChange = (raw: string) => {
+                  setBovPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovTotalInput('');
+                    saveBov(null);
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovTotalInput(String(Math.round(total)));
+                    saveBov(total);
+                  }
+                };
+
+                const onTotalChange = (raw: string) => {
+                  setBovTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovPpaInput('');
+                    saveBov(null);
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const ppa = total / subjAcres;
+                    setBovPpaInput(String(Math.round(ppa)));
+                    saveBov(total);
+                  } else {
+                    saveBov(total);
+                  }
+                };
+
+                const ppaPlaceholder = landMid > 0
+                  ? Math.round(landMid).toString()
+                  : allInMid > 0
+                  ? Math.round(allInMid).toString()
+                  : '';
+                const totalPlaceholder = landOnlyValue > 0
+                  ? Math.round(landOnlyValue).toString()
+                  : allInValue > 0
+                  ? Math.round(allInValue).toString()
+                  : '';
+
+                return (
+                  <div className="bg-card border border-border rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-bold text-sage uppercase tracking-wider">Your Opinion of Value</p>
+                      <p className="text-[9px] text-slate-500">optional</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {/* $/Acre */}
+                      <div>
+                        <p className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">$/Acre</p>
+                        <div className="relative">
+                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+                          <input
+                            type="number"
+                            placeholder={ppaPlaceholder}
+                            value={bovPpaInput}
+                            onChange={(e) => onPpaChange(e.target.value)}
+                            className="w-full bg-night border border-border focus:border-sage rounded-lg pl-6 pr-2 py-2 text-sm text-white font-mono outline-none"
+                          />
+                        </div>
+                      </div>
+                      {/* Total */}
+                      <div>
+                        <p className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Total</p>
+                        <div className="relative">
+                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+                          <input
+                            type="number"
+                            placeholder={totalPlaceholder}
+                            value={bovTotalInput}
+                            onChange={(e) => onTotalChange(e.target.value)}
+                            className="w-full bg-night border border-border focus:border-sage rounded-lg pl-6 pr-2 py-2 text-sm text-white font-mono outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Edit either field — the other auto-calculates from {formatAcres(subjAcres)}. Leave blank to use the computed averages.
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {/* Comps list */}
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Comparable Sales</p>
+                {cmaComps.map((c) => {
+                  const expanded = expandedCompIds.has(c.id);
+                  const adj = compAdjustmentsDraft[c.id] || {};
+                  const allIn = allInPpa(c);
+                  const landOnly = landOnlyPpa(c);
+                  const { value: effImp, source: effSrc } = effectiveImprovement(c);
+                  const isHovered = hoveredCompId === c.id;
+                  const isAdjusted = adj.improvement_value != null;
+                  const isBrokerEstimated = effSrc === 'broker_estimate';
+                  const editorOpen = adjustmentEditorOpen.has(c.id);
+                  return (
+                    <div
+                      key={c.id}
+                      onMouseEnter={() => setHoveredCompId(c.id)}
+                      onMouseLeave={() => setHoveredCompId(prev => prev === c.id ? null : prev)}
+                      className={`bg-card border rounded-xl overflow-hidden transition-colors ${
+                        isHovered ? 'border-blue-400 ring-2 ring-blue-400/30' : 'border-border'
+                      }`}
+                    >
+                      <button
+                        onClick={() => toggleExpanded(c.id)}
+                        className="w-full px-3 py-2 text-left"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-bold text-white truncate flex-1 flex items-center gap-1.5">
+                            <span className="truncate">{c.property_name || `${c.county} County`}</span>
+                            {c.has_improvements && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                                IMPROVED
+                              </span>
+                            )}
+                            {(c as any).irrigation === 'Strong' && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                                IRRIGATION
+                              </span>
+                            )}
+                            {isAdjusted && <span className="text-[9px] text-amber-400 font-mono flex-shrink-0">ADJ</span>}
+                            {effSrc === 'agent_verified' && (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded flex-shrink-0"
+                                title="An agent involved in this transaction verified the improvement value."
+                              >
+                                Agent-Verified
+                              </span>
+                            )}
+                            {isBrokerEstimated && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-400/15 border border-amber-400/30 text-amber-300 font-bold flex-shrink-0">
+                                Broker-estimated
+                              </span>
+                            )}
+                          </p>
+                          {expanded ? <ChevronUp size={12} className="text-slate-500 flex-shrink-0" /> : <ChevronDown size={12} className="text-slate-500 flex-shrink-0" />}
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 mt-1.5 text-[10px] font-mono">
+                          <div>
+                            <p className="text-slate-500">Acres</p>
+                            <p className="text-white font-bold">{formatAcres(c.acres)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-500">Total</p>
+                            <p className="text-white font-bold">{formatCurrency(c.sale_price)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-500">Total $/Ac</p>
+                            <p className="text-emerald-400 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-500">Adjusted $/Ac</p>
+                            <p className={`font-bold ${effImp != null ? 'text-amber-300' : 'text-amber-200/70'}`}>
+                              {landOnly != null ? formatPPA(landOnly) : '—'}
+                            </p>
+                          </div>
+                        </div>
+                      </button>
+                      {expanded && (
+                        <div className="border-t border-border bg-night/30 px-3 py-2 space-y-1.5 text-[11px]">
+                          {/* Per-comp broker note — editable textarea at the
+                              top of expanded content so the broker drafts the
+                              client-facing reasoning first. Mirrors the share
+                              report's placement (read-only there). */}
+                          <div className="pb-2 border-b border-border/60 space-y-1">
+                            <p className="text-[10px] font-bold text-blue-400 uppercase tracking-wider">
+                              Your Note on This Comp
+                            </p>
+                            <textarea
+                              value={adj.broker_note ?? ''}
+                              onChange={(e) => updateAdjustment(c.id, { broker_note: e.target.value })}
+                              onClick={(e) => e.stopPropagation()}
+                              placeholder="e.g. Most direct comparison — same river frontage and similar improvements."
+                              rows={2}
+                              className="w-full bg-night border border-border focus:border-blue-400 rounded px-2 py-1.5 text-[12px] text-white outline-none resize-none"
+                            />
+                            <p className="text-[9px] text-slate-500">Shown to the client in the expanded comp on the share report.</p>
+                          </div>
+
+                          {/* Key facts — Sale date · Address · Improvements (+notes).
+                              Same order as share report + standalone Comp Detail. */}
+                          {c.sale_date && (
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Sale date</span>
+                              <span className="text-slate-300 font-mono">{c.sale_date}</span>
+                            </div>
+                          )}
+                          {c.address && (
+                            <div className="flex justify-between gap-2">
+                              <span className="text-slate-500 flex-shrink-0">Address</span>
+                              <span className="text-slate-300 text-right truncate">{c.address}</span>
+                            </div>
+                          )}
+                          {c.has_improvements && c.improvements_value != null && (
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Improvements</span>
+                              <span className="text-blue-300">{formatCurrency(c.improvements_value)} ECV</span>
+                            </div>
+                          )}
+                          {c.improvements_notes && (
+                            <div className="pt-1">
+                              <p className="text-slate-500 mb-0.5">Improvements notes</p>
+                              <p className="text-slate-300 leading-relaxed">{c.improvements_notes}</p>
+                            </div>
+                          )}
+
+                          {/* Land-character chips — sit below key facts so the
+                              order reads facts → character → narrative across
+                              every comp surface. */}
+                          {(() => {
+                            const irrigationVal = (c as any).irrigation as string | null;
+                            return (
+                              <div className="grid grid-cols-2 gap-2 pt-1">
+                                <FeatureChip label="Water" value={c.water} strong={isStrongFeature('water', c.water)} />
+                                <FeatureChip label="Road" value={c.road_frontage} strong={isStrongFeature('road', c.road_frontage)} />
+                                <FeatureChip label="Dev" value={c.dev_potential} strong={isStrongFeature('dev', c.dev_potential)} />
+                                <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
+                              </div>
+                            );
+                          })()}
+                          {c.description && (() => {
+                            const desc = c.description;
+                            const sentences = desc
+                              .split(/(?<=[.!?])\s+(?=[A-Z])/)
+                              .map(s => s.trim())
+                              .filter(Boolean);
+                            const previewLen = 220;
+                            const isExpanded = expandedDescriptionIds.has(c.id);
+                            const previewBySentences = sentences.slice(0, 3).join(' ');
+                            const preview = previewBySentences.length > 0 && previewBySentences.length < desc.length - 10
+                              ? previewBySentences
+                              : (desc.length > previewLen ? desc.slice(0, previewLen) + '…' : desc);
+                            const hasMore = preview !== desc && desc.length > preview.length;
+                            return (
+                              <div className="pt-1.5 border-t border-border/60">
+                                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description</p>
+                                <p className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                  {isExpanded ? desc : preview}
+                                </p>
+                                {hasMore && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setExpandedDescriptionIds(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-sage hover:text-sage2 transition-colors"
+                                  >
+                                    {isExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Improvement adjustment editor */}
+                          <div className="pt-2 border-t border-border/60 space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <p className="text-[10px] font-bold text-amber-400 uppercase tracking-wider">Improvement Adjustment</p>
+                              {!editorOpen && effImp == null && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
+                                  }}
+                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                >
+                                  + Add adjustment
+                                </button>
+                              )}
+                              {!editorOpen && effImp != null && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
+                                  }}
+                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                >
+                                  Edit
+                                </button>
+                              )}
+                            </div>
+                            {effImp != null && !editorOpen && (
+                              <p className="text-[11px] text-slate-300 font-mono">
+                                {formatCurrency(effImp)} <span className="text-slate-500">·</span>{' '}
+                                <span className="text-slate-500">{effSrc === 'broker_estimate' ? 'Broker Estimate' : effSrc === 'appraiser' ? 'Appraiser' : '—'}</span>
+                              </p>
+                            )}
+                            {effImp == null && !editorOpen && (
+                              <p className="text-[11px] text-slate-500 italic">No improvement value set.</p>
+                            )}
+                            {editorOpen && (
+                              <div className="space-y-2 bg-night/40 border border-border/60 rounded-lg p-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div>
+                                  <p className="text-[9px] text-slate-500 mb-0.5">Improvement Value ($)</p>
+                                  <input
+                                    type="number"
+                                    placeholder="e.g. 350000"
+                                    value={adj.improvement_value ?? (c.improvement_value ?? '')}
+                                    onChange={(e) => {
+                                      const v = e.target.value === '' ? null : Number(e.target.value);
+                                      updateAdjustment(c.id, { improvement_value: v });
+                                    }}
+                                    className="w-full bg-night border border-border focus:border-amber-400 rounded px-2 py-1 text-[12px] text-white font-mono outline-none"
+                                  />
+                                </div>
+                                <div>
+                                  <p className="text-[9px] text-slate-500 mb-0.5">Source</p>
+                                  <select
+                                    value={(adj.improvement_source ?? c.improvement_source ?? '') as string}
+                                    onChange={async (e) => {
+                                      const v = e.target.value === '' ? null : (e.target.value as 'appraiser' | 'agent_verified' | 'broker_estimate');
+                                      updateAdjustment(c.id, { improvement_source: v });
+                                      // Agent-Verified auto-tags the verifier and timestamp on the
+                                      // comp itself (back-end audit trail — never shown publicly).
+                                      // Skipped silently if there's no signed-in user.
+                                      if (v === 'agent_verified' && currentUserId) {
+                                        await supabase
+                                          .from('comps')
+                                          .update({
+                                            improvement_verified_by: currentUserId,
+                                            improvement_verified_at: new Date().toISOString(),
+                                          })
+                                          .eq('id', c.id);
+                                      }
+                                    }}
+                                    className="w-full bg-night border border-border focus:border-amber-400 rounded px-2 py-1 text-[12px] text-white outline-none"
+                                  >
+                                    <option value="">Select…</option>
+                                    <option value="appraiser">Appraiser Report</option>
+                                    <option value="agent_verified">Agent-Verified (listing/buyer's agent)</option>
+                                    <option value="broker_estimate">Broker Estimate</option>
+                                  </select>
+                                </div>
+                                <div className="flex gap-2 pt-1">
+                                  <button
+                                    onClick={async () => {
+                                      // Close the editor and flush immediately so the value
+                                      // persists even if the user exits within debounce window.
+                                      setAdjustmentEditorOpen(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(c.id);
+                                        return next;
+                                      });
+                                      if (viewingCMA?.id) {
+                                        const ok = await flushAdjustments(viewingCMA.id, compAdjustmentsDraft);
+                                        if (ok) toast.success('Adjustment saved');
+                                      }
+                                    }}
+                                    className="flex-1 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded text-[11px] font-bold text-amber-200 transition-colors"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      updateAdjustment(c.id, { improvement_value: null, improvement_source: null });
+                                      setAdjustmentEditorOpen(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(c.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="px-3 py-1.5 border border-border hover:border-red-400 rounded text-[11px] font-bold text-slate-400 hover:text-red-400 transition-colors"
+                                  >
+                                    Clear
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Live listing search — not persisted, just shown */}
+                          <div className="pt-2 border-t border-border/60 space-y-1.5">
+                            <p className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Online Listing</p>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); findListingForComp(c.id); }}
+                              disabled={findingListingFor.has(c.id)}
+                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/30 hover:border-purple-400 rounded text-purple-200 font-bold transition-colors disabled:opacity-50"
+                            >
+                              <Globe size={10} />
+                              {findingListingFor.has(c.id)
+                                ? 'Searching live…'
+                                : liveListings[c.id]
+                                ? 'Re-search'
+                                : 'Find listing online'}
+                            </button>
+                            {liveListings[c.id]?.url && (() => {
+                              const isSaved = savedListingFor.has(c.id);
+                              const isSaving = savingListingFor.has(c.id);
+                              const isAlreadyPersisted = (c as any).source_url === liveListings[c.id]?.url;
+                              return (
+                                <div className="space-y-1">
+                                  <a
+                                    href={liveListings[c.id]!.url!}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="inline-flex items-center gap-1.5 text-[11px] text-purple-300 hover:text-purple-200 underline break-all"
+                                  >
+                                    <ExternalLink size={11} />
+                                    {liveListings[c.id]!.url!.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)}
+                                    {liveListings[c.id]!.url!.length > 70 ? '…' : ''}
+                                  </a>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); saveListingForComp(c.id); }}
+                                    disabled={isSaving}
+                                    className={`text-[10px] px-2 py-0.5 rounded font-bold transition-colors disabled:opacity-50 ${
+                                      isSaved || isAlreadyPersisted
+                                        ? 'bg-emerald-500/15 border border-emerald-400/40 text-emerald-300'
+                                        : 'bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/30 hover:border-purple-400 text-purple-200'
+                                    }`}
+                                  >
+                                    {isSaving
+                                      ? 'Saving…'
+                                      : isSaved || isAlreadyPersisted
+                                      ? '✓ Saved to comp'
+                                      : 'Save to comp (show on share)'}
+                                  </button>
+                                </div>
+                              );
+                            })()}
+                            {liveListings[c.id] && !liveListings[c.id]?.url && (
+                              <p className="text-[11px] text-slate-500 italic">{liveListings[c.id]!.reason || 'No matching listing found'}</p>
+                            )}
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (c.latitude != null && c.longitude != null) {
+                                map.current?.flyTo({ center: [c.longitude, c.latitude], zoom: 14, duration: 800 });
+                              }
+                            }}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 font-bold mt-1"
+                          >
+                            Fly to →
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {cmaComps.length === 0 && (
+                  <p className="text-xs text-slate-500 italic text-center py-4">
+                    No comps in this CMA yet. Use Edit / Add Comps in the banner.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Collaborator picker — lets the CMA owner toggle which team members
+          can view/edit this CMA. Only renders when invoked from the workspace. */}
+      {collabOpen && viewingCMA && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-panel border border-border rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Users size={14} className="text-purple-400" />
+                <div>
+                  <p className="font-bold text-sm text-white">Collaborate on this CMA</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Selected teammates can view and edit from their dashboard.</p>
+                </div>
+              </div>
+              <button onClick={() => setCollabOpen(false)} className="text-slate-500 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto">
+              {collabLoading ? (
+                <p className="text-center text-xs text-slate-500 py-8">Loading team…</p>
+              ) : teamMembers.length === 0 ? (
+                <div className="px-5 py-8 text-center space-y-2">
+                  <p className="text-sm text-slate-400">No teammates found.</p>
+                  <p className="text-[11px] text-slate-500">Add team members in Settings to enable collaboration.</p>
+                </div>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {teamMembers.map((m) => {
+                    const isCollab = collaboratorUserIds.has(m.id);
+                    const label = m.full_name || m.email || 'Teammate';
+                    const initial = (m.full_name || m.email || '?').charAt(0).toUpperCase();
+                    return (
+                      <li key={m.id} className="px-5 py-3 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-purple-400/10 border border-purple-400/30 flex items-center justify-center flex-shrink-0">
+                            <span className="text-purple-300 font-bold text-xs">{initial}</span>
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-white truncate">{label}</p>
+                            {m.email && m.full_name && (
+                              <p className="text-[11px] text-slate-500 truncate">{m.email}</p>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => toggleCollaborator(m.id)}
+                          className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex-shrink-0 ${
+                            isCollab
+                              ? 'bg-purple-500/20 border border-purple-400/40 text-purple-200 hover:bg-purple-500/30'
+                              : 'bg-card border border-border hover:border-purple-400 text-slate-400 hover:text-purple-300'
+                          }`}
+                        >
+                          {isCollab ? '✓ Editor' : '+ Add'}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-border flex items-center justify-end">
+              <button
+                onClick={() => setCollabOpen(false)}
+                className="px-4 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Comp detail panel */}
-      {selectedComp && (
+      {!cmaMode && !viewingCMA && selectedComp && (() => {
+        const desc = selectedComp.description || '';
+        // Split into sentences only at terminating punctuation followed by
+        // whitespace + uppercase. Avoids false splits inside numbers like
+        // "206.99 ac" or acronyms like "U.S."
+        const sentences = desc
+          .split(/(?<=[.!?])\s+(?=[A-Z])/)
+          .map(s => s.trim())
+          .filter(Boolean);
+        const previewSentences = sentences.slice(0, 5).join(' ');
+        const hasMore = sentences.length > 5;
+
+        // Detect acres-in-description vs saved-acres mismatch. The description
+        // is closest to the appraiser's prose, so a discrepancy with the saved
+        // value usually means the saved value was pulled from a different field.
+        const acresInDesc = (() => {
+          const m = desc.match(/([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*acres?\b/i);
+          if (!m) return null;
+          const v = parseFloat(m[1].replace(/,/g, ''));
+          return Number.isFinite(v) ? v : null;
+        })();
+        const savedAcres = selectedComp.acres || 0;
+        // Flag any meaningful deviation. Tolerate rounding (≤0.5 ac) but
+        // surface anything bigger so the user can verify against the report.
+        const acreageDiscrepancy =
+          acresInDesc != null &&
+          savedAcres > 0 &&
+          Math.abs(acresInDesc - savedAcres) > 0.5;
+
+        const conf = selectedComp.confidence;
+        const confStyle =
+          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-emerald-400', ring: 'border-emerald-400/30 bg-emerald-400/10' }
+          : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-400', ring: 'border-amber-400/30 bg-amber-400/10' }
+          : { Icon: ShieldQuestion, color: 'text-slate-400', ring: 'border-slate-500/30 bg-slate-500/10' };
+
+        return (
         <div className="hidden md:flex w-80 bg-panel border-l border-border flex-col overflow-y-auto">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
             <span className="font-bold text-sm">Comp Detail</span>
@@ -350,40 +3397,263 @@ export default function MapPage() {
               <X size={16} />
             </button>
           </div>
-          <div className="p-4 space-y-4">
+          <div className="p-4 space-y-3">
+            {/* Header */}
             <div>
-              <h2 className="text-lg font-bold">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
-              <p className="text-sm text-slate-400">{selectedComp.county}, {selectedComp.state} · {formatAcres(selectedComp.acres)}</p>
+              <h2 className="text-lg font-bold leading-tight">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{selectedComp.county}, {selectedComp.state}</p>
             </div>
-            <div className="bg-card border border-border rounded-xl p-3">
-              <p className="text-2xl font-bold text-emerald-400 font-mono">
-                {formatPPA(selectedComp.ppa_land_only || selectedComp.price_per_acre || 0)}
-              </p>
-              <p className="text-sm text-slate-500 font-mono">{formatCurrency(selectedComp.sale_price)}</p>
+
+            {/* Confidence badge + IMPROVED + Agent-Verified indicators */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border ${confStyle.ring}`}>
+                <confStyle.Icon size={12} className={confStyle.color} />
+                <span className={`text-[10px] font-bold uppercase tracking-wider ${confStyle.color}`}>{conf}</span>
+              </div>
+              {selectedComp.has_improvements && (
+                <span className="text-[10px] font-bold px-2 py-1 bg-purple-400/10 border border-purple-400/30 text-purple-400 rounded-md uppercase tracking-wider">
+                  Improved
+                </span>
+              )}
+              {(selectedComp as any).irrigation === 'Strong' && (
+                <span className="text-[10px] font-bold px-2 py-1 bg-purple-400/10 border border-purple-400/30 text-purple-400 rounded-md uppercase tracking-wider">
+                  Irrigation
+                </span>
+              )}
+              {selectedComp.improvement_source === 'agent_verified' && (
+                <span
+                  className="text-[10px] font-bold px-2 py-1 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded-md uppercase tracking-wider"
+                  title="An agent involved in this transaction verified the improvement value."
+                >
+                  Agent-Verified
+                </span>
+              )}
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { label: 'Water', value: selectedComp.water },
-                { label: 'Road', value: selectedComp.road_frontage },
-                { label: 'Dev', value: selectedComp.dev_potential },
-                { label: 'Minerals', value: selectedComp.minerals_sold || 'N/A' },
-              ].map(({ label, value }) => (
-                <div key={label} className="bg-card border border-border rounded-lg p-2">
-                  <p className="text-[9px] font-bold text-slate-500 uppercase">{label}</p>
-                  <p className="text-xs font-bold text-white mt-0.5">{value}</p>
+
+            {/* Stacked stats: Acres → Total Price → Price/Acre.
+                When the comp carries an improvement_value adjustment we surface
+                BOTH "All-in $/Ac" (raw sale price ÷ acres) AND "Land $/Ac"
+                (adjusted, with improvements backed out). Land $/Ac is amber to
+                mirror the broker workspace's color language. */}
+            {(() => {
+              const allIn = selectedComp.price_per_acre || 0;
+              const landOnly = selectedComp.ppa_land_only || 0;
+              // Show Land $/Ac whenever a land-only value exists that differs
+              // from the all-in. Source-agnostic — covers ECV-imported comps
+              // (improvements_value) AND explicit broker adjustments
+              // (improvement_value). The DB-computed ppa_land_only is the
+              // single source of truth for "something was backed out."
+              const hasAdjustment = landOnly > 0 && allIn > 0 && Math.abs(allIn - landOnly) > 1;
+              return (
+                <div className="space-y-2">
+                  <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
+                    <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Acres</p>
+                    <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                      {formatAcres(selectedComp.acres)}
+                    </p>
+                  </div>
+                  <div className="bg-card border border-border rounded-xl px-3 py-2 flex items-baseline justify-between">
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Price</p>
+                    <p className="text-base font-bold text-white font-mono leading-tight">
+                      {formatCurrency(selectedComp.sale_price)}
+                    </p>
+                  </div>
+                  {hasAdjustment ? (
+                    <>
+                      <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
+                        <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Total $/Ac</p>
+                        <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                          {formatPPA(allIn)}
+                        </p>
+                      </div>
+                      <div className="bg-amber-400/10 border border-amber-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
+                        <p className="text-[10px] font-bold text-amber-300/80 uppercase tracking-wider">Adjusted $/Ac</p>
+                        <p className="text-base font-bold text-amber-300 font-mono leading-tight">
+                          {formatPPA(landOnly)}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
+                      <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Total Price Per Acre</p>
+                      <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                        {formatPPA(selectedComp.ppa_land_only || selectedComp.price_per_acre || 0)}
+                      </p>
+                    </div>
+                  )}
                 </div>
-              ))}
-            </div>
-            {selectedComp.description && (
-              <p className="text-xs text-slate-400 leading-relaxed line-clamp-4">{selectedComp.description}</p>
+              );
+            })()}
+
+            {acreageDiscrepancy && acresInDesc != null && selectedComp.created_by === currentUserId && (
+              <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl px-3 py-2 space-y-2">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+                  <div className="text-[11px] text-amber-200 leading-relaxed">
+                    <span className="font-bold">Acreage discrepancy.</span> Description mentions{' '}
+                    <span className="font-mono font-bold">{acresInDesc.toLocaleString()} ac</span>{' '}
+                    but saved value is{' '}
+                    <span className="font-mono font-bold">{savedAcres.toLocaleString()} ac</span>.
+                  </div>
+                </div>
+                <button
+                  onClick={() => fixAcresFromDescription(selectedComp.id, acresInDesc!)}
+                  className="w-full py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-lg text-[11px] font-bold text-amber-200 transition-colors"
+                >
+                  Use {acresInDesc.toLocaleString()} ac from description
+                </button>
+              </div>
             )}
-            <button onClick={() => setEditingComp(selectedComp)}
-              className="w-full py-2.5 bg-card border border-border hover:border-sage text-sm font-bold text-slate-300 hover:text-white rounded-xl transition-colors flex items-center justify-center gap-2">
-              <Edit size={14} /> Edit Comp
-            </button>
+
+            {/* Key facts — same row format as CMA expanded + share report
+                expanded comp views. Format-unified across the three surfaces. */}
+            <div className="space-y-1.5 text-[11px]">
+              {selectedComp.sale_date && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Sale date</span>
+                  <span className="text-slate-300 font-mono">{selectedComp.sale_date}</span>
+                </div>
+              )}
+              {selectedComp.address && (
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500 flex-shrink-0">Address</span>
+                  <span className="text-slate-300 text-right truncate">{selectedComp.address}</span>
+                </div>
+              )}
+              {selectedComp.has_improvements && selectedComp.improvements_value != null && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Improvements</span>
+                  <span className="text-blue-300">{formatCurrency(selectedComp.improvements_value)} ECV</span>
+                </div>
+              )}
+              {selectedComp.improvements_notes && (
+                <div className="pt-1">
+                  <p className="text-slate-500 mb-0.5">Improvements notes</p>
+                  <p className="text-slate-300 leading-relaxed">{selectedComp.improvements_notes}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Land character grid — Water · Road · Dev · Irrigation.
+                Strong tiers light emerald. Same chips as every other surface. */}
+            {(() => {
+              const irrigationVal = (selectedComp as any).irrigation as string | null;
+              return (
+                <div className="grid grid-cols-2 gap-2">
+                  <FeatureChip label="Water" value={selectedComp.water} strong={isStrongFeature('water', selectedComp.water)} />
+                  <FeatureChip label="Road" value={selectedComp.road_frontage} strong={isStrongFeature('road', selectedComp.road_frontage)} />
+                  <FeatureChip label="Dev" value={selectedComp.dev_potential} strong={isStrongFeature('dev', selectedComp.dev_potential)} />
+                  <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
+                </div>
+              );
+            })()}
+
+            {/* Description with sentence-aware Read more.
+                Inline pattern (no card border) to match CMA expanded + share report. */}
+            {desc && (
+              <div className="pt-1">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description</p>
+                <p className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                  {descriptionExpanded ? desc : previewSentences}
+                </p>
+                {hasMore && (
+                  <button
+                    onClick={() => setDescriptionExpanded(v => !v)}
+                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-sage hover:text-sage2 transition-colors"
+                  >
+                    {descriptionExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Ownership transfer */}
+            {(selectedComp.grantor || selectedComp.grantee) && (
+              <div className="bg-card border border-border rounded-xl p-3">
+                <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Ownership Transfer</p>
+                <div className="space-y-1.5">
+                  {selectedComp.grantor && (
+                    <div>
+                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">From</p>
+                      <p className="text-xs font-semibold text-slate-200">{selectedComp.grantor}</p>
+                    </div>
+                  )}
+                  {selectedComp.grantor && selectedComp.grantee && (
+                    <div className="flex justify-center"><ArrowRight size={12} className="text-slate-600" /></div>
+                  )}
+                  {selectedComp.grantee && (
+                    <div>
+                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">To</p>
+                      <p className="text-xs font-semibold text-slate-200">{selectedComp.grantee}</p>
+                    </div>
+                  )}
+                </div>
+                {selectedComp.recording_number && (
+                  <p className="text-[10px] text-slate-500 font-mono mt-2 pt-2 border-t border-border">
+                    Recording: {selectedComp.recording_number}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {selectedComp.created_by === currentUserId && selectedComp.latitude != null && (
+              <div className="space-y-2">
+                {!(selectedComp as any).boundary_geojson ? (
+                  <button
+                    onClick={detectBoundary}
+                    disabled={detectingBoundary}
+                    className="w-full py-2.5 bg-sage/10 border border-sage/30 hover:bg-sage/20 hover:border-sage text-sm font-bold text-sage rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <MapPin size={14} />
+                    {detectingBoundary ? 'Detecting…' : 'Detect Property Boundary'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={detectBoundary}
+                    disabled={detectingBoundary}
+                    className="w-full py-2 bg-card border border-border hover:border-sage text-xs font-bold text-slate-400 hover:text-sage rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <MapPin size={12} />
+                    {detectingBoundary ? 'Re-detecting…' : 'Re-detect Boundary'}
+                  </button>
+                )}
+
+                <button
+                  onClick={() => startReselectParcels(selectedComp)}
+                  className="w-full py-2 bg-card border border-border hover:border-sage text-xs font-bold text-slate-300 hover:text-sage rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <MousePointer size={12} /> Re-select Parcels
+                </button>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => startEditBoundary(selectedComp)}
+                    disabled={!(selectedComp as any).boundary_geojson}
+                    className="py-2 bg-card border border-border hover:border-amber-400 text-xs font-bold text-slate-300 hover:text-amber-400 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Pencil size={12} /> Edit
+                  </button>
+                  <button
+                    onClick={clearBoundary}
+                    disabled={!(selectedComp as any).boundary_geojson}
+                    className="py-2 bg-card border border-border hover:border-red-400 text-xs font-bold text-slate-300 hover:text-red-400 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 size={12} /> Clear
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {selectedComp.created_by === currentUserId && (
+              <button onClick={() => setEditingComp(selectedComp)}
+                className="w-full py-2.5 bg-card border border-border hover:border-sage text-sm font-bold text-slate-300 hover:text-white rounded-xl transition-colors flex items-center justify-center gap-2">
+                <Edit size={14} /> Edit Comp
+              </button>
+            )}
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Parcel sheets */}
       {sheetMode === 'parcel' && tappedParcel && mapMode === 'view' && (
@@ -400,6 +3670,40 @@ export default function MapPage() {
           onAddParcel={handleAddParcelToSelection}
           onRemoveParcel={(id) => setSelectedParcels(prev => prev.filter(p => p.parcel_id !== id))}
           onCancel={() => { setSheetMode('none'); setTappedParcel(null); }}
+          onCreateAsSubject={(parcel) => {
+            setSheetMode('none');
+            setTappedParcel(null);
+            // Enter CMA mode pre-seeded with this parcel as the subject and
+            // immediately lock so the user can start tapping comp pins.
+            setCmaMode(true);
+            setCmaEditingId(null);
+            setCmaSubjectParcels([parcel]);
+            setCmaSubjectMeta({
+              name: parcel.owner_name || `${parcel.county || 'TX'} subject`,
+              county: parcel.county || '',
+              state: parcel.state || 'TX',
+            });
+            setCmaCompIds([]);
+            setCmaPhase('comps');
+            // Render the locked subject as merged-boundary
+            if (map.current && mapLoaded && parcel.geometry) {
+              try {
+                const mergedSrc = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+                if (mergedSrc) {
+                  mergedSrc.setData({
+                    type: 'FeatureCollection',
+                    features: [{ type: 'Feature', properties: {}, geometry: parcel.geometry }],
+                  });
+                }
+                const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+                if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+              } catch {}
+            }
+            toast.success(
+              `Subject: ${parcel.owner_name || parcel.county || 'parcel'} (${parcel.acres ? parcel.acres.toFixed(1) + ' ac' : 'no acres'}). Tap comp pins.`,
+              { duration: 4000 }
+            );
+          }}
         />
       )}
 
@@ -424,6 +3728,35 @@ export default function MapPage() {
           onAttachToComp={() => { toast('Open the vault to attach this boundary', { icon: '📎' }); setSheetMode('none'); resetParcelState(); }}
           onSaveBoundaryOnly={() => { toast.success('Boundary saved'); setSheetMode('none'); resetParcelState(); }}
           onClose={() => { setSheetMode('none'); resetParcelState(); }}
+          onUseAsSubject={() => {
+            // Pre-seed the CMA build with these parcels as a locked subject.
+            const primary = allParcels[0];
+            setSheetMode('none');
+            setCmaMode(true);
+            setCmaEditingId(null);
+            setCmaSubjectParcels([...allParcels]);
+            setCmaSubjectMeta({
+              name: primary?.owner_name || `${primary?.county || 'TX'} subject`,
+              county: primary?.county || '',
+              state: primary?.state || 'TX',
+            });
+            setCmaCompIds([]);
+            setCmaPhase('comps');
+            // Keep the merged-boundary source as-is (already populated from the
+            // Combine action) — that's the visual subject.
+            try {
+              const sel = map.current?.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+              if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+            } catch {}
+            // Don't call resetParcelState() — that wipes the merged-boundary too.
+            setSelectedParcels([]);
+            setTappedParcel(null);
+            setMapMode('view');
+            toast.success(
+              `Subject: ${allParcels.length} parcel${allParcels.length === 1 ? '' : 's'}, ${mergedAcres.toFixed(1)} ac. Tap comp pins.`,
+              { duration: 4000 }
+            );
+          }}
         />
       )}
 

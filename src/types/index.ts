@@ -3,7 +3,27 @@ export type CompStatus = 'Sold' | 'Active' | 'Pending' | 'Withdrawn';
 export type WaterQuality = 'None' | 'Seasonal' | 'Strong';
 export type RoadFrontage = 'None' | 'Low' | 'Medium' | 'High';
 export type DevPotential = 'Low' | 'Medium' | 'High';
-export type BestUse = 'Recreational' | 'Agriculture' | 'Investment' | 'Development' | 'Conservation' | 'Timber';
+export type BestUse =
+  | 'Recreational'
+  | 'Agriculture'
+  | 'Farm'
+  | 'Vineyard / Orchard'
+  | 'Timber'
+  | 'Conservation'
+  | 'Investment'
+  | 'Development'
+  | 'Single Family Home Development'
+  | 'Multi-Family Development'
+  | 'Rural Land Development'
+  | 'Commercial'
+  | 'Industrial'
+  | 'Data Center'
+  | 'Solar Farm'
+  | 'Wind Farm';
+// Irrigation tier — mirrors the Water enum shape. "Strong" is the value-driver
+// state (active center pivot, drip, current row crops) and triggers the
+// IRRIGATION pill. Medium = partial/limited. None = dry land.
+export type Irrigation = 'None' | 'Medium' | 'Strong';
 export type ConfidenceLevel = 'Verified' | 'Estimated' | 'Unverified';
 export type ImprovementType = 'main_house' | 'guest_cabin' | 'horse_barn' | 'hay_barn' | 'equipment_barn' | 'shop' | 'hunting_cabin' | 'foreman_house' | 'pool' | 'other';
 export type QualityClass = 'Basic' | 'Good' | 'High-End' | 'Luxury';
@@ -50,7 +70,18 @@ export interface Comp {
   ppa_land_only: number | null;
   has_improvements: boolean;
   use_land_only_for_cma: boolean;
-  
+  // Value-driver flags (power the chip grid + AI search filtering).
+  // - has_live_water: DORMANT (kept for backwards compat; no UI consumers).
+  //   Live water is captured via the existing water enum's 'Strong' tier.
+  // - has_irrigated_farm: DORMANT (replaced by irrigation enum below).
+  // - irrigation: tiered None/Medium/Strong. Strong triggers the IRRIGATION
+  //   pill in comp headers; all tiers show in the chip grid.
+  // - has_water_rights: collected, searchable, NOT pilled.
+  has_live_water: boolean;
+  has_irrigated_farm: boolean;
+  has_water_rights: boolean;
+  irrigation: Irrigation | null;
+
   // Location
   address: string | null;
   latitude: number | null;
@@ -72,7 +103,10 @@ export interface Comp {
   ag_exemption: boolean;
   wildlife_notes: string | null;
   flood_plain_pct: number | null;
-  
+  // Categorical flood-plain status (replaces flood_plain_pct in the UI).
+  // Yes = significant flood plain · Partial = some · No = none. NULL = unknown.
+  flood_plain: 'Yes' | 'Partial' | 'No' | null;
+
   // Transaction
   grantor: string | null;
   grantee: string | null;
@@ -84,7 +118,16 @@ export interface Comp {
   // Prior sale
   prior_sale_date: string | null;
   prior_sale_price: number | null;
-  
+
+  // Adjusted Land Value — optional. Separate from has_improvements / improvements_value
+  // (which may be partial or zero). When set, it represents the dollar value of
+  // improvements that should be subtracted from sale_price for land-only comparison.
+  improvement_value: number | null;
+  improvement_source: 'appraiser' | 'agent_verified' | 'broker_estimate' | null;
+  // Audit trail for agent_verified entries (never surfaced on share reports).
+  improvement_verified_by: string | null;
+  improvement_verified_at: string | null;
+
   // Meta
   description: string | null;
   source_url: string | null;
@@ -92,6 +135,9 @@ export interface Comp {
   visibility: VisibilityLevel;
   confidence: ConfidenceLevel;
   is_company_transaction: boolean;
+  // When the firm handled the deal, optionally records which agent was on it.
+  // Powers the map's "My Sales" filter. T1 confidential — internal only.
+  transaction_agent_id: string | null;
   is_draft: boolean;
   
   // Source links

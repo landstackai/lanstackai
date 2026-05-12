@@ -37,7 +37,7 @@ export async function middleware(request: NextRequest) {
   // Redirect logged-in users away from auth pages
   if (request.nextUrl.pathname.startsWith('/auth') && user) {
     const url = request.nextUrl.clone();
-    url.pathname = '/dashboard/vault';
+    url.pathname = '/dashboard/map';
     return NextResponse.redirect(url);
   }
 

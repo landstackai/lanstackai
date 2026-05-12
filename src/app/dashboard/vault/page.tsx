@@ -3,13 +3,33 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2 } from 'lucide-react';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
 import { useSearchParams } from 'next/navigation';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
+
+// Heuristic city extractor — comps store free-text "address" (e.g.
+// "E/S of Ranch Rd 336, Leakey, TX 78873"). City is the segment immediately
+// before the state. Returns null if the address doesn't fit the pattern.
+function extractCity(address: string | null | undefined): string | null {
+  if (!address) return null;
+  const parts = address.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  // Last segment usually contains "ST 12345" or "ST" — the one before it is city.
+  // Validate the last segment looks state-like (2 letters maybe + zip).
+  const last = parts[parts.length - 1];
+  if (!/^[A-Z]{2}(\s+\d{5}(-\d{4})?)?$/i.test(last)) {
+    // No clean state pattern — try the second-to-last anyway.
+    return parts[parts.length - 2] || null;
+  }
+  return parts[parts.length - 2] || null;
+}
+
+type SortKey = 'county' | 'city' | 'acres' | 'sale_price' | 'ppa_total' | 'ppa_adjusted' | 'improved';
+type SortDir = 'asc' | 'desc';
 
 const defaultFilters: CompFilters = {
   search: '',
@@ -36,6 +56,23 @@ export default function VaultPage() {
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
   const [showFilters, setShowFilters] = useState(false);
   const [stats, setStats] = useState({ total: 0, sold: 0, avgPPA: 0 });
+  // Sort state for the new table view. Default: most recently sold first
+  // (proxy via sale_price desc → switch this to sale_date desc later if we
+  // expose date as a sortable column).
+  const [sortKey, setSortKey] = useState<SortKey>('county');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+  // "Needs Location" filter — show only comps with missing coordinates. Useful
+  // after batch imports where rural addresses didn't geocode.
+  const [needsLocationOnly, setNeedsLocationOnly] = useState(false);
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
 
   const supabase = createClient();
   const searchParams = useSearchParams();
@@ -254,6 +291,52 @@ export default function VaultPage() {
               className="w-28 bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
             />
 
+            {/* "Needs Location" toggle — finds comps where lat/lng failed
+                to geocode after import. Tap any in the table → opens the
+                map picker so the broker can click to set the real location. */}
+            <button
+              onClick={() => setNeedsLocationOnly((v) => !v)}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-colors ${
+                needsLocationOnly
+                  ? 'border-amber-400 bg-amber-400/10 text-amber-400'
+                  : 'border-border text-slate-400 hover:text-white hover:border-slate-500'
+              }`}
+            >
+              {needsLocationOnly ? '✓ ' : ''}Needs Location
+            </button>
+
+            {/* Cleanup tool — clears coords on comps stuck at the county
+                centroid (from imports before we removed that fallback). After
+                running, those comps land in the "Needs Location" filter so
+                you can fix them manually. */}
+            <button
+              onClick={async () => {
+                if (!confirm('This finds comps stuck at the county centroid (wrong location pins) and clears their coordinates so you can fix them manually. Proceed?')) return;
+                try {
+                  const { data: { session } } = await supabase.auth.getSession();
+                  const res = await fetch('/api/comps/clear-bad-coordinates', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${session?.access_token ?? ''}` },
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    toast.error(data.error || 'Cleanup failed');
+                    return;
+                  }
+                  toast.success(`Checked ${data.checked} comps, cleared ${data.cleared} bad pins`);
+                  fetchComps();
+                  if (data.cleared > 0) setNeedsLocationOnly(true);
+                } catch (e: any) {
+                  toast.error(e?.message || 'Cleanup failed');
+                }
+              }}
+              className="px-3 py-1.5 text-xs font-bold rounded-lg border border-purple-400/40 bg-purple-500/10 text-purple-200 hover:bg-purple-500/20 transition-colors"
+              title="Find comps pinned at county centroid (wrong location) and clear their coords"
+            >
+              Fix Bad Pins
+            </button>
+
+
             <button
               onClick={() => setFilters(defaultFilters)}
               className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-border rounded-lg"
@@ -294,11 +377,8 @@ export default function VaultPage() {
               </button>
             </div>
           </div>
-        ) : (
-          <div className={viewMode === 'grid'
-            ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3'
-            : 'space-y-2'
-          }>
+        ) : viewMode === 'grid' ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {comps.map((comp) => (
               <CompCard
                 key={comp.id}
@@ -308,10 +388,159 @@ export default function VaultPage() {
                   setShowAddModal(true);
                 }}
                 onDelete={() => handleDeleteComp(comp.id)}
-                viewMode={viewMode}
+                viewMode="grid"
               />
             ))}
           </div>
+        ) : (
+          /* TABLE VIEW — 7 columns: County · City · Acres · Total Price ·
+             Per Acre (Total $/Ac) · Adjusted ($/Ac) · Improved.
+             Click any column header to sort. Row click opens edit modal. */
+          (() => {
+            // Apply "Needs Location" filter first, then sort.
+            const filtered = needsLocationOnly
+              ? comps.filter((c) => c.latitude == null || c.longitude == null)
+              : comps;
+            const sorted = [...filtered].sort((a, b) => {
+              const mul = sortDir === 'asc' ? 1 : -1;
+              const cityA = extractCity(a.address) || '';
+              const cityB = extractCity(b.address) || '';
+              const ppaA = a.price_per_acre || 0;
+              const ppaB = b.price_per_acre || 0;
+              const adjA = a.ppa_land_only || 0;
+              const adjB = b.ppa_land_only || 0;
+              const impA = a.has_improvements ? 1 : 0;
+              const impB = b.has_improvements ? 1 : 0;
+              switch (sortKey) {
+                case 'county': return (a.county || '').localeCompare(b.county || '') * mul;
+                case 'city': return cityA.localeCompare(cityB) * mul;
+                case 'acres': return ((a.acres || 0) - (b.acres || 0)) * mul;
+                case 'sale_price': return ((a.sale_price || 0) - (b.sale_price || 0)) * mul;
+                case 'ppa_total': return (ppaA - ppaB) * mul;
+                case 'ppa_adjusted': return (adjA - adjB) * mul;
+                case 'improved': return (impA - impB) * mul;
+                default: return 0;
+              }
+            });
+            const SortHeader = ({ k, label, align = 'left' }: { k: SortKey; label: string; align?: 'left' | 'right' | 'center' }) => (
+              <th
+                onClick={() => toggleSort(k)}
+                className={`py-2.5 px-3 text-${align} text-[10px] font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-slate-200 transition-colors select-none`}
+              >
+                <span className="inline-flex items-center gap-1">
+                  {label}
+                  {sortKey === k && (sortDir === 'asc' ? <ArrowUp size={10} /> : <ArrowDown size={10} />)}
+                </span>
+              </th>
+            );
+            return (
+              <div className="bg-panel border border-border rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-night/40 border-b border-border sticky top-0 z-10">
+                      <tr>
+                        <SortHeader k="county" label="County" />
+                        <SortHeader k="city" label="City" />
+                        <SortHeader k="acres" label="Acres" align="right" />
+                        <SortHeader k="sale_price" label="Total Price" align="right" />
+                        <SortHeader k="ppa_total" label="Per Acre" align="right" />
+                        <SortHeader k="ppa_adjusted" label="Adjusted" align="right" />
+                        <SortHeader k="improved" label="Improved" align="center" />
+                        <th className="w-16"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sorted.map((comp) => {
+                        const city = extractCity(comp.address);
+                        const totalPpa = comp.price_per_acre || 0;
+                        const adjustedPpa = comp.ppa_land_only || 0;
+                        const hasAdjustment = adjustedPpa > 0 && Math.abs(totalPpa - adjustedPpa) > 1;
+                        return (
+                          <tr
+                            key={comp.id}
+                            onClick={() => {
+                              setEditingComp(comp);
+                              setShowAddModal(true);
+                            }}
+                            className="border-b border-border last:border-b-0 hover:bg-sage/5 cursor-pointer group transition-colors"
+                          >
+                            {/* County (with property name as subtext if set) */}
+                            <td className="py-2.5 px-3">
+                              <div className="text-sm font-bold text-white">{comp.county || '—'}</div>
+                              {comp.property_name && (
+                                <div className="text-[10px] text-slate-500 truncate max-w-[180px]">
+                                  {comp.property_name}
+                                </div>
+                              )}
+                            </td>
+                            {/* City */}
+                            <td className="py-2.5 px-3 text-sm text-slate-300">
+                              {city || <span className="text-slate-600">—</span>}
+                              {comp.state && city && (
+                                <span className="text-[10px] text-slate-500 ml-1">{comp.state}</span>
+                              )}
+                            </td>
+                            {/* Acres */}
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-white">
+                              {formatAcres(comp.acres)}
+                            </td>
+                            {/* Total Price */}
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-white font-bold">
+                              {formatCurrency(comp.sale_price)}
+                            </td>
+                            {/* Total Per Acre — emerald */}
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-emerald-400 font-bold">
+                              {totalPpa > 0 ? formatPPA(totalPpa) : '—'}
+                            </td>
+                            {/* Adjusted Per Acre — amber, or em-dash when no adjustment */}
+                            <td className={`py-2.5 px-3 text-right text-sm font-mono font-bold ${hasAdjustment ? 'text-amber-300' : 'text-slate-600'}`}>
+                              {hasAdjustment ? formatPPA(adjustedPpa) : '—'}
+                            </td>
+                            {/* Improved badge */}
+                            <td className="py-2.5 px-3 text-center">
+                              {comp.has_improvements ? (
+                                <span className="inline-block text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded">
+                                  ✓
+                                </span>
+                              ) : (
+                                <span className="text-slate-700">—</span>
+                              )}
+                            </td>
+                            {/* Hover actions */}
+                            <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingComp(comp);
+                                    setShowAddModal(true);
+                                  }}
+                                  title="Edit"
+                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-white/5"
+                                >
+                                  <Edit size={12} />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteComp(comp.id);
+                                  }}
+                                  title="Delete"
+                                  className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-400/10"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()
         )}
       </div>
 

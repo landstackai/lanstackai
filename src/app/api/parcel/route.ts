@@ -1,10 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Regrid API integration for parcel data
-// Falls back to mock data if no API key configured
+const TXGIO_QUERY_URL =
+  'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
 
 const REGRID_API_KEY = process.env.REGRID_API_KEY;
 const REGRID_BASE = 'https://app.regrid.com/api/v2';
+
+type Parcel = {
+  parcel_id: string;
+  owner_name: string | null;
+  acres: number | null;
+  address: string | null;
+  county: string | null;
+  state: string;
+  latitude: number;
+  longitude: number;
+  geometry: any;
+};
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -16,95 +28,94 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'lat/lng or parcel_id required' }, { status: 400 });
   }
 
-  // If Regrid API key is configured, use real data
-  if (REGRID_API_KEY) {
-    try {
-      let url = '';
-      if (lat && lng) {
-        url = `${REGRID_BASE}/query?lat=${lat}&lon=${lng}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
-      } else if (parcelId) {
-        url = `${REGRID_BASE}/query?parcel_id=${parcelId}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
-      }
-
-      const response = await fetch(url);
-      const data = await response.json();
-
-      if (data.parcels?.length > 0) {
-        const parcel = data.parcels[0];
-        return NextResponse.json({
-          parcel_id: parcel.fields?.parno || parcel.id,
-          owner_name: parcel.fields?.owner || null,
-          acres: parcel.fields?.gisacre || parcel.fields?.calc_acreage || null,
-          address: parcel.fields?.address || null,
-          county: parcel.fields?.county || null,
-          state: parcel.fields?.state_abbr || 'TX',
-          latitude: parseFloat(lat || '0'),
-          longitude: parseFloat(lng || '0'),
-          geometry: parcel.geometry || null,
-        });
-      }
-    } catch (error) {
-      console.error('Regrid API error:', error);
-    }
+  if (lat && lng) {
+    const txgio = await tryTxGIO(parseFloat(lat), parseFloat(lng));
+    if (txgio) return NextResponse.json(txgio);
   }
 
-  // Mock data for development (when no Regrid key)
-  // Returns realistic Texas parcel data structure
-  const mockParcel = {
-    parcel_id: `TX-${Math.random().toString(36).substr(2, 8).toUpperCase()}`,
-    owner_name: getMockOwner(),
-    acres: Math.round((Math.random() * 500 + 50) * 10) / 10,
-    address: getMockAddress(),
-    county: 'Real',
-    state: 'TX',
-    latitude: parseFloat(lat || '30.0'),
-    longitude: parseFloat(lng || '-99.5'),
-    geometry: createMockPolygon(
-      parseFloat(lat || '30.0'),
-      parseFloat(lng || '-99.5'),
-      0.02
-    ),
-  };
+  if (REGRID_API_KEY) {
+    const regrid = await tryRegrid(lat, lng, parcelId);
+    if (regrid) return NextResponse.json(regrid);
+  }
 
-  return NextResponse.json(mockParcel);
+  return NextResponse.json({ error: 'No parcel data at this location' }, { status: 404 });
 }
 
-function getMockOwner(): string {
-  const owners = [
-    'Temple Henry LLC',
-    'Smith Family Ranch Trust',
-    'Johnson Land Holdings',
-    'Delfino C Flores',
-    'HP Land Development LLC',
-    'West Texas Ranch Partners',
-    'Hill Country Grazing LLC',
-    'Mask Kye Inc',
-    'Fuller Billy',
-    'Rimrock Ranch Holdings',
-  ];
-  return owners[Math.floor(Math.random() * owners.length)];
+async function tryTxGIO(lat: number, lng: number): Promise<Parcel | null> {
+  // ~10m envelope around the click point
+  const d = 0.0001;
+  const params = new URLSearchParams({
+    geometry: `${lng - d},${lat - d},${lng + d},${lat + d}`,
+    geometryType: 'esriGeometryEnvelope',
+    inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects',
+    outFields: 'prop_id,owner_name,gis_area,situs_addr,county,situs_stat,mkt_value,land_value',
+    returnGeometry: 'true',
+    outSR: '4326',
+    resultRecordCount: '1',
+    f: 'geojson',
+  });
+
+  try {
+    const res = await fetch(`${TXGIO_QUERY_URL}?${params}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const f = data.features?.[0];
+    if (!f) return null;
+    const p = f.properties || {};
+    const acres = parseFloat(p.gis_area);
+    const cleanAddr = (p.situs_addr || '').replace(/[\s,]+/g, '').length === 0 ? null : p.situs_addr;
+    const cleanState = (p.situs_stat || '').trim() || 'TX';
+    return {
+      parcel_id: p.prop_id || String(f.id || ''),
+      owner_name: p.owner_name || null,
+      acres: Number.isFinite(acres) ? acres : null,
+      address: cleanAddr,
+      county: p.county || null,
+      state: cleanState,
+      latitude: lat,
+      longitude: lng,
+      geometry: f.geometry || null,
+    };
+  } catch {
+    return null;
+  }
 }
 
-function getMockAddress(): string {
-  const roads = ['Ranch Road 336', 'FM 2631', 'CR 310', 'PR 5500', 'Highway 90'];
-  const road = roads[Math.floor(Math.random() * roads.length)];
-  const num = Math.floor(Math.random() * 9000 + 1000);
-  return `${num} ${road}`;
+async function tryRegrid(
+  lat: string | null,
+  lng: string | null,
+  parcelId: string | null
+): Promise<Parcel | null> {
+  try {
+    let url = '';
+    if (lat && lng) {
+      url = `${REGRID_BASE}/query?lat=${lat}&lon=${lng}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
+    } else if (parcelId) {
+      url = `${REGRID_BASE}/query?parcel_id=${parcelId}&token=${REGRID_API_KEY}&fields=fields.basic,fields.owner,fields.boundary`;
+    } else {
+      return null;
+    }
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await response.json();
+    const parcel = data.parcels?.[0];
+    if (!parcel) return null;
+    return {
+      parcel_id: parcel.fields?.parno || parcel.id,
+      owner_name: parcel.fields?.owner || null,
+      acres: parcel.fields?.gisacre || parcel.fields?.calc_acreage || null,
+      address: parcel.fields?.address || null,
+      county: parcel.fields?.county || null,
+      state: parcel.fields?.state_abbr || 'TX',
+      latitude: parseFloat(lat || '0'),
+      longitude: parseFloat(lng || '0'),
+      geometry: parcel.geometry || null,
+    };
+  } catch {
+    return null;
+  }
 }
 
-function createMockPolygon(lat: number, lng: number, size: number) {
-  // Create a realistic irregular polygon around the clicked point
-  const randomFactor = () => (Math.random() - 0.5) * size * 0.3;
-  return {
-    type: 'Polygon',
-    coordinates: [[
-      [lng - size + randomFactor(), lat - size + randomFactor()],
-      [lng + size + randomFactor(), lat - size + randomFactor()],
-      [lng + size + randomFactor(), lat + size * 0.7 + randomFactor()],
-      [lng + size * 0.3 + randomFactor(), lat + size + randomFactor()],
-      [lng - size * 0.5 + randomFactor(), lat + size + randomFactor()],
-      [lng - size + randomFactor(), lat + size * 0.5 + randomFactor()],
-      [lng - size + randomFactor(), lat - size + randomFactor()],
-    ]],
-  };
-}

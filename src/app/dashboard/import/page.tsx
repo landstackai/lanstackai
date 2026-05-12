@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { ExtractedComp } from '@/types';
 import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { pdfToImages } from '@/lib/utils/pdfToImages';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -22,8 +24,13 @@ export default function ImportPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [pendingComps, setPendingComps] = useState<ExtractedComp[]>([]);
+  // Drag-and-drop state. Counter handles nested drag enter/leave events
+  // (which fire for every child element the cursor crosses).
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
   const supabase = createClient();
 
   useEffect(() => {
@@ -40,10 +47,14 @@ export default function ImportPage() {
     return patterns.filter(p => p.test(text)).length >= 3;
   };
 
-  const sendMessage = async (text: string, fileContent?: string) => {
+  const sendMessage = async (
+    text: string,
+    fileContent?: string,
+    images?: string[]
+  ) => {
     const userMessage: Message = {
       role: 'user',
-      content: fileContent ? `[Document uploaded]\n${text}` : text,
+      content: fileContent || images?.length ? `[Document uploaded]\n${text}` : text,
       timestamp: new Date().toISOString(),
     };
 
@@ -61,6 +72,7 @@ export default function ImportPage() {
             content: m.content,
           })),
           documentContent: fileContent || (isDocumentPaste(text) ? text : undefined),
+          images,
         }),
       });
 
@@ -85,27 +97,365 @@ export default function ImportPage() {
     }
   };
 
+  // === BATCH UPLOAD PATH (>1 file) ============================================
+  // Each file is extracted in ISOLATION — no prior chat history attached to
+  // the vision API call. This prevents the token-bloat / context-confusion
+  // bug where later files in a batch get processed against the cumulative
+  // chat context of earlier files.
+  //
+  // Successful extractions auto-save to the Vault. The user sees ONE summary
+  // toast at the end with a Vault link — no per-comp clicking required.
+  // ============================================================================
+
+  // Render a file → images. PDFs go through pdfToImages, image files become
+  // a single-entry data-URL array.
+  const fileToImages = async (file: File): Promise<string[]> => {
+    if (file.type === 'application/pdf') {
+      return await pdfToImages(file, { scale: 1.6, maxPages: 20 });
+    }
+    if (file.type.startsWith('image/')) {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result as string);
+        r.onerror = () => reject(r.error);
+        r.readAsDataURL(file);
+      });
+      return [dataUrl];
+    }
+    return [];
+  };
+
+  // Per-file outcome — used to build a persistent log in the chat after
+  // the batch completes so the user (and I) can see exactly what happened.
+  type ExtractOutcome =
+    | { kind: 'ok'; comps: ExtractedComp[] }
+    | { kind: 'no_comps'; aiMessage?: string; rawExtracted?: number; filteredOut?: number }
+    | { kind: 'http_error'; status: number; statusText: string }
+    | { kind: 'network_error'; message: string }
+    | { kind: 'render_failed'; message: string };
+
+  // ISOLATED extraction call. Two retry mechanisms:
+  //  1. Transient errors (429, 5xx) → exponential backoff, up to 3 attempts
+  //  2. Empty `comps: []` result → retry ONCE with a "look harder" prompt
+  //     telling the AI this is definitely a comp record even if it only
+  //     contains one property. Catches the AI's tendency to be over-cautious.
+  const extractCompsFromFile = async (
+    file: File,
+    attempt: number = 1,
+    retryAggressive: boolean = false
+  ): Promise<ExtractOutcome> => {
+    let images: string[] = [];
+    try {
+      images = await fileToImages(file);
+    } catch (e: any) {
+      return { kind: 'render_failed', message: e?.message || 'render error' };
+    }
+    if (images.length === 0) {
+      return { kind: 'render_failed', message: 'no pages rendered' };
+    }
+
+    const aggressivePreamble = retryAggressive
+      ? `IMPORTANT: My first attempt to extract this document returned no comps. ` +
+        `Look again — this is almost certainly a Type A single-property sale ` +
+        `record. If you can find ANY combination of Sale Price, Sale Date, ` +
+        `Grantor, Grantee, or Recording Number anywhere in the document, ` +
+        `extract that property as a comp. Set is_comparable=true. Only return ` +
+        `comps:[] if this is clearly a marketing flyer or has no sale data at all.\n\n`
+      : '';
+
+    try {
+      const response = await fetch('/api/import-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'user',
+              content: `${aggressivePreamble}[Document uploaded] Uploaded: ${file.name}`,
+            },
+          ],
+          images,
+        }),
+      });
+      // Retry transient errors with backoff.
+      if (!response.ok) {
+        const transient = response.status === 429 || response.status >= 500;
+        if (transient && attempt < 3) {
+          const delay = attempt * 2500;
+          await new Promise((r) => setTimeout(r, delay));
+          return extractCompsFromFile(file, attempt + 1, retryAggressive);
+        }
+        return { kind: 'http_error', status: response.status, statusText: response.statusText };
+      }
+      const data = await response.json();
+      const comps: ExtractedComp[] = Array.isArray(data?.comps) ? data.comps : [];
+      if (comps.length === 0) {
+        // SECOND-CHANCE RETRY — only if we haven't already tried the
+        // aggressive prompt. AI was over-cautious; tell it to look harder.
+        if (!retryAggressive) {
+          return extractCompsFromFile(file, 1, true);
+        }
+        return {
+          kind: 'no_comps',
+          aiMessage: data?.message,
+          rawExtracted: data?.diagnostic?.raw_extracted,
+          filteredOut: data?.diagnostic?.filtered_out,
+        };
+      }
+      return { kind: 'ok', comps };
+    } catch (e: any) {
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, attempt * 2500));
+        return extractCompsFromFile(file, attempt + 1, retryAggressive);
+      }
+      return { kind: 'network_error', message: e?.message || 'fetch failed' };
+    }
+  };
+
+  // Self-healing insert. If the DB schema is behind the app (e.g. a new
+  // column hasn't been migrated yet), Supabase returns
+  // "Could not find the 'X' column of 'comps' in the schema cache". We parse
+  // that, drop the offending field from the payload, and retry. The comp
+  // still saves with whatever columns DO exist — the only cost is the new
+  // metadata not landing for now. Eliminates the "must run migrations
+  // before importing" failure mode.
+  const insertCompResilient = async (
+    payload: Record<string, any>,
+    maxRetries: number = 8
+  ): Promise<{ data: { id: string } | null; error: any }> => {
+    let current = { ...payload };
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const { data, error } = await supabase
+        .from('comps')
+        .insert(current)
+        .select('id')
+        .maybeSingle();
+      if (!error) return { data, error: null };
+      // Look for the column-not-found pattern from PostgREST.
+      const msg = String(error.message || '');
+      const m = msg.match(/Could not find the '([\w_]+)' column/);
+      if (!m) return { data: null, error };
+      const missingCol = m[1];
+      if (!(missingCol in current)) return { data: null, error };
+      delete current[missingCol];
+      console.warn(`saveCompSilent: schema missing '${missingCol}' — retrying without it`);
+    }
+    return { data: null, error: new Error('Insert exhausted retries after schema mismatches') };
+  };
+
+  // Silent insert — same fields as saveComp() but no toast and returns a
+  // boolean for the batch summary to count successes. Also writes a row to
+  // import_exemplars so we have data for the learning loop (path B).
+  const saveCompSilent = async (comp: ExtractedComp): Promise<boolean> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+    const conf =
+      comp.confidence?.overall > 80 ? 'Verified'
+      : comp.confidence?.overall > 50 ? 'Estimated'
+      : 'Unverified';
+    const { data: inserted, error } = await insertCompResilient({
+      created_by: user.id,
+      property_name: comp.property_name,
+      county: comp.county || '',
+      state: comp.state || 'TX',
+      acres: comp.acres || 0,
+      sale_price: comp.sale_price || 0,
+      improvements_value: (comp as any).improvements_value,
+      sale_date: (comp as any).sale_date,
+      address: (comp as any).address,
+      latitude: (comp as any).latitude,
+      longitude: (comp as any).longitude,
+      parcel_id: (comp as any).parcel_id,
+      recording_number: (comp as any).recording_number,
+      grantor: (comp as any).grantor,
+      grantee: (comp as any).grantee,
+      financing: (comp as any).financing,
+      minerals_sold: (comp as any).minerals_sold,
+      confirmation_source: (comp as any).confirmation_source,
+      description: (comp as any).description,
+      water: (comp as any).water || 'None',
+      road_frontage: (comp as any).road_frontage || 'None',
+      has_improvements: (comp as any).has_improvements || false,
+      improvements_notes: (comp as any).improvements_notes,
+      has_water_rights: (comp as any).has_water_rights ?? null,
+      irrigation: (comp as any).irrigation ?? null,
+      flood_plain: (comp as any).flood_plain ?? null,
+      status: 'Sold',
+      visibility: 'team',
+      confidence: conf,
+      boundary_geojson: (comp as any).geometry ?? null,
+    });
+
+    if (error || !inserted) return false;
+
+    // === LEARNING LOOP — write an exemplar for this comp ==================
+    // Captures what AI extracted, what auto-locate did, what the broker
+    // ultimately accepted. Best-effort: if the import_exemplars table
+    // doesn't exist yet (migration 016 not run), this silently no-ops.
+    // ======================================================================
+    try {
+      const { error: exemplarError } = await supabase.from('import_exemplars').insert({
+        comp_id: inserted.id,
+        created_by: user.id,
+        description: (comp as any).description ?? null,
+        address: (comp as any).address ?? null,
+        county: comp.county || null,
+        state: comp.state || 'TX',
+        acres: comp.acres ?? null,
+        grantor: (comp as any).grantor ?? null,
+        grantee: (comp as any).grantee ?? null,
+        ai_auto_located: (comp as any).latitude != null && (comp as any).longitude != null,
+        ai_match_confidence: (comp as any)._auto_located_confidence ?? null,
+        ai_match_reason: (comp as any)._auto_located ?? null,
+        final_lat: (comp as any).latitude ?? null,
+        final_lng: (comp as any).longitude ?? null,
+        was_manually_fixed: false,
+      });
+      if (exemplarError) {
+        // Silently ignore — table likely doesn't exist (migration not run yet).
+        // Comp itself saved successfully which is what matters.
+      }
+    } catch {
+      // Swallow — exemplar tracking is purely opportunistic.
+    }
+    return true;
+  };
+
+  // Batch entrypoint. Single file → chat-based path (existing UX with
+  // per-comp review). Multiple files → isolated extraction + auto-save.
+  const handleMultipleFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    if (files.length === 1) {
+      await handleFileUpload(files[0]);
+      return;
+    }
+
+    const toastId = 'batch-upload';
+    let savedCount = 0;
+    const outcomes: Array<{ file: string; outcome: ExtractOutcome }> = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      toast.loading(
+        `Processing ${i + 1} of ${files.length}: ${file.name}`,
+        { id: toastId }
+      );
+      const outcome = await extractCompsFromFile(file);
+      outcomes.push({ file: file.name, outcome });
+      if (outcome.kind === 'ok') {
+        for (const comp of outcome.comps) {
+          const ok = await saveCompSilent(comp);
+          if (ok) savedCount++;
+        }
+      }
+    }
+
+    toast.dismiss(toastId);
+
+    // Build a persistent, scrollable log in the chat so the user (and I) can
+    // see exactly what happened to each file. Toasts disappear; chat doesn't.
+    const failedCount = outcomes.filter((o) => o.outcome.kind !== 'ok').length;
+    const lines = outcomes.map(({ file, outcome }) => {
+      switch (outcome.kind) {
+        case 'ok':
+          return `✓ ${file} — saved ${outcome.comps.length} comp${outcome.comps.length === 1 ? '' : 's'}`;
+        case 'no_comps': {
+          const filterNote =
+            outcome.rawExtracted && outcome.rawExtracted > 0
+              ? ` [AI extracted ${outcome.rawExtracted}, all filtered out — likely tagged as subject_property]`
+              : '';
+          const aiNote = outcome.aiMessage ? ` (AI: "${outcome.aiMessage.slice(0, 120)}")` : '';
+          return `⚠ ${file} — extraction returned no comps${filterNote}${aiNote}`;
+        }
+        case 'http_error':
+          return `✗ ${file} — server error (HTTP ${outcome.status} ${outcome.statusText})`;
+        case 'network_error':
+          return `✗ ${file} — network error: ${outcome.message}`;
+        case 'render_failed':
+          return `✗ ${file} — could not render PDF (${outcome.message})`;
+      }
+    });
+    const summary = `**Batch import complete — ${savedCount} comp${savedCount === 1 ? '' : 's'} saved, ${failedCount} issue${failedCount === 1 ? '' : 's'}.**\n\n${lines.join('\n')}`;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: summary,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    if (savedCount > 0) {
+      toast.success(
+        (t) => (
+          <span>
+            Imported <b>{savedCount}</b> comp{savedCount === 1 ? '' : 's'}
+            {failedCount > 0 && <span className="text-amber-300"> ({failedCount} issue{failedCount === 1 ? '' : 's'} — see chat log)</span>}.{' '}
+            <button
+              onClick={() => {
+                toast.dismiss(t.id);
+                router.push('/dashboard/vault');
+              }}
+              className="underline font-bold text-sage"
+            >
+              View in Vault →
+            </button>
+          </span>
+        ),
+        { duration: 12000 }
+      );
+    } else {
+      toast.error(
+        `None of the ${files.length} files saved. See the chat log for per-file details.`,
+        { duration: 10000 }
+      );
+    }
+  };
+
   const handleFileUpload = async (file: File) => {
     if (!file) return;
-
-    const formData = new FormData();
-    formData.append('file', file);
-
     setLoading(true);
-    try {
-      const response = await fetch('/api/parse-pdf', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
 
+    try {
+      // PDFs: render pages client-side and send as images for vision extraction.
+      // Images (jpg/png): pass straight through as a single-image array.
+      if (file.type === 'application/pdf') {
+        toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
+        const images = await pdfToImages(file, { scale: 1.6, maxPages: 20 });
+        toast.dismiss('pdf-render');
+        if (images.length === 0) {
+          toast.error('Could not render PDF');
+          return;
+        }
+        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images);
+        return;
+      }
+
+      if (file.type.startsWith('image/')) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as string);
+          r.onerror = () => reject(r.error);
+          r.readAsDataURL(file);
+        });
+        await sendMessage(`Uploaded: ${file.name}`, undefined, [dataUrl]);
+        return;
+      }
+
+      // Fallback to server-side text parsing for other formats
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch('/api/parse-pdf', { method: 'POST', body: formData });
+      const data = await response.json();
       if (data.text) {
         await sendMessage(`Uploaded: ${file.name}`, data.text);
       } else {
         toast.error('Could not read document');
       }
-    } catch {
-      toast.error('Failed to upload file');
+    } catch (err: any) {
+      toast.dismiss('pdf-render');
+      toast.error(err?.message || 'Failed to upload file');
     } finally {
       setLoading(false);
     }
@@ -149,12 +499,34 @@ export default function ImportPage() {
       status: 'Sold',
       visibility: 'team',
       confidence: comp.confidence.overall > 80 ? 'Verified' : comp.confidence.overall > 50 ? 'Estimated' : 'Unverified',
+      boundary_geojson: (comp as any).geometry ?? null,
     });
 
     if (error) {
       toast.error('Failed to save comp');
     } else {
-      toast.success(`${comp.property_name || 'Comp'} added to vault!`);
+      const label = comp.property_name || `${comp.county || 'Comp'}`;
+      if (comp.latitude != null && comp.longitude != null) {
+        toast.success(
+          (t) => (
+            <span>
+              {label} added to vault.{' '}
+              <button
+                onClick={() => {
+                  toast.dismiss(t.id);
+                  router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`);
+                }}
+                className="underline font-bold text-sage"
+              >
+                View on map →
+              </button>
+            </span>
+          ),
+          { duration: 6000 }
+        );
+      } else {
+        toast.success(`${label} added to vault!`);
+      }
       setPendingComps(prev => prev.filter(c => c !== comp));
     }
   };
@@ -165,10 +537,68 @@ export default function ImportPage() {
     }
   };
 
+  // Drag-and-drop handlers — accept PDFs + images, ignore everything else.
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer?.items && e.dataTransfer.items.length > 0) {
+      setIsDraggingOver(true);
+    }
+  };
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+    }
+  };
+  const handleDragOver = (e: React.DragEvent) => {
+    // Required to enable drop behavior.
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+    dragCounterRef.current = 0;
+    const files = Array.from(e.dataTransfer?.files || []).filter(
+      (f) => f.type === 'application/pdf' || f.type.startsWith('image/')
+    );
+    const skipped = (e.dataTransfer?.files?.length ?? 0) - files.length;
+    if (skipped > 0) {
+      toast(`Skipped ${skipped} non-PDF/image file${skipped === 1 ? '' : 's'}`, { icon: '⚠️', duration: 4000 });
+    }
+    if (files.length > 0) handleMultipleFiles(files);
+  };
+
   return (
     <div className="flex h-full bg-night">
-      {/* Chat area */}
-      <div className="flex-1 flex flex-col">
+      {/* Chat area — drag-and-drop is wired here so PDFs can be dropped
+          anywhere in this column. Drop overlay sits on top when dragging. */}
+      <div
+        className="flex-1 flex flex-col relative"
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        {/* Drag-over overlay — covers the chat column with a dashed sage
+            border + drop affordance. Pointer-events-none so the drop event
+            still hits the wrapper underneath. */}
+        {isDraggingOver && (
+          <div className="absolute inset-0 z-50 bg-sage/10 backdrop-blur-sm border-4 border-dashed border-sage rounded-lg flex items-center justify-center pointer-events-none">
+            <div className="text-center px-6">
+              <Upload size={56} className="text-sage mx-auto mb-3" />
+              <p className="text-xl font-bold text-sage">Drop PDFs to import</p>
+              <p className="text-sm text-slate-300 mt-2">Multiple files supported · PDF or image</p>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <div className="flex-shrink-0 bg-panel border-b border-border px-4 py-3 flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-sage/10 border border-sage/20 flex items-center justify-center">
@@ -184,14 +614,20 @@ export default function ImportPage() {
               className="flex items-center gap-1.5 px-3 py-1.5 bg-card border border-border rounded-lg text-xs font-bold text-slate-300 hover:text-white hover:border-sage transition-colors"
             >
               <Upload size={12} />
-              Upload PDF
+              Upload PDFs
             </button>
             <input
               ref={fileInputRef}
               type="file"
               accept=".pdf,.jpg,.jpeg,.png"
+              multiple
               className="hidden"
-              onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []);
+                if (files.length > 0) handleMultipleFiles(files);
+                // Reset so the user can re-pick the same files later if needed.
+                if (e.target) e.target.value = '';
+              }}
             />
           </div>
         </div>

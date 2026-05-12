@@ -1,0 +1,14 @@
+-- Per-CMA, per-comp valuation adjustments. Lets a broker back out improvement
+-- value or mineral value from a comp's sale price for THIS specific CMA without
+-- changing the underlying comp record (which other CMAs may use unchanged).
+--
+-- Shape:
+-- {
+--   "<comp-uuid>": {
+--     "improvements_override": number | null,
+--     "mineral_override": number | null,
+--     "exclude": boolean | null,
+--     "notes": string | null
+--   }
+-- }
+ALTER TABLE cmas ADD COLUMN IF NOT EXISTS comp_adjustments JSONB DEFAULT '{}'::jsonb;

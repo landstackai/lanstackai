@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, BestUse, WaterQuality, RoadFrontage, DevPotential } from '@/types';
 import { TEXAS_COUNTIES } from '@/lib/utils';
-import { X, ChevronRight, ChevronLeft, Sparkles } from 'lucide-react';
+import { X, ChevronRight, ChevronLeft, Sparkles, ChevronDown, ChevronUp, Globe, MapPin } from 'lucide-react';
+import LocationPicker from './LocationPicker';
 import toast from 'react-hot-toast';
 
 interface CompModalProps {
@@ -13,7 +14,24 @@ interface CompModalProps {
   onSave: () => void;
 }
 
-const BEST_USE_OPTIONS: BestUse[] = ['Recreational', 'Agriculture', 'Investment', 'Development', 'Conservation', 'Timber'];
+const BEST_USE_OPTIONS: BestUse[] = [
+  'Recreational',
+  'Agriculture',
+  'Farm',
+  'Vineyard / Orchard',
+  'Timber',
+  'Conservation',
+  'Investment',
+  'Development',
+  'Single Family Home Development',
+  'Multi-Family Development',
+  'Rural Land Development',
+  'Commercial',
+  'Industrial',
+  'Data Center',
+  'Solar Farm',
+  'Wind Farm',
+];
 
 export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
   const [step, setStep] = useState(1);
@@ -54,9 +72,85 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     visibility: 'team',
     confidence: 'Unverified',
     is_company_transaction: false,
+    transaction_agent_id: null as string | null,
     has_improvements: false,
     use_land_only_for_cma: true,
+    // Value-driver flags. The first two render purple pills across all comp
+    // surfaces; has_water_rights is collected and searchable but no pill.
+    has_live_water: false,
+    has_irrigated_farm: false,
+    // 3-state: true (Yes) / false (No) / null (N/A — unknown or not applicable).
+    has_water_rights: null as boolean | null,
+    irrigation: 'None' as 'None' | 'Medium' | 'Strong',
+    flood_plain: null as 'Yes' | 'Partial' | 'No' | null,
+    // Adjusted Land Value (optional)
+    improvement_value: '' as string,
+    improvement_source: '' as '' | 'appraiser' | 'agent_verified' | 'broker_estimate',
   });
+  const [improvementOpen, setImprovementOpen] = useState(false);
+  const [findingListing, setFindingListing] = useState(false);
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
+
+  // Teammates for the Transaction Agent dropdown (only relevant when the
+  // Company Transaction box is checked). Loaded once on mount.
+  const [teammates, setTeammates] = useState<{ id: string; full_name: string | null; email: string | null }[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (cancelled || !user) return;
+      setCurrentUserId(user.id);
+      const { data: me } = await supabase
+        .from('profiles')
+        .select('team_id,full_name,email')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (cancelled) return;
+      const myRow = { id: user.id, full_name: (me as any)?.full_name ?? null, email: (me as any)?.email ?? null };
+      const tid = (me as any)?.team_id;
+      if (tid) {
+        const { data: mates } = await supabase
+          .from('profiles')
+          .select('id,full_name,email')
+          .eq('team_id', tid);
+        if (cancelled) return;
+        const list = ((mates as any) || []).filter((m: any) => m.id !== user.id);
+        setTeammates([myRow, ...list]);
+      } else {
+        setTeammates([myRow]);
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const findListing = async () => {
+    if (!comp?.id) {
+      toast('Save the comp first, then click again to find a listing', { icon: 'ℹ️', duration: 3000 });
+      return;
+    }
+    setFindingListing(true);
+    try {
+      const res = await fetch(`/api/comp/${comp.id}/find-listing`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'Search failed');
+        return;
+      }
+      if (data.url) {
+        setForm(f => ({ ...f, source_url: data.url }));
+        toast.success('Listing found — review and save the form to keep it');
+      } else {
+        toast(data.reason || 'No matching listing found', { icon: '🔍', duration: 4000 });
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Search failed');
+    } finally {
+      setFindingListing(false);
+    }
+  };
 
   useEffect(() => {
     if (comp) {
@@ -93,9 +187,26 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
         visibility: comp.visibility || 'team',
         confidence: comp.confidence || 'Unverified',
         is_company_transaction: comp.is_company_transaction || false,
+        transaction_agent_id: (comp as any).transaction_agent_id ?? null,
         has_improvements: comp.has_improvements || false,
         use_land_only_for_cma: comp.use_land_only_for_cma !== false,
+        has_live_water: (comp as any).has_live_water || false,
+        has_irrigated_farm: (comp as any).has_irrigated_farm || false,
+        // Preserve null (N/A) when loading — don't coerce to false.
+        has_water_rights:
+          (comp as any).has_water_rights === true ? true
+          : (comp as any).has_water_rights === false ? false
+          : null,
+        irrigation: ((comp as any).irrigation as any) || 'None',
+        flood_plain:
+          (comp as any).flood_plain === 'Yes' ? 'Yes'
+          : (comp as any).flood_plain === 'Partial' ? 'Partial'
+          : (comp as any).flood_plain === 'No' ? 'No'
+          : null,
+        improvement_value: comp.improvement_value != null ? String(comp.improvement_value) : '',
+        improvement_source: (comp.improvement_source as any) || '',
       });
+      if (comp.improvement_value != null) setImprovementOpen(true);
     }
   }, [comp]);
 
@@ -185,8 +296,24 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       visibility: form.visibility,
       confidence: form.confidence,
       is_company_transaction: form.is_company_transaction,
+      // Attribution only persists when this is actually a company transaction
+      // — otherwise the field is forced back to null so research comps never
+      // accidentally get credited as someone's sale.
+      transaction_agent_id: form.is_company_transaction ? form.transaction_agent_id : null,
       has_improvements: form.has_improvements,
       use_land_only_for_cma: form.use_land_only_for_cma,
+      has_live_water: form.has_live_water,
+      has_irrigated_farm: form.has_irrigated_farm,
+      has_water_rights: form.has_water_rights,
+      irrigation: form.irrigation,
+      flood_plain: form.flood_plain,
+      improvement_value: form.improvement_value !== '' ? parseFloat(form.improvement_value) : null,
+      improvement_source: form.improvement_source || null,
+      // Agent-Verified auto-tags the verifier and timestamp (internal audit trail
+      // — never shown on the client share report). For appraiser / broker_estimate
+      // / cleared, blank out the audit columns.
+      improvement_verified_by: form.improvement_source === 'agent_verified' ? user.id : null,
+      improvement_verified_at: form.improvement_source === 'agent_verified' ? new Date().toISOString() : null,
       is_draft: false,
     };
 
@@ -321,6 +448,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                 </div>
               )}
 
+
               {ppa && (
                 <div className="bg-sage/5 border border-sage/20 rounded-lg px-3 py-2 flex justify-between">
                   <span className="text-xs text-slate-400">Price per acre</span>
@@ -378,6 +506,16 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                     placeholder="-99.93340302" className={`${inputClass} font-mono`} />
                 </div>
               </div>
+              {/* Map picker — opens a satellite map for click-to-set when the
+                  address can't be geocoded (rural land typical). */}
+              <button
+                type="button"
+                onClick={() => setShowLocationPicker(true)}
+                className="flex items-center justify-center gap-1.5 w-full py-2 border border-sage/40 bg-sage/10 hover:bg-sage/15 text-sage rounded-lg text-xs font-bold transition-colors"
+              >
+                <MapPin size={12} />
+                {form.latitude && form.longitude ? 'Adjust Location on Map' : 'Set Location on Map'}
+              </button>
 
               <div>
                 <label className={labelClass}>Parcel ID</label>
@@ -427,6 +565,29 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                 </div>
               </div>
 
+              {/* Irrigation — 3-tier enum, slots in alongside Water/Road/Dev.
+                  "Strong" triggers the purple IRRIGATION pill on comp surfaces;
+                  all tiers display in the chip grid. */}
+              <div>
+                <label className={labelClass}>Irrigation</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['None', 'Medium', 'Strong'] as const).map(i => (
+                    <button
+                      key={i}
+                      onClick={() => setForm(f => ({...f, irrigation: i}))}
+                      className={`py-2 rounded-lg border text-sm font-bold transition-colors ${
+                        form.irrigation === i
+                          ? 'border-emerald-400 bg-emerald-400/10 text-emerald-400'
+                          : 'border-border text-slate-400 hover:border-slate-500'
+                      }`}
+                    >{i}</button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+                  Strong = active center pivot, drip, or current row crops. Medium = partial irrigation. None = dry land. Strong triggers the IRRIGATION pill on comp cards.
+                </p>
+              </div>
+
               {/* Best Use */}
               <div>
                 <label className={labelClass}>Best Use (select all that apply)</label>
@@ -443,7 +604,9 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                 </div>
               </div>
 
-              {/* Texas specific */}
+              {/* Texas specific — Minerals + Water Rights live together
+                  (both are "what rights transfer with the sale" questions),
+                  with Flood Plain % below. */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Minerals Sold</label>
@@ -457,18 +620,50 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   </select>
                 </div>
                 <div>
-                  <label className={labelClass}>Flood Plain %</label>
-                  <input type="number" value={form.flood_plain_pct}
-                    onChange={e => setForm({...form, flood_plain_pct: e.target.value})}
-                    placeholder="0" className={inputClass} />
+                  <label className={labelClass}>Commercial Water Rights</label>
+                  <select
+                    value={
+                      form.has_water_rights === true ? 'Yes'
+                      : form.has_water_rights === false ? 'No'
+                      : 'N/A'
+                    }
+                    onChange={e => {
+                      const v = e.target.value;
+                      setForm({
+                        ...form,
+                        has_water_rights: v === 'Yes' ? true : v === 'No' ? false : null,
+                      });
+                    }}
+                    className={inputClass}
+                  >
+                    <option>N/A</option>
+                    <option>No</option>
+                    <option>Yes</option>
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1">Well allocation, groundwater rights — distinct from live water.</p>
                 </div>
               </div>
 
               <div>
-                <label className={labelClass}>Wildlife Notes</label>
-                <input value={form.wildlife_notes} onChange={e => setForm({...form, wildlife_notes: e.target.value})}
-                  placeholder="Whitetail, turkey, axis, elk..." className={inputClass} />
+                <label className={labelClass}>Flood Plain</label>
+                <select
+                  value={form.flood_plain ?? ''}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setForm({
+                      ...form,
+                      flood_plain: v === '' ? null : (v as 'Yes' | 'Partial' | 'No'),
+                    });
+                  }}
+                  className={inputClass}
+                >
+                  <option value="">—</option>
+                  <option value="No">No</option>
+                  <option value="Partial">Partial</option>
+                  <option value="Yes">Yes</option>
+                </select>
               </div>
+
 
               <div>
                 <label className={labelClass}>Improvements Description</label>
@@ -541,9 +736,21 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               </div>
 
               <div>
-                <label className={labelClass}>Source URL / Listing Link</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className={labelClass + ' mb-0'}>Source URL / Listing Link</label>
+                  <button
+                    type="button"
+                    onClick={findListing}
+                    disabled={findingListing}
+                    className="flex items-center gap-1.5 px-2.5 py-1 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/30 hover:border-purple-400 text-purple-200 rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                    title="Search Zillow / Realtor / Land for a matching listing"
+                  >
+                    <Globe size={11} />
+                    {findingListing ? 'Searching…' : 'Find Online'}
+                  </button>
+                </div>
                 <input value={form.source_url} onChange={e => setForm({...form, source_url: e.target.value})}
-                  placeholder="https://land.com/listing/..." className={inputClass} type="url" />
+                  placeholder="https://zillow.com/homedetails/..." className={inputClass} type="url" />
               </div>
 
               {/* Description with AI */}
@@ -568,18 +775,104 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                 />
               </div>
 
-              {/* Company transaction flag */}
-              <div className="flex items-center gap-3 py-2 px-3 bg-card border border-border rounded-lg">
-                <input
-                  type="checkbox"
-                  id="company-tx"
-                  checked={form.is_company_transaction}
-                  onChange={e => setForm({...form, is_company_transaction: e.target.checked})}
-                  className="w-4 h-4 accent-sage"
-                />
-                <label htmlFor="company-tx" className="text-sm font-semibold text-slate-300 cursor-pointer">
-                  Company Transaction
-                </label>
+              {/* Company transaction flag + Transaction Agent attribution.
+                  The agent dropdown only shows when the box is checked.
+                  Defaults to the current user; can be changed to a teammate
+                  if it was their deal. Cleared when the box is unchecked. */}
+              <div className="bg-card border border-border rounded-lg overflow-hidden">
+                <div className="flex items-center gap-3 py-2 px-3">
+                  <input
+                    type="checkbox"
+                    id="company-tx"
+                    checked={form.is_company_transaction}
+                    onChange={e => {
+                      const checked = e.target.checked;
+                      setForm(f => ({
+                        ...f,
+                        is_company_transaction: checked,
+                        // Default the agent to the current user the first time the box
+                        // is checked. Clear it when unchecked.
+                        transaction_agent_id: checked
+                          ? (f.transaction_agent_id ?? currentUserId)
+                          : null,
+                      }));
+                    }}
+                    className="w-4 h-4 accent-sage"
+                  />
+                  <label htmlFor="company-tx" className="text-sm font-semibold text-slate-300 cursor-pointer">
+                    Company Transaction
+                  </label>
+                </div>
+                {form.is_company_transaction && (
+                  <div className="px-3 pb-3 pt-1 border-t border-border">
+                    <label className={labelClass}>Transaction Agent</label>
+                    <select
+                      value={form.transaction_agent_id ?? ''}
+                      onChange={e => setForm({...form, transaction_agent_id: e.target.value || null})}
+                      className={inputClass}
+                    >
+                      <option value="">— No specific agent —</option>
+                      {teammates.map(m => {
+                        const label = (m.full_name || m.email || 'Teammate') + (m.id === currentUserId ? ' (you)' : '');
+                        return <option key={m.id} value={m.id}>{label}</option>;
+                      })}
+                    </select>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Defaults to you. Pick a teammate if it was their deal. Drives the map's "My Sales" filter.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Improvement Adjustment (optional, collapsible) */}
+              <div className="bg-card border border-border rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setImprovementOpen(o => !o)}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-left"
+                >
+                  <div>
+                    <p className="text-sm font-bold text-white">Improvement Adjustment <span className="text-slate-500 font-normal">(optional)</span></p>
+                    <p className="text-[10px] text-slate-500">Used to compute land-only price for CMAs.</p>
+                  </div>
+                  {improvementOpen ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
+                </button>
+                {improvementOpen && (
+                  <div className="px-3 pb-3 pt-1 space-y-3 border-t border-border">
+                    <div>
+                      <label className={labelClass}>Improvement Value</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                        <input
+                          type="number"
+                          value={form.improvement_value}
+                          onChange={e => setForm({...form, improvement_value: e.target.value})}
+                          placeholder="e.g. 350000"
+                          className={`${inputClass} pl-7 font-mono`}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className={labelClass}>Source</label>
+                      <select
+                        value={form.improvement_source}
+                        onChange={e => setForm({...form, improvement_source: e.target.value as any})}
+                        className={inputClass}
+                      >
+                        <option value="">Select…</option>
+                        <option value="appraiser">Appraiser Report</option>
+                        <option value="agent_verified">Agent-Verified (listing/buyer's agent)</option>
+                        <option value="broker_estimate">Broker Estimate</option>
+                      </select>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                      Leaving these blank keeps the comp behaving exactly as before. Agent-Verified
+                      means you (or a teammate) had first-hand knowledge of the transaction —
+                      the client sees a green badge but never your name. Broker estimates are
+                      flagged for client disclosure.
+                    </p>
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -615,6 +908,59 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
           </div>
         </div>
       </div>
+
+      {/* Location picker — overlay on top of the comp modal.
+          Pass description + address + propertyName + compId so the picker
+          shows the appraiser's prose alongside the satellite, and auto-flies
+          to the AI-extracted hint area for a 15-second visual match. */}
+      {showLocationPicker && (
+        <LocationPicker
+          initialLat={form.latitude ? parseFloat(form.latitude) : null}
+          initialLng={form.longitude ? parseFloat(form.longitude) : null}
+          county={form.county || null}
+          state={form.state || 'TX'}
+          compId={comp?.id || null}
+          description={form.description || null}
+          address={form.address || null}
+          propertyName={form.property_name || null}
+          onPick={async (lat, lng) => {
+            setForm({ ...form, latitude: lat.toString(), longitude: lng.toString() });
+            setShowLocationPicker(false);
+            toast.success('Location set');
+            // Bump location_confidence to 'verified' — broker has confirmed
+            // by clicking the actual property on the satellite map.
+            if (comp?.id) {
+              try {
+                await supabase
+                  .from('comps')
+                  .update({
+                    latitude: lat,
+                    longitude: lng,
+                    location_confidence: 'verified',
+                  })
+                  .eq('id', comp.id);
+              } catch {
+                // Non-fatal — the form-save below will still write the coords.
+              }
+              // Learning loop — record manual correction as an exemplar update.
+              try {
+                await supabase
+                  .from('import_exemplars')
+                  .update({
+                    final_lat: lat,
+                    final_lng: lng,
+                    was_manually_fixed: true,
+                    fixed_at: new Date().toISOString(),
+                  })
+                  .eq('comp_id', comp.id);
+              } catch (e) {
+                // Silent — exemplar tracking is best-effort.
+              }
+            }
+          }}
+          onClose={() => setShowLocationPicker(false)}
+        />
+      )}
     </div>
   );
 }

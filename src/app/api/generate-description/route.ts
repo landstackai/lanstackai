@@ -53,7 +53,7 @@ ${form.financing ? `Financing: ${form.financing}` : ''}
     `.trim();
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-4o-mini',
       max_tokens: 600,
       messages: [
         { role: 'system', content: LAND_SYSTEM_PROMPT },

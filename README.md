@@ -60,24 +60,17 @@ git push -u origin main
 6. Click **Import**
 
 ### Add Environment Variables
-Before clicking Deploy, click **"Environment Variables"** and add these one by one:
+Before clicking Deploy, click **"Environment Variables"** and add these one by one. Get the actual values from your Supabase / Mapbox / OpenAI dashboards — never commit them to git.
 
 ```
-NEXT_PUBLIC_SUPABASE_URL
-https://zmpdkhpzcekclgjsmggs.supabase.co
-
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-sb_publishable_1pRUFDFuNCIz6nAlOv6kaw_dh6NQ0JL
-
-SUPABASE_SECRET_KEY
-sb_secret_7PFfnX1McNBVoVoyGMq_pA_Rw7XqnSB
-
-NEXT_PUBLIC_MAPBOX_TOKEN
-pk.eyJ1IjoibHN3b3BlIiwiYSI6ImNtb3U4cXNyZzBkNGQydHB2bDRpenl6bG4ifQ.W0vJM0-0FM2IJSas0i1fAg
-
-OPENAI_API_KEY
-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
+NEXT_PUBLIC_SUPABASE_URL=<your-supabase-project-url>
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<your-supabase-publishable-key>
+SUPABASE_SECRET_KEY=<your-supabase-service-role-key>
+NEXT_PUBLIC_MAPBOX_TOKEN=<your-mapbox-public-token>
+OPENAI_API_KEY=<your-openai-api-key>
 ```
+
+See `.env.local.example` for the full list.
 
 7. Click **Deploy**
 8. Wait 2-3 minutes for the build
