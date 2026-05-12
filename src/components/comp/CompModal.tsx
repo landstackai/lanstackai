@@ -317,15 +317,35 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       is_draft: false,
     };
 
-    let error;
-    if (comp) {
-      ({ error } = await supabase.from('comps').update(payload).eq('id', comp.id));
-    } else {
-      ({ error } = await supabase.from('comps').insert(payload));
+    // Self-healing save: if a column doesn't exist in the deployed Supabase
+    // schema (e.g. a migration hasn't been run yet), strip that field from
+    // the payload and retry. Up to 10 retries — covers the case where a
+    // payload references several columns from un-run migrations.
+    let current: Record<string, any> = { ...payload };
+    let lastError: any = null;
+    let success = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const { error } = comp
+        ? await supabase.from('comps').update(current).eq('id', comp.id)
+        : await supabase.from('comps').insert(current);
+      if (!error) {
+        success = true;
+        break;
+      }
+      lastError = error;
+      const msg = String(error.message || '');
+      const m = msg.match(/Could not find the '([\w_]+)' column/);
+      if (!m) break;
+      const missingCol = m[1];
+      if (!(missingCol in current)) break;
+      console.warn(`[CompModal] schema missing '${missingCol}' — retrying without it`);
+      delete current[missingCol];
     }
 
-    if (error) {
-      toast.error('Failed to save comp');
+    if (!success) {
+      const detail = lastError?.message || lastError?.details || 'unknown error';
+      console.error('[CompModal] save failed:', lastError);
+      toast.error(`Save failed: ${detail}`, { duration: 6000 });
       setLoading(false);
     } else {
       toast.success(comp ? 'Comp updated!' : 'Comp added!');
