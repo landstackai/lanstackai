@@ -1150,9 +1150,9 @@ export default function MapPage() {
   }, [selectedComp, fetchComps]);
 
   // Viewport-based TxGIO vector parcels — covers all of TX, only loads what's
-  // visible. Kicks in at zoom 15 only (bbox queries are slow ~21s at TxGIO,
-  // so we keep them small). Below zoom 15 the raster layer shows boundaries
-  // visually and map clicks fall back to /api/parcel point query.
+  // visible. Kicks in at zoom 14 (parcels appear as you zoom in from county
+  // view). Below zoom 14 the raster layer shows boundaries visually and map
+  // clicks fall back to /api/parcel point query.
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
 
@@ -1166,10 +1166,10 @@ export default function MapPage() {
         id: 'txgio-bbox-line',
         type: 'line',
         source: 'txgio-bbox',
-        minzoom: 15,
+        minzoom: 14,
         paint: {
           'line-color': '#fbbf24',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 15, 1.4, 16, 1.8, 19, 2.5],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 1.2, 15, 1.5, 16, 1.8, 19, 2.5],
           'line-opacity': 1,
         },
       });
@@ -1177,7 +1177,7 @@ export default function MapPage() {
         id: 'txgio-bbox-fill',
         type: 'fill',
         source: 'txgio-bbox',
-        minzoom: 15,
+        minzoom: 14,
         paint: { 'fill-color': '#fbbf24', 'fill-opacity': 0 }, // invisible click target
       });
       map.current.addLayer({
@@ -1217,11 +1217,11 @@ export default function MapPage() {
     const update = () => {
       if (!map.current) return;
       const zoom = map.current.getZoom();
-      // Only fetch vector overlay at zoom 15+ where bbox is small (~1km) and
-      // TxGIO returns quickly. Below 15, raster layer shows boundaries and
-      // map clicks fall through to /api/parcel point query (much faster).
-      if (zoom < 15) {
-        console.log(`[txgio-bbox] skipped — zoom ${zoom.toFixed(1)} < 15 (click anyway: falls back to point query)`);
+      // Fetch vector overlay at zoom 14+ — broader area, but still small
+      // enough that TxGIO usually responds in 2-5s when healthy. Below 14,
+      // raster layer shows boundaries and clicks fall through to /api/parcel.
+      if (zoom < 14) {
+        console.log(`[txgio-bbox] skipped — zoom ${zoom.toFixed(1)} < 14 (click anyway: falls back to point query)`);
         return;
       }
       const b = map.current.getBounds();
