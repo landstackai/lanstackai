@@ -15,7 +15,9 @@ import { NextRequest, NextResponse } from 'next/server';
  * change at most monthly.
  */
 
-export const maxDuration = 30;
+// Pro plan: allow up to 60s. TxGIO can take 30-50s on bad afternoons;
+// successful response then caches for 24h on Vercel edge.
+export const maxDuration = 60;
 
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
@@ -99,7 +101,8 @@ export async function GET(req: NextRequest) {
   let lastErr: any = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      data = await fetchOnce(attempt === 0 ? 18000 : 24000);
+      // Bumped timeouts for slow TxGIO afternoons (Pro plan gives us 60s budget)
+      data = await fetchOnce(attempt === 0 ? 40000 : 50000);
       break;
     } catch (e: any) {
       lastErr = e;
