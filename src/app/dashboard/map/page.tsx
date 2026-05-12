@@ -2193,6 +2193,20 @@ export default function MapPage() {
 
   const startDrawing = useCallback(() => {
     if (!drawRef.current) return;
+    // Auto-discard any lingering parcel selection / merged boundary so the
+    // user starts with a clean canvas. Without this, drawing a new polygon
+    // visually piles on top of whatever was previously selected.
+    if (map.current && mapLoaded) {
+      try {
+        const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        const merged = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+        if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+        if (merged) merged.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+    setSelectedParcels([]);
+    setMergedAcres(0);
+    drawRef.current.deleteAll();
     drawRef.current.changeMode('draw_polygon');
     setDrawingActive(true);
     setDrawVertexCount(0);
@@ -2200,7 +2214,7 @@ export default function MapPage() {
     setSheetMode('none');
     setSelectedComp(null);
     setTappedParcel(null);
-  }, []);
+  }, [mapLoaded]);
 
   const stopDrawing = useCallback(() => {
     if (!drawRef.current) return;
@@ -2232,13 +2246,26 @@ export default function MapPage() {
     setDrawVertexCount(0);
   }, []);
 
+  // Discard everything: drawn polygons in MapboxDraw, selected parcels,
+  // the merged-boundary preview layer, and reset the sheet. This is the
+  // single source of truth for "throw it all away and start fresh."
   const clearDrawings = useCallback(() => {
-    if (!drawRef.current) return;
-    drawRef.current.deleteAll();
+    if (drawRef.current) drawRef.current.deleteAll();
     setDrawnCount(0);
     setDrawingActive(false);
     setDrawVertexCount(0);
-  }, []);
+    setSelectedParcels([]);
+    setMergedAcres(0);
+    setSheetMode('none');
+    if (map.current && mapLoaded) {
+      try {
+        const sel = map.current.getSource('selected-parcels') as mapboxgl.GeoJSONSource | undefined;
+        const merged = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+        if (sel) sel.setData({ type: 'FeatureCollection', features: [] });
+        if (merged) merged.setData({ type: 'FeatureCollection', features: [] });
+      } catch {}
+    }
+  }, [mapLoaded]);
 
   const combineAll = useCallback(() => {
     if (!map.current || !mapLoaded) return;
@@ -2473,6 +2500,15 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && (
             <button
               onClick={() => {
+                // Auto-discard any stale merged-boundary preview so the user
+                // starts the new selection on a clean canvas.
+                if (map.current && mapLoaded) {
+                  try {
+                    const merged = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource | undefined;
+                    if (merged) merged.setData({ type: 'FeatureCollection', features: [] });
+                  } catch {}
+                }
+                setMergedAcres(0);
                 setMapMode('parcel_select');
                 setSheetMode('selecting');
                 setSelectedComp(null);
@@ -2573,7 +2609,7 @@ export default function MapPage() {
             </div>
           )}
 
-          {/* Combine + Clear (when something exists) */}
+          {/* Combine + Discard (when something exists) */}
           {(drawnCount > 0 || selectedParcels.length > 0) && !drawingActive && (
             <div className="flex gap-1.5">
               <button
@@ -2585,12 +2621,26 @@ export default function MapPage() {
               </button>
               <button
                 onClick={clearDrawings}
-                className="bg-panel/90 border border-border hover:border-red-400 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-400 hover:text-red-400 transition-colors"
-                title="Clear drawings"
+                className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+                title="Discard everything and start over"
               >
                 <Trash2 size={12} />
+                Discard
               </button>
             </div>
+          )}
+
+          {/* Discard merged-boundary preview if it's lingering with no sheet open
+              (rare edge case — sheet usually controls it, but a safety button) */}
+          {sheetMode === 'none' && mergedAcres > 0 && !drawingActive && (
+            <button
+              onClick={clearDrawings}
+              className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+              title="Remove the boundary preview from the map"
+            >
+              <Trash2 size={12} />
+              Clear Boundary
+            </button>
           )}
         </div>
 
