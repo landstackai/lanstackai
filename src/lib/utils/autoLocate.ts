@@ -503,20 +503,27 @@ async function tryOwnerSearchStrategy(
     ? `https://${process.env.VERCEL_URL}`
     : process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
-  // Cache tight matches per owner so Phase 2 (relaxed) doesn't refetch.
-  const tightMatchesCache: Map<string, any[]> = new Map();
-
   console.log(`[autoLocate] tryOwnerSearchStrategy: ${ownerSignals.length} signals, counties=${JSON.stringify(counties)}, target=${acres}ac`);
+
+  // Fetch all owner queries in PARALLEL to stay under Vercel Hobby's 10s
+  // function timeout. Sequential queries (3 × 5-15s each) blow the budget;
+  // parallel queries are bounded to the slowest single response.
+  const tightMatchesCache: Map<string, any[]> = new Map();
+  const fetchPromises = ownerSignals.map((owner) =>
+    fetchOwnerParcels(base, owner, countyParam).then((m) => ({ owner, m }))
+  );
+  const fetchResults = await Promise.all(fetchPromises);
+  for (const { owner, m } of fetchResults) {
+    if (m.length > 0) tightMatchesCache.set(owner, m);
+  }
 
   // ── PHASE 1: Strict tolerance (existing behavior) ────────────────────
   for (const owner of ownerSignals) {
-    console.log(`[autoLocate] Phase 1 trying owner="${owner}"`);
-    const tightMatches = await fetchOwnerParcels(base, owner, countyParam);
-    if (tightMatches.length === 0) {
+    const tightMatches = tightMatchesCache.get(owner);
+    if (!tightMatches || tightMatches.length === 0) {
       console.log(`[autoLocate] Phase 1: no matches for "${owner}"`);
       continue;
     }
-    tightMatchesCache.set(owner, tightMatches);
     console.log(`[autoLocate] Phase 1: ${tightMatches.length} tight matches for "${owner}"`);
 
     // (a) Single-parcel acreage match
