@@ -41,8 +41,7 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
     return NextResponse.json(
       {
         error:
-          'No parcel boundary matches the appraisal acreage within 10%. ' +
-          'Use Edit Boundary to draw it manually.',
+          'No parcel found at this location. Use Edit Boundary to draw it manually.',
       },
       { status: 404 }
     );
@@ -96,7 +95,11 @@ async function enrich(comp: any) {
         comp.acres,
         cadSource.acresField
       );
-      if (rejected) return null;
+      // Acreage rejection removed — TX appraisal vs CAD acreage routinely
+      // diverges 20-40%. Attach the matched holding even when acreage gap is
+      // large; the broker can fix the boundary manually if needed.
+      // if (rejected) return null;
+      void rejected;
       const merged = mergeFeatures(holding);
       if (!merged) return null;
       const parcelIds = holding
