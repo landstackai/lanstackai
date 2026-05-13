@@ -17,6 +17,9 @@ export async function GET() {
     },
     flags: {
       owner_search_first: process.env.OWNER_SEARCH_FIRST === '1',
+      seed_owner_match: process.env.SEED_OWNER_MATCH === '1',
+      run_server_autolocate: process.env.RUN_SERVER_AUTOLOCATE === '1',
+      skip_server_autolocate: process.env.SKIP_SERVER_AUTOLOCATE === '1',
     },
     keys_present: {
       openai: Boolean(process.env.OPENAI_API_KEY),
