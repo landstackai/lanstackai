@@ -84,24 +84,65 @@ async function autoLocateInBrowser(comp: any): Promise<{
       };
     }).filter((i: any) => i.centroid) as Array<{ feature: any; centroid: [number, number]; acres: number }>;
 
-    const clusters: Array<{ parcels: any[]; centroid: [number, number]; totalAcres: number }> = [];
-    for (const it of items) {
-      let best: typeof clusters[number] | null = null;
-      let bestDist = Infinity;
-      for (const c of clusters) {
-        const d = Math.hypot(it.centroid[0] - c.centroid[0], it.centroid[1] - c.centroid[1]);
-        if (d < bestDist && d <= GRID_DEG) { bestDist = d; best = c; }
+    // FLAG: NEXT_PUBLIC_ADJACENCY_CLUSTERING=1 → use geometric edge-adjacency
+    // (2m buffer + intersection check) instead of centroid distance.
+    const useAdjacency = process.env.NEXT_PUBLIC_ADJACENCY_CLUSTERING === '1';
+    let clusters: Array<{ parcels: any[]; centroid: [number, number]; totalAcres: number }> = [];
+
+    if (useAdjacency) {
+      // Buffer each parcel by 2m then connect via union-find on
+      // boolean intersection of the buffered polygons.
+      const buffered: any[] = items.map((it: any) => {
+        try { return turf.buffer(it.feature, 2, { units: 'meters' }); } catch { return null; }
+      });
+      const parent: number[] = items.map((_: any, i: number) => i);
+      const find = (i: number): number => parent[i] === i ? i : (parent[i] = find(parent[i]));
+      const union = (i: number, j: number) => {
+        const ri = find(i), rj = find(j);
+        if (ri !== rj) parent[ri] = rj;
+      };
+      for (let i = 0; i < items.length; i++) {
+        if (!buffered[i]) continue;
+        for (let j = i + 1; j < items.length; j++) {
+          if (!buffered[j]) continue;
+          try { if (turf.booleanIntersects(buffered[i], buffered[j])) union(i, j); } catch {}
+        }
       }
-      if (best) {
-        best.parcels.push(it.feature);
-        best.totalAcres += it.acres;
-        const n = best.parcels.length;
-        best.centroid = [
-          (best.centroid[0] * (n - 1) + it.centroid[0]) / n,
-          (best.centroid[1] * (n - 1) + it.centroid[1]) / n,
-        ];
-      } else {
-        clusters.push({ parcels: [it.feature], centroid: it.centroid, totalAcres: it.acres });
+      const groups = new Map<number, any[]>();
+      for (let i = 0; i < items.length; i++) {
+        const r = find(i);
+        if (!groups.has(r)) groups.set(r, []);
+        groups.get(r)!.push(items[i]);
+      }
+      clusters = Array.from(groups.values()).map((groupItems: any[]) => {
+        let sx = 0, sy = 0;
+        for (const it of groupItems) { sx += it.centroid[0]; sy += it.centroid[1]; }
+        return {
+          parcels: groupItems.map((it) => it.feature),
+          centroid: [sx / groupItems.length, sy / groupItems.length] as [number, number],
+          totalAcres: groupItems.reduce((s: number, it: any) => s + it.acres, 0),
+        };
+      });
+    } else {
+      // Centroid clustering (current default behavior)
+      for (const it of items) {
+        let best: typeof clusters[number] | null = null;
+        let bestDist = Infinity;
+        for (const c of clusters) {
+          const d = Math.hypot(it.centroid[0] - c.centroid[0], it.centroid[1] - c.centroid[1]);
+          if (d < bestDist && d <= GRID_DEG) { bestDist = d; best = c; }
+        }
+        if (best) {
+          best.parcels.push(it.feature);
+          best.totalAcres += it.acres;
+          const n = best.parcels.length;
+          best.centroid = [
+            (best.centroid[0] * (n - 1) + it.centroid[0]) / n,
+            (best.centroid[1] * (n - 1) + it.centroid[1]) / n,
+          ];
+        } else {
+          clusters.push({ parcels: [it.feature], centroid: it.centroid, totalAcres: it.acres });
+        }
       }
     }
 

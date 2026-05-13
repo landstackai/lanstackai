@@ -263,7 +263,14 @@ async function clusterParcelsSpatially(features: any[]): Promise<ParcelCluster[]
   // @ts-expect-error — turf v6.5 .d.ts not fully exposed
   const turf = (await import('@turf/turf')) as any;
 
-  const MAX_DEGREES = 0.015; // ~1 mile in TX latitudes
+  // FLAG: NEXT_PUBLIC_ADJACENCY_CLUSTERING=1 → use geometric edge-adjacency
+  // (2m buffer + intersection check) instead of centroid distance. Fixes
+  // the cross-county-contiguous case (parcels touching across a county line
+  // whose centroids are >1mi apart).
+  //
+  // NEXT_PUBLIC_ prefix lets the browser autoLocateInBrowser read it too,
+  // so server + client behavior stays in sync from a single env var.
+  const useAdjacency = process.env.NEXT_PUBLIC_ADJACENCY_CLUSTERING === '1';
 
   // Pre-compute centroid + acres for each feature
   const items = features.map((f) => {
@@ -286,35 +293,101 @@ async function clusterParcelsSpatially(features: any[]): Promise<ParcelCluster[]
     acres: number;
   }>;
 
-  const clusters: ParcelCluster[] = [];
-  for (const item of items) {
-    // Find closest existing cluster within threshold
-    let bestCluster: ParcelCluster | null = null;
-    let bestDist = Infinity;
-    for (const cluster of clusters) {
-      const dx = item.centroid[0] - cluster.centroid[0];
-      const dy = item.centroid[1] - cluster.centroid[1];
-      const d = Math.hypot(dx, dy);
-      if (d < bestDist && d <= MAX_DEGREES) {
-        bestDist = d;
-        bestCluster = cluster;
+  let clusters: ParcelCluster[];
+
+  if (useAdjacency) {
+    // ── Adjacency clustering ─────────────────────────────────────────
+    // For each pair: buffer both parcels by 2m, check if they intersect.
+    // 2m catches contiguous parcels that share a survey line (county
+    // border, fence line) even with minor coordinate-precision wobble.
+    // Doesn't bridge across roads (typical TX road = 18m+ wide) or
+    // stranger-owned parcels between Fritz tracts.
+    //
+    // Then union-find on the adjacency graph to find connected components.
+
+    // Pre-buffer each parcel once
+    const buffered: any[] = items.map((it) => {
+      try {
+        return turf.buffer(it.feature, 2, { units: 'meters' });
+      } catch {
+        return null;
+      }
+    });
+
+    // Union-Find data structure
+    const parent: number[] = items.map((_, i) => i);
+    const find = (i: number): number => parent[i] === i ? i : (parent[i] = find(parent[i]));
+    const union = (i: number, j: number) => {
+      const ri = find(i), rj = find(j);
+      if (ri !== rj) parent[ri] = rj;
+    };
+
+    // Compare each pair
+    for (let i = 0; i < items.length; i++) {
+      if (!buffered[i]) continue;
+      for (let j = i + 1; j < items.length; j++) {
+        if (!buffered[j]) continue;
+        try {
+          if (turf.booleanIntersects(buffered[i], buffered[j])) {
+            union(i, j);
+          }
+        } catch {}
       }
     }
-    if (bestCluster) {
-      bestCluster.parcels.push(item.feature);
-      bestCluster.totalAcres += item.acres;
-      // Running-average centroid update
-      const n = bestCluster.parcels.length;
-      bestCluster.centroid = [
-        (bestCluster.centroid[0] * (n - 1) + item.centroid[0]) / n,
-        (bestCluster.centroid[1] * (n - 1) + item.centroid[1]) / n,
-      ];
-    } else {
-      clusters.push({
-        parcels: [item.feature],
-        centroid: item.centroid,
-        totalAcres: item.acres,
-      });
+
+    // Group items by their connected component root
+    const groups: Map<number, Array<typeof items[number]>> = new Map();
+    for (let i = 0; i < items.length; i++) {
+      const root = find(i);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root)!.push(items[i]);
+    }
+
+    clusters = Array.from(groups.values()).map((groupItems) => {
+      // Recompute cluster centroid as average of member centroids (only used
+      // for the final pin location — the boundary comes from the union below)
+      let sx = 0, sy = 0;
+      for (const it of groupItems) {
+        sx += it.centroid[0];
+        sy += it.centroid[1];
+      }
+      return {
+        parcels: groupItems.map((it) => it.feature),
+        centroid: [sx / groupItems.length, sy / groupItems.length],
+        totalAcres: groupItems.reduce((s, it) => s + it.acres, 0),
+      };
+    });
+  } else {
+    // ── Centroid clustering (current default behavior) ───────────────
+    const MAX_DEGREES = 0.015; // ~1 mile in TX latitudes
+    clusters = [];
+    for (const item of items) {
+      let bestCluster: ParcelCluster | null = null;
+      let bestDist = Infinity;
+      for (const cluster of clusters) {
+        const dx = item.centroid[0] - cluster.centroid[0];
+        const dy = item.centroid[1] - cluster.centroid[1];
+        const d = Math.hypot(dx, dy);
+        if (d < bestDist && d <= MAX_DEGREES) {
+          bestDist = d;
+          bestCluster = cluster;
+        }
+      }
+      if (bestCluster) {
+        bestCluster.parcels.push(item.feature);
+        bestCluster.totalAcres += item.acres;
+        const n = bestCluster.parcels.length;
+        bestCluster.centroid = [
+          (bestCluster.centroid[0] * (n - 1) + item.centroid[0]) / n,
+          (bestCluster.centroid[1] * (n - 1) + item.centroid[1]) / n,
+        ];
+      } else {
+        clusters.push({
+          parcels: [item.feature],
+          centroid: item.centroid,
+          totalAcres: item.acres,
+        });
+      }
     }
   }
 
