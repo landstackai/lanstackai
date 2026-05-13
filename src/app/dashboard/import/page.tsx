@@ -230,10 +230,18 @@ export default function ImportPage() {
       // Browser-side auto-locate: server-side auto-locate fails inside Vercel
       // functions because function-to-self URL calls don't hit the edge cache.
       // Re-run from the browser where /api/parcels-by-owner cache hits work.
+      //
+      // SKIP when the AI already extracted explicit coords (from a "Geographic
+      // Location" field in the doc). Those are authoritative — running browser
+      // auto-locate on top could replace them with a less-precise match.
       if (Array.isArray(data.comps)) {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
           const label = c.property_name || c.county || 'comp';
+          if (c.latitude != null && c.longitude != null) {
+            console.log(`[import] ${label}: using AI-extracted coords (${c.latitude}, ${c.longitude}) — skipping browser auto-locate`);
+            continue;
+          }
           try {
             const located = await autoLocateInBrowser(c);
             if (located) {
@@ -702,15 +710,27 @@ export default function ImportPage() {
       }
     }
 
-    // Deduplicate by (property_name + sale_date + sale_price) — these together
-    // uniquely identify a sale even if AI extracted it from overlapping pages.
-    const seen = new Set<string>();
-    const dedupedComps = allComps.filter((c) => {
+    // Deduplicate by (property_name + sale_date + sale_price). When the same
+    // comp appears in multiple overlapping chunks, prefer the version with
+    // the most complete data — specifically, the one with a boundary
+    // geometry (from server-side enrichment), then the one with coords.
+    // Otherwise the first occurrence wins.
+    const byKey = new Map<string, any>();
+    for (const c of allComps) {
       const key = `${(c.property_name || '').toLowerCase().trim()}|${c.sale_date || ''}|${c.sale_price || 0}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, c);
+        continue;
+      }
+      // Prefer the one with geometry, then with coords, then keep existing
+      const newScore = (c.geometry ? 2 : 0) + (c.latitude != null ? 1 : 0);
+      const oldScore = (existing.geometry ? 2 : 0) + (existing.latitude != null ? 1 : 0);
+      if (newScore > oldScore) {
+        byKey.set(key, c);
+      }
+    }
+    const dedupedComps = Array.from(byKey.values());
     if (dedupedComps.length < allComps.length) {
       console.log(`[chunked] deduped: ${allComps.length} raw → ${dedupedComps.length} unique`);
     }

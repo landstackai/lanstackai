@@ -218,7 +218,9 @@ async function enrich(comp: any) {
       comp.acres,
       'gis_area'
     );
-    if (rejected) return null;
+    // Don't reject on acreage mismatch — selectBoundaryByAcreage now returns
+    // the seed as a fallback. Same handling as the CAD path above.
+    void rejected;
     const merged = mergeFeatures(holding);
     if (!merged) return null;
     const parcelIds = holding
