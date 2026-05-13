@@ -14,6 +14,44 @@ import {
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
 
+// Tokenize owner name for matching. Strips entity suffixes + stop words.
+function tokenizeOwner(name: string | null | undefined): string[] {
+  if (!name) return [];
+  return String(name)
+    .toUpperCase()
+    .replace(/[.,&]/g, ' ')
+    .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING|JR|SR|THE|OF|AND)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length >= 3);
+}
+
+// Score a seed candidate. Higher = better. When useOwnerMatch is true,
+// owner-name match against grantee/grantor dominates; otherwise pure
+// closest-centroid (current behavior).
+function scoreSeedCandidate(
+  ownerName: string,
+  distDegrees: number,
+  granteeTokens: string[],
+  grantorTokens: string[],
+  useOwnerMatch: boolean
+): number {
+  const proximityScore = -(distDegrees * 1000);
+  if (!useOwnerMatch) return proximityScore;
+
+  const ownerUpper = String(ownerName || '').toUpperCase();
+  const granteeHits = granteeTokens.filter((t) => ownerUpper.includes(t)).length;
+  const grantorHits = grantorTokens.filter((t) => ownerUpper.includes(t)).length;
+  const granteeScore = granteeTokens.length > 0
+    ? (granteeHits / granteeTokens.length) * 100
+    : 0;
+  const grantorScore = grantorTokens.length > 0
+    ? (grantorHits / grantorTokens.length) * 50
+    : 0;
+  return Math.max(granteeScore, grantorScore) + proximityScore * 0.01;
+}
+
 // Backfill the contiguous same-owner boundary on an already-saved comp.
 // Useful for comps imported before the auto-merge enrichment shipped.
 export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
@@ -132,6 +170,10 @@ async function enrich(comp: any) {
   // one parcel, then pick the one whose centroid is closest to the pin.
   try {
     const BUFFERS = [0.0001, 0.001, 0.005, 0.015]; // ~10m, 100m, 500m, 1.5km
+    const useOwnerMatch = process.env.SEED_OWNER_MATCH === '1';
+    const granteeTokens = useOwnerMatch ? tokenizeOwner(comp.grantee) : [];
+    const grantorTokens = useOwnerMatch ? tokenizeOwner(comp.grantor) : [];
+
     let seed: any = null;
     let usedBuffer: number = 0;
     for (const d of BUFFERS) {
@@ -155,10 +197,10 @@ async function enrich(comp: any) {
         const seedData = await seedRes.json();
         const features: any[] = Array.isArray(seedData?.features) ? seedData.features : [];
         if (features.length === 0) continue;
-        // Pick the parcel whose centroid is closest to the input coords.
-        // Matters when 1km envelope returns 15 nearby parcels — we want
-        // the one the pin is closest to.
-        let bestDist = Infinity;
+        // Score each candidate. Default = closest centroid distance.
+        // With SEED_OWNER_MATCH=1, prefer parcels whose owner_name matches
+        // the appraisal's grantee (then grantor) tokens — beats pure proximity.
+        let bestScore = -Infinity;
         for (const f of features) {
           if (!f?.properties?.owner_name) continue;
           try {
@@ -166,8 +208,15 @@ async function enrich(comp: any) {
             const coords = c?.geometry?.coordinates;
             if (!Array.isArray(coords) || coords.length < 2) continue;
             const dist = Math.hypot(coords[0] - lng, coords[1] - lat);
-            if (dist < bestDist) {
-              bestDist = dist;
+            const score = scoreSeedCandidate(
+              f.properties.owner_name,
+              dist,
+              granteeTokens,
+              grantorTokens,
+              useOwnerMatch
+            );
+            if (score > bestScore) {
+              bestScore = score;
               seed = f;
               usedBuffer = d;
             }
@@ -182,7 +231,7 @@ async function enrich(comp: any) {
       console.warn(`[enrich-boundary] no parcel found at any cascading buffer`);
       return null;
     }
-    console.log(`[enrich-boundary] found seed at buffer ${usedBuffer}°: ${seed.properties.owner_name}`);
+    console.log(`[enrich-boundary] found seed at buffer ${usedBuffer}°: ${seed.properties.owner_name}${useOwnerMatch ? ' (owner-match)' : ''}`);
 
     const owner = String(seed.properties.owner_name).trim();
     const seedCounty = String(seed.properties.county || comp.county || '').trim();

@@ -468,6 +468,53 @@ async function enrichWithHolding(comp: any): Promise<any> {
   }
 }
 
+// ── Seed-candidate scoring (used by enrichWithTxGIO when SEED_OWNER_MATCH=1)
+// Tokenize an owner name string into significant lowercase tokens for
+// matching. Strips entity suffixes (LLC/LTD/etc) and common short words.
+function tokenizeOwner(name: string | null | undefined): string[] {
+  if (!name) return [];
+  return String(name)
+    .toUpperCase()
+    .replace(/[.,&]/g, ' ')
+    .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING|JR|SR|THE|OF|AND)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length >= 3);
+}
+
+// Score a candidate parcel as a seed. Higher = better seed.
+// When useOwnerMatch is true: prefers parcels whose owner_name matches
+// the appraisal's grantee (then grantor) tokens. Falls back to centroid
+// distance when no name signal is available or no candidate matches.
+function scoreSeedCandidate(
+  ownerName: string,
+  distDegrees: number,
+  granteeTokens: string[],
+  grantorTokens: string[],
+  useOwnerMatch: boolean
+): number {
+  // Proximity score: -dist so smaller distance = higher score.
+  // Normalize so worst-case distance (1.5km buffer = ~0.015°) ≈ -15.
+  const proximityScore = -(distDegrees * 1000);
+
+  if (!useOwnerMatch) return proximityScore;
+
+  const ownerUpper = String(ownerName || '').toUpperCase();
+  // Score by fraction of grantee tokens present (×100), then grantor (×50)
+  const granteeHits = granteeTokens.filter((t) => ownerUpper.includes(t)).length;
+  const grantorHits = grantorTokens.filter((t) => ownerUpper.includes(t)).length;
+  const granteeScore = granteeTokens.length > 0
+    ? (granteeHits / granteeTokens.length) * 100
+    : 0;
+  const grantorScore = grantorTokens.length > 0
+    ? (grantorHits / grantorTokens.length) * 50
+    : 0;
+  // Owner-match (when ALL tokens present) dwarfs proximity. Partial match
+  // still beats no match. Proximity is the tiebreaker.
+  return Math.max(granteeScore, grantorScore) + proximityScore * 0.01;
+}
+
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
 
@@ -481,6 +528,10 @@ async function enrichWithTxGIO(comp: any): Promise<any> {
     // coords often sit on the road/driveway, not inside the parcel.
     // Tight 10m envelope misses; 100m+ catches the actual property.
     const BUFFERS = [0.0001, 0.001, 0.005, 0.015]; // ~10m, 100m, 500m, 1.5km
+    const useOwnerMatch = process.env.SEED_OWNER_MATCH === '1';
+    const granteeTokens = useOwnerMatch ? tokenizeOwner(comp.grantee) : [];
+    const grantorTokens = useOwnerMatch ? tokenizeOwner(comp.grantor) : [];
+
     let seed: any = null;
     for (const d of BUFFERS) {
       try {
@@ -500,20 +551,29 @@ async function enrichWithTxGIO(comp: any): Promise<any> {
         const seedData = await seedRes.json();
         const features: any[] = Array.isArray(seedData?.features) ? seedData.features : [];
         if (features.length === 0) continue;
-        // Pick closest to the input coords by centroid distance
-        let bestDist = Infinity;
+
+        // Score each candidate. Default = closest centroid distance.
+        // With SEED_OWNER_MATCH=1, prefer parcels whose owner_name matches
+        // the appraisal's grantee (then grantor) — beats pure proximity.
+        let bestScore = -Infinity;
         for (const f of features) {
           if (!f?.properties?.owner_name) continue;
           try {
             const ring = f.geometry?.coordinates?.[0];
             if (!Array.isArray(ring) || ring.length === 0) continue;
-            // Quick centroid-by-vertex-average (no turf import needed)
             let sx = 0, sy = 0;
             for (const pt of ring) { sx += pt[0]; sy += pt[1]; }
             const cx = sx / ring.length, cy = sy / ring.length;
             const dist = Math.hypot(cx - comp.longitude, cy - comp.latitude);
-            if (dist < bestDist) {
-              bestDist = dist;
+            const score = scoreSeedCandidate(
+              f.properties.owner_name,
+              dist,
+              granteeTokens,
+              grantorTokens,
+              useOwnerMatch
+            );
+            if (score > bestScore) {
+              bestScore = score;
               seed = f;
             }
           } catch {}
