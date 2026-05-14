@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
       'description'
     )
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(50);
 
   if (nameFilter.length >= 2) {
     query = query.ilike('property_name', `%${nameFilter}%`);
