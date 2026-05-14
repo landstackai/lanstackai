@@ -44,14 +44,17 @@ export async function GET(req: NextRequest) {
   // matching, every word in the query must appear somewhere in owner_name,
   // but in any order.
   //
-  // Tokens are required to be ≥3 chars and not a stop word, then SQL-sanitized
-  // (strip single quotes / backslashes). Hyphens and periods are treated as
-  // spaces so "smith-jones" → "smith jones".
+  // Tokens kept when ≥3 chars OR contain a digit — preserves entity prefixes
+  // like "9L" in "9L Farms" (the length-only filter dropped these, leaving
+  // a single "FARMS" that over-matched every Farms-named owner in the county).
+  // Then SQL-sanitized (strip single quotes / backslashes). Punctuation strip
+  // expanded to include apostrophes (straight + curly), slashes, ampersands —
+  // TxGIO stores names without punctuation, so "kids'" must split to "kids".
   const tokens = q
-    .replace(/[-.]/g, ' ')
+    .replace(/[.,'’\-\/&]/g, ' ')
     .split(/\s+/)
     .map((t) => t.replace(/['\\]/g, '').toUpperCase().trim())
-    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t));
+    .filter((t) => (t.length >= 3 || /\d/.test(t)) && !STOP_WORDS.has(t));
 
   if (tokens.length === 0) {
     return NextResponse.json(

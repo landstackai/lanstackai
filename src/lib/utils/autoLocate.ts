@@ -41,10 +41,19 @@ function safeCountyName(county: string): string {
   return county.replace(/[^a-zA-Z\s\-]/g, '').trim();
 }
 
+// Common English stop-words that aren't part of an entity's distinguishing name.
+// Kept out of token filters so a 2-token name like "9L Farms" still tokenizes
+// usefully (vs. "OF" / "THE" which would slip through a "length ≥ 1 if digit"
+// rule and cause spurious matches).
+const STOP_WORDS = new Set(['THE', 'OF', 'AND', 'ET', 'AL']);
+
 function normalizeOwner(s: string): string {
+  // Strip more punctuation than [.,] — apostrophes (straight+curly), hyphens,
+  // slashes, ampersands. Without this, tokens like "KIDS'" stay glued to the
+  // apostrophe and never match TxGIO's "KIDS" stored without punctuation.
   return s
     .toUpperCase()
-    .replace(/[.,]/g, ' ')
+    .replace(/[.,'’\-\/&]/g, ' ')
     .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING)\b/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -55,7 +64,10 @@ function ownerMatches(haystack: string | null | undefined, needle: string): bool
   const h = normalizeOwner(haystack);
   const n = normalizeOwner(needle);
   if (!n || !h) return false;
-  const tokens = n.split(/\s+/).filter((t) => t.length >= 3);
+  // Keep tokens that are ≥3 chars OR contain a digit (so "9L" in "9L Farms"
+  // survives — the old length-only filter dropped "9L" and the remaining
+  // single "FARMS" token over-matched every Farms-named owner in the county).
+  const tokens = n.split(/\s+/).filter((t) => (t.length >= 3 || /\d/.test(t)) && !STOP_WORDS.has(t));
   if (tokens.length === 0) return false;
   return tokens.every((t) => h.includes(t));
 }
@@ -489,7 +501,9 @@ async function fetchOwnerParcels(
   countyParam: string
 ): Promise<any[]> {
   const normalized = normalizeOwner(owner);
-  const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+  // Same digit-aware filter as ownerMatches — preserve "9L"-style tokens so
+  // "9L Farms" doesn't collapse to a single useless "FARMS".
+  const allTokens = normalized.split(/\s+/).filter((t) => (t.length >= 3 || /\d/.test(t)) && !STOP_WORDS.has(t));
   if (allTokens.length === 0) return [];
 
   // Query TxGIO DIRECTLY with a SINGLE LIKE clause on the longest token.
@@ -895,7 +909,7 @@ export async function autoLocateFromMetadata(
 
     for (const ownerSignal of ownerSignals) {
       const normSignal = normalizeOwner(ownerSignal);
-      const tokens = normSignal.split(/\s+/).filter((t) => t.length >= 3);
+      const tokens = normSignal.split(/\s+/).filter((t) => (t.length >= 3 || /\d/.test(t)) && !STOP_WORDS.has(t));
       if (tokens.length === 0) continue;
 
       const matchedGroups: Array<{ parcels: any[]; totalAcres: number; delta: number }> = [];

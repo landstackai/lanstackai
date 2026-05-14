@@ -37,14 +37,26 @@ async function autoLocateInBrowser(comp: any): Promise<{
   // @ts-expect-error — turf v6.5 .d.ts not exposed
   const turf = await import('@turf/turf') as any;
 
+  // Strip more punctuation than before — apostrophes (curly + straight),
+  // hyphens, slashes, ampersands all become spaces. Previously only [.,]
+  // were stripped, which broke tokenizing for owners like "Turner Kids'"
+  // (apostrophe stayed glued to KIDS') and "Smith-Jones" (hyphen kept).
   const normalize = (s: string) => s.toUpperCase()
-    .replace(/[.,]/g, ' ')
+    .replace(/[.,'’\-\/&]/g, ' ')
     .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING|JR|SR)\b/g, '')
     .replace(/\s+/g, ' ').trim();
 
+  // Stop words to drop from token set (super-common short words that
+  // would otherwise match everything in a query).
+  const CLIENT_STOP_WORDS = new Set(['THE', 'OF', 'AND', 'ET', 'AL']);
+
   for (const owner of ownerSignals) {
     const normalized = normalize(owner);
-    const allTokens = normalized.split(/\s+/).filter((t) => t.length >= 3);
+    // Keep tokens that are ≥3 chars OR contain a digit (so short LLC
+    // prefixes like "9L", "4F", "2L" survive — they're very distinctive
+    // and the only way to disambiguate from generic words like "FARMS").
+    const allTokens = normalized.split(/\s+/)
+      .filter((t) => (t.length >= 3 || /\d/.test(t)) && !CLIENT_STOP_WORDS.has(t));
     if (allTokens.length === 0) continue;
     const longest = [...allTokens].sort((a, b) => b.length - a.length)[0];
 
@@ -758,7 +770,11 @@ export default function ImportPage() {
     // Otherwise the first occurrence wins.
     const byKey = new Map<string, any>();
     for (const c of allComps) {
-      const key = `${(c.property_name || '').toLowerCase().trim()}|${c.sale_date || ''}|${c.sale_price || 0}`;
+      // Include grantee in the key so two distinct transactions of the SAME
+      // property name (e.g. Wesla Ranches → 4F and Wesla Ranches → 9L) don't
+      // collapse to one. Without grantee, AI mis-extracted or near-duplicate
+      // sales got merged into one comp.
+      const key = `${(c.property_name || '').toLowerCase().trim()}|${(c.grantee || '').toLowerCase().trim()}|${c.sale_date || ''}|${c.sale_price || 0}`;
       const existing = byKey.get(key);
       if (!existing) {
         byKey.set(key, c);
