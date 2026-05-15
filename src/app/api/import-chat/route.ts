@@ -268,6 +268,56 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // $/ac sanity gate: when sale_price AND price_per_acre are both extracted,
+    // their ratio implies an acreage. If the extracted `acres` value disagrees
+    // with that implied acreage by more than 10%, prefer the implied value —
+    // it's anchored to two labeled fields (Sale Price and Sale Price Per Acre)
+    // instead of one possibly-ambiguous "Property Size" reading.
+    //
+    // Catches AI hallucinations where the model fabricates an acres value
+    // (observed: 8,820 returned for a 1,179.115-ac comp where price=$5.60M
+    // and ppa=$4,750 were both extracted correctly — $5.60M / $4,750 =
+    // 1,179.11, gate would correct).
+    //
+    // Runs AFTER the description-override above. If description prose
+    // already corrected `acres` to the prose-stated value, this check
+    // usually finds delta near zero and doesn't fire.
+    //
+    // Threshold = 10%: catches obvious hallucinations while tolerating
+    // rounding when ppa is a rounded $/ac (e.g. "$4,750" stated, actual
+    // price/acres = $4,749.84).
+    if (Array.isArray(comps)) {
+      for (const c of comps) {
+        const price = Number(c?.sale_price);
+        const ppa = Number(c?.price_per_acre);
+        const acres = Number(c?.acres);
+        if (price > 0 && ppa > 0 && acres > 0) {
+          const impliedAcres = price / ppa;
+          const delta = Math.abs(impliedAcres - acres) / acres;
+          if (delta > 0.10) {
+            console.warn(
+              `[sanity-gate] ${c.property_name || 'unnamed'}: ` +
+              `acres=${acres} disagrees with sale_price/ppa=${impliedAcres.toFixed(3)} ` +
+              `(Δ${(delta * 100).toFixed(1)}%). Overriding to implied acres.`
+            );
+            c.acres = Math.round(impliedAcres * 1000) / 1000;
+            // Mark the correction so downstream code (and brokers reviewing
+            // the comp) can see this was a sanity correction, not raw AI output.
+            c._acres_sanity_corrected = true;
+            // Reduce per-field confidence — the model's first guess was wrong,
+            // so we have less confidence in this comp overall.
+            if (c.confidence && typeof c.confidence === 'object') {
+              c.confidence.per_field = c.confidence.per_field || {};
+              c.confidence.per_field.acres = Math.min(
+                Number(c.confidence.per_field.acres) || 60,
+                60
+              );
+            }
+          }
+        }
+      }
+    }
+
     // Coords from AI extraction are trusted ONLY when they came from an
     // explicitly-printed "Geographic Location" or similar field in the
     // document (per prompt instructions above). Mapbox forward-geocoding
