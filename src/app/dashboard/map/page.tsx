@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Layers, Waves } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
@@ -66,6 +66,16 @@ export default function MapPage() {
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
   const [mapStyle, setMapStyle] = useState<'satellite' | 'streets' | 'terrain'>('satellite');
+  // Toggleable raster overlays. Counties default ON (structural
+  // reference — brokers think in counties first when scoping comps).
+  // Floodplain defaults OFF — it's busy at low zoom and most workflows
+  // don't need it until the broker focuses on a specific property.
+  // Both layers are added to the map at load time with visibility set
+  // from this state; the sync effect below flips visibility on change.
+  const [overlays, setOverlays] = useState<{ counties: boolean; floodplain: boolean }>({
+    counties: true,
+    floodplain: false,
+  });
   const [mapLoaded, setMapLoaded] = useState(false);
   // Shared parcel-hover popup (id.land-style — cursor over a parcel
   // surfaces owner + acreage). Same hook backs the review page so the
@@ -428,6 +438,12 @@ export default function MapPage() {
           'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1],
         },
       });
+
+      // ── County + floodplain overlays added LATER via the
+      // ensureOverlayLayers effect (not in the 'load' handler) so they
+      // survive basemap switches — setStyle() wipes all custom layers,
+      // and the effect re-adds them whenever mapLoaded flips to true
+      // (initial load + after every style.load). See effect below.
 
       // CMA subject boundary (only populated in workspace view)
       map.current!.addSource('cma-subject', {
@@ -2381,6 +2397,85 @@ export default function MapPage() {
     if (src) src.setData({ type: 'FeatureCollection', features });
   }, [displayComps, mapLoaded, editingBoundaryComp]);
 
+  // Ensure overlay layers exist + reflect current toggle state.
+  //
+  // Lives in an effect (not the 'load' handler) because changeStyle()
+  // calls setStyle() which wipes every custom source/layer — and after
+  // style.load fires, mapLoaded flips false→true, re-running this
+  // effect to re-add the layers idempotently. Setup + visibility-sync
+  // in one place so they can't drift out of order.
+  //
+  // Both layers are added as RASTER overlays via the ArcGIS export
+  // pattern (same as the existing txgio-parcels-layer). No client-side
+  // feature data means no hover / click for these — they're visual
+  // reference layers only. Hover wiring on the vector parcel layer
+  // above still works for the parcel-owner tooltip; flood zone info,
+  // if we ever want it, would need a separate /api/floodzone?lat=&lng=
+  // round-trip on click.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const m = map.current;
+    try {
+      // TX County boundaries — TxGIO Boundaries/Counties MapServer.
+      // Visible at all zoom levels. Important when a property straddles
+      // a county line (different tax + appraisal districts on each side).
+      if (!m.getSource('tx-counties')) {
+        m.addSource('tx-counties', {
+          type: 'raster',
+          tiles: [
+            'https://feature.geographic.texas.gov/arcgis/rest/services/Boundaries/Counties/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+          ],
+          tileSize: 512,
+          attribution: 'Counties © TxGIO',
+        });
+      }
+      if (!m.getLayer('tx-counties-layer')) {
+        m.addLayer({
+          id: 'tx-counties-layer',
+          type: 'raster',
+          source: 'tx-counties',
+          layout: { visibility: overlays.counties ? 'visible' : 'none' },
+          paint: {
+            // Subtler at low zoom (don't dominate the wide TX view),
+            // more visible mid-zoom for county comparison.
+            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 4, 0.45, 8, 0.65, 12, 0.7],
+          },
+        });
+      }
+
+      // FEMA National Flood Hazard Layer. Layer 28 = "Flood Hazard Zones"
+      // (Zone A, AE, X, etc) — the canonical colored polygons brokers
+      // and underwriters care about. Material to land valuation: parts
+      // in Zone AE carry build restrictions + mandatory insurance.
+      if (!m.getSource('fema-floodplain')) {
+        m.addSource('fema-floodplain', {
+          type: 'raster',
+          tiles: [
+            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:28&f=image',
+          ],
+          tileSize: 512,
+          attribution: 'Floodplain © FEMA NFHL',
+        });
+      }
+      if (!m.getLayer('fema-floodplain-layer')) {
+        m.addLayer({
+          id: 'fema-floodplain-layer',
+          type: 'raster',
+          source: 'fema-floodplain',
+          layout: { visibility: overlays.floodplain ? 'visible' : 'none' },
+          paint: { 'raster-opacity': 0.65 },
+        });
+      }
+
+      // Sync visibility on every run — covers the case where the layer
+      // already existed but the toggle state has since changed.
+      m.setLayoutProperty('tx-counties-layer', 'visibility', overlays.counties ? 'visible' : 'none');
+      m.setLayoutProperty('fema-floodplain-layer', 'visibility', overlays.floodplain ? 'visible' : 'none');
+    } catch (e) {
+      console.warn('[overlays] failed to add/toggle overlay layers:', e);
+    }
+  }, [overlays, mapLoaded]);
+
   // ── Parcel + boundary hover tooltips ────────────────────────────────
   // id.land-style: cursor over any vector polygon shows owner + acres in
   // a small dark tooltip that follows the pointer. Wired ONCE at
@@ -3054,6 +3149,37 @@ export default function MapPage() {
               title="Show total sale price on pins"
             >
               Total
+            </button>
+          </div>
+
+          {/* Overlay toggles — county lines + FEMA floodplain. Independent
+              toggles in a single pill so they share the visual rhythm of
+              the basemap/scope/pin-label controls above. Active = sage
+              for counties (structural reference data), sky for floodplain
+              (hazard data — distinct so brokers reading the map can tell
+              which is which from peripheral vision). */}
+          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[14rem]">
+            <button
+              onClick={() => setOverlays((o) => ({ ...o, counties: !o.counties }))}
+              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.counties ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
+              }`}
+              title={overlays.counties ? 'Hide county lines' : 'Show county lines'}
+              aria-pressed={overlays.counties}
+            >
+              <Layers size={12} />
+              Counties
+            </button>
+            <button
+              onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
+              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-slate-400 hover:text-white'
+              }`}
+              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
+              aria-pressed={overlays.floodplain}
+            >
+              <Waves size={12} />
+              Flood
             </button>
           </div>
 
