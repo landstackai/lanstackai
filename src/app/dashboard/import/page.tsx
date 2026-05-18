@@ -1625,11 +1625,25 @@ export default function ImportPage() {
                           {/* LEFT: source */}
                           <div>
                             {aerial ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
-                                src={aerial}
-                                alt="From source"
-                                className="w-full h-32 object-cover rounded border border-border"
+                              // Aerial is the FULL PDF page (~portrait letter
+                              // ratio with the aerial at the top, data tables
+                              // below). Default `object-cover` centered would
+                              // show the data tables; anchor to top + scale up
+                              // via CSS background so the thumbnail crops to
+                              // just the aerial portion. 165% zoom is tuned to
+                              // Stouffer-format pages where the aerial occupies
+                              // roughly the top third — adjust here if other
+                              // appraisal formats have different layouts.
+                              <div
+                                role="img"
+                                aria-label="From source"
+                                className="w-full h-32 rounded border border-border bg-night"
+                                style={{
+                                  backgroundImage: `url("${aerial}")`,
+                                  backgroundSize: '165% auto',
+                                  backgroundPosition: 'center top',
+                                  backgroundRepeat: 'no-repeat',
+                                }}
                               />
                             ) : sourceMapUrl ? (
                               // eslint-disable-next-line @next/next/no-img-element
