@@ -138,15 +138,37 @@ verification step itself happens for all comps.
 
 ### Navigation philosophy
 
-- "Looks right" → toast with optional "View on map" link, link opens in NEW
-  TAB so the import session stays intact
-- "Needs review" → directly opens map in NEW TAB focused on the pin (or
-  opens vault if no pin); brief confirmation toast
-- Multi-comp imports stay viable: switching to the map doesn't lose other
-  pending cards
+Revised May 18 after Safari's popup blocker proved willing to silently
+reject `window.open()` calls from buttons even when invoked synchronously
+from the click handler. The original new-tab design fell apart on Safari
+under default popup-blocker settings.
 
-Same-tab navigation was explicitly rejected because it unmounts the import
-page and loses unsaved pending comps. New-tab is the consistent pattern.
+Current behavior:
+
+- **"Looks right"** → toast with optional "View on map" link, rendered as
+  an anchor `<a target="_blank">` so it's browser-native navigation (never
+  popup-blocked). Broker can ignore the toast or click to view. No
+  automatic navigation.
+- **"Needs review"** → save THIS comp + parallel-save all OTHER pending
+  comps as `needs_location_review=true`, THEN same-tab navigate to the
+  map focused on the comp. The bulk-save preserves the broker's work on
+  multi-comp PDFs — other cards appear in the vault with gray clock
+  badges instead of disappearing.
+
+This is Option B from the May 17 discussion. Alternatives considered:
+
+- Option A (same-tab nav, lose other pending comps): rejected. Brokers
+  uploading multi-comp PDFs would silently lose work.
+- Option C (new tab via `window.open` or anchor target=_blank): rejected
+  after Safari testing. `window.open` is unreliable under default popup
+  blockers. Anchor target=_blank works for navigation BUT doesn't run
+  the JS save handler reliably in all browsers when combined with
+  navigation — anchor click semantics make the timing fragile.
+
+Option B is the most robust because it uses only same-tab navigation
+(`router.push`) which is always allowed, AND solves the multi-comp
+preservation problem at the data layer by saving everything before
+navigating.
 
 ### Bulk-save semantics
 

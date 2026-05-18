@@ -1363,27 +1363,23 @@ export default function ImportPage() {
     await sendMessage(input.trim());
   };
 
-  // saveComp accepts an optional second arg controlling the location
-  // review state. Called from the verification card with one of two
-  // intents:
-  //   { needsReview: false } — broker clicked "Looks right" (verified)
-  //   { needsReview: true }  — broker clicked "Needs review" (skipped
-  //                            the visual check or flagged it as wrong;
-  //                            either way the row lands with a clock
-  //                            badge in the vault for follow-up)
-  // When called without the second arg, defaults to false to preserve
-  // existing behavior for any non-verification-flow callers.
-  // popupOpened tells saveComp whether the verification-card click handler
-  // already opened the new tab (the click handler does this synchronously
-  // BEFORE invoking saveComp so the popup lands inside the user-gesture
-  // context that Safari requires). When false (popup blocked, or called
-  // from elsewhere), saveComp's success branch falls back to router.push.
+  // saveComp persists a comp to the vault. Caller controls intent via opts:
+  //   needsReview: TRUE  → save flagged for follow-up (gray clock in vault)
+  //                FALSE → save verified (no badge)
+  //   silent: TRUE       → suppress toast + skip the "View on map" interaction.
+  //                        Used when the caller is doing batch save + their
+  //                        own navigation (e.g. the Needs review button which
+  //                        parallel-saves all pending comps then navigates
+  //                        same-tab itself).
+  //                FALSE → show the normal success toast (with optional
+  //                        "View on map" link for verified-with-pin comps).
+  // When called without opts, defaults to verified + with-toast.
   const saveComp = async (
     comp: ExtractedComp,
-    opts?: { needsReview?: boolean; popupOpened?: boolean }
+    opts?: { needsReview?: boolean; silent?: boolean }
   ) => {
     const needsReview = opts?.needsReview ?? false;
-    const popupOpened = opts?.popupOpened ?? false;
+    const silent = opts?.silent ?? false;
     const hasPin = comp.latitude != null && comp.longitude != null;
 
     const { data: { user } } = await supabase.auth.getUser();
@@ -1435,66 +1431,50 @@ export default function ImportPage() {
     });
 
     if (error) {
-      toast.error('Failed to save comp');
-      // We can't reach the orphan tab opened by the click handler from here
-      // (window.open returned a Window ref to the caller, not to us). If
-      // the save fails the broker will see a stale-looking map view; minor
-      // UX wart, but not worth elevating popupOpened from boolean to a
-      // Window ref through the entire signature chain.
+      if (!silent) toast.error('Failed to save comp');
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
 
-      if (needsReview) {
-        // The verification card's click handler tries to open the map in a
-        // new tab synchronously before calling saveComp. If popupOpened is
-        // true, the broker is already looking at the map — just confirm in
-        // the origin tab. If popupOpened is false (popup blocker, or this
-        // wasn't called from the verification card), fall back to same-tab
-        // navigation so the broker still ends up where they expected.
-        if (popupOpened) {
+      if (!silent) {
+        if (needsReview) {
+          // Toast-only confirmation — caller (the Needs review button) handles
+          // navigation itself (parallel-saves other pending comps first, then
+          // same-tab navigates so nothing's lost).
           toast.success(
             hasPin
-              ? `${label} flagged — map opened in new tab`
-              : `${label} added — opened vault to place pin`,
-            { duration: 3000 }
+              ? `${label} flagged for review`
+              : `${label} added — needs location`,
+            { duration: 2500 }
+          );
+        } else if (hasPin) {
+          // "Looks right" path with a pin — keep the existing toast-with-link
+          // pattern. Broker can ignore the toast or click "View on map".
+          // The link itself uses an anchor target=_blank (rendered below as
+          // a Link element since we're inside a toast.success render fn) so
+          // Safari's popup blocker doesn't apply — anchor target=_blank is
+          // browser-native navigation, not a programmatic popup.
+          toast.success(
+            (t) => (
+              <span>
+                {label} added to vault.{' '}
+                <a
+                  href={`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => toast.dismiss(t.id)}
+                  className="underline font-bold text-sage cursor-pointer"
+                >
+                  View on map →
+                </a>
+              </span>
+            ),
+            { duration: 6000 }
           );
         } else {
-          const mapUrl = hasPin
-            ? `/dashboard/map?focus=${comp.latitude},${comp.longitude},14`
-            : `/dashboard/vault`;
-          toast.success(`${label} flagged — popup blocked, navigating`, { duration: 2000 });
-          router.push(mapUrl);
+          toast.success(`${label} added to vault!`);
         }
-      } else if (hasPin) {
-        // "Looks right" path with a pin — keep the existing toast-with-link
-        // pattern (low-friction confirmation; broker can ignore or click).
-        toast.success(
-          (t) => (
-            <span>
-              {label} added to vault.{' '}
-              <button
-                onClick={() => {
-                  toast.dismiss(t.id);
-                  // Open in new tab same as "Needs review" — keeps the
-                  // import session intact so the broker can keep working
-                  // through any remaining pending comps.
-                  try {
-                    window.open(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`, '_blank', 'noopener,noreferrer');
-                  } catch {
-                    router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`);
-                  }
-                }}
-                className="underline font-bold text-sage"
-              >
-                View on map →
-              </button>
-            </span>
-          ),
-          { duration: 6000 }
-        );
-      } else {
-        toast.success(`${label} added to vault!`);
       }
+
       setPendingComps(prev => prev.filter(c => c !== comp));
     }
   };
@@ -1765,34 +1745,43 @@ export default function ImportPage() {
                             Looks right
                           </button>
                           <button
-                            onClick={() => {
-                              // Open the new tab DIRECTLY in the click handler
-                              // — synchronously, before saveComp's async work
-                              // runs. Safari treats anything called from inside
-                              // an async function as outside the user-gesture
-                              // context once the function's promise is created,
-                              // even if the call is technically synchronous
-                              // before the first await. Doing window.open here
-                              // (in the inline onClick body) sidesteps that
-                              // entirely.
+                            onClick={async () => {
+                              // Option B (per docs/DESIGN_DECISIONS.md §4):
+                              // Save THIS comp + all OTHER pending comps as
+                              // needs_location_review=true in parallel, then
+                              // same-tab navigate to the map. Preserves the
+                              // broker's work on multi-comp PDFs — the other
+                              // cards appear in the vault with gray clock
+                              // badges instead of disappearing entirely.
+                              //
+                              // Same-tab nav avoids Safari popup blocker
+                              // entirely. The cost (you lose import-page
+                              // state) is mitigated by saving everything
+                              // first so nothing's truly lost.
                               const mapUrl = (sysLat != null && sysLng != null)
                                 ? `/dashboard/map?focus=${sysLat},${sysLng},14`
                                 : `/dashboard/vault`;
-                              let popupOpened = false;
+                              const others = pendingComps.filter((c) => c !== comp);
                               try {
-                                const w = window.open(mapUrl, '_blank', 'noopener,noreferrer');
-                                popupOpened = !!w;
-                              } catch {
-                                // popup blocker — saveComp's fallback router.push
-                                // will handle it after the save completes
+                                await Promise.all([
+                                  saveComp(comp, { needsReview: true, silent: false }),
+                                  ...others.map((c) =>
+                                    saveComp(c, { needsReview: true, silent: true })
+                                  ),
+                                ]);
+                                if (others.length > 0) {
+                                  toast.success(
+                                    `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
+                                    { duration: 2500 }
+                                  );
+                                }
+                              } catch (e) {
+                                console.error('[needs-review] parallel save failed:', e);
+                                toast.error('Some comps may not have saved — check the vault');
                               }
-                              // Kick off the save (don't await — handler stays
-                              // synchronous for the popup to land). Tell saveComp
-                              // whether we already opened the tab so it doesn't
-                              // try again and instead just confirms via toast.
-                              saveComp(comp, { needsReview: true, popupOpened });
+                              router.push(mapUrl);
                             }}
-                            title="Save the comp but flag it for review — opens map in new tab"
+                            title="Save this and any other pending comps for review, then open the map"
                             className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
                           >
                             <Clock size={12} />
