@@ -54,6 +54,12 @@ export default function MapPage() {
   // Pin DOM elements keyed by comp id — used by the hover-highlight effect to
   // update styling imperatively without rebuilding markers.
   const markerElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Comp marker popups keyed by comp id — boundary hover looks the popup
+  // up here so hovering a red comp polygon triggers the same rich
+  // .comp-hover-popup card that hovering the pin shows. One canonical
+  // comp preview, two ways to trigger it; matches the broker's mental
+  // model that the boundary IS the comp.
+  const compPopupsRef = useRef<Map<string, mapboxgl.Popup>>(new Map());
   const drawRef = useRef<MapboxDraw | null>(null);
 
   const [comps, setComps] = useState<Comp[]>([]);
@@ -2417,28 +2423,11 @@ export default function MapPage() {
       );
     };
 
-    // Comp boundary hover: headline by property_name (broker's identifier),
-    // owner second, acres third. "Comp" tag at the bottom so the broker
-    // knows this is a saved comp polygon vs a live parcel.
-    const compBoundaryContent = (f: any) => {
-      const p = f.properties || {};
-      const name = escHtml(p.property_name || p.owner_name || 'Comp');
-      const owner = p.owner_name && p.property_name && p.owner_name !== p.property_name
-        ? `<div style="color:#cbd5e1;">${escHtml(p.owner_name)}</div>`
-        : '';
-      const acres = fmtAc(p.acres);
-      const loc = [p.county, p.state].filter(Boolean).join(', ');
-      const locHtml = loc
-        ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px;">${escHtml(loc)}</div>`
-        : '';
-      return (
-        `<div style="font-weight:700;color:#ef4444;max-width:260px;white-space:normal;">${name}</div>` +
-        owner +
-        `<div style="color:#cbd5e1;">${acres}</div>` +
-        `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">Comp</div>` +
-        locHtml
-      );
-    };
+    // NOTE: comp-boundary-fill is NOT in the dark-tooltip layerConfigs
+    // below. Hovering a comp boundary should trigger the SAME rich
+    // .comp-hover-popup card that hovering its pin shows — one canonical
+    // comp preview, two ways to trigger it. That's wired separately
+    // below this block via compPopupsRef.
 
     const detachers: Array<() => void> = [];
     // Order matters subtly: layers stacked later in the style sit on top,
@@ -2450,7 +2439,6 @@ export default function MapPage() {
       ['selected-parcel-fill', ownerAcresContent('selected')],
       ['owner-search-fill', ownerAcresContent('owner match')],
       ['tapped-parcel-highlight-fill', ownerAcresContent('tapped')],
-      ['comp-boundary-fill', compBoundaryContent],
       ['cma-subject-fill', () =>
         `<div style="font-weight:700;color:#facc15;">Subject tract</div>` +
         `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">CMA</div>`
@@ -2471,9 +2459,67 @@ export default function MapPage() {
       }
     }
 
+    // ─── Comp boundary hover: reuse the marker's rich .comp-hover-popup
+    //
+    // Look up the comp's existing popup in compPopupsRef (populated by
+    // the markers effect) and addTo(map) on mouseenter. Same popup the
+    // pin hover shows — anchored at the comp's centroid, sized to its
+    // 4-col price grid. Also sets hoveredCompId so the marker border
+    // glows in sync, matching the visual feedback the pin-hover path
+    // already provides.
+    //
+    // No `displayComps` dep on this effect — the popup map is a ref,
+    // so reads stay current as the markers effect rebuilds it. If we
+    // depended on displayComps, the entire hover-wiring effect would
+    // tear down + rebuild on every comp filter change. Wasteful and
+    // (more importantly) creates a window where no boundary hover
+    // works at all.
+    let activeBoundaryCompId: string | null = null;
+    const boundaryHoverEnter = (e: any) => {
+      const f = e.features?.[0];
+      const compId: string | undefined = f?.properties?.id;
+      if (!compId) return;
+      const popup = compPopupsRef.current.get(compId);
+      if (!popup) return;
+      // Avoid re-adding the same popup on every mousemove inside the
+      // boundary (mousemove fires constantly). Track which comp is
+      // active; only swap when the cursor crosses into a different
+      // boundary.
+      if (activeBoundaryCompId === compId) return;
+      // Cursor left one boundary and entered another in the same tick —
+      // remove the previous popup before showing the next.
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+      }
+      activeBoundaryCompId = compId;
+      try {
+        popup.addTo(m);
+        if (m.getCanvas()) m.getCanvas().style.cursor = 'pointer';
+        setHoveredCompId(compId);
+      } catch {}
+    };
+    const boundaryHoverLeave = () => {
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+        const leaving = activeBoundaryCompId;
+        activeBoundaryCompId = null;
+        try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
+        setHoveredCompId((prev) => (prev === leaving ? null : prev));
+      }
+    };
+    if (m.getLayer('comp-boundary-fill')) {
+      m.on('mousemove', 'comp-boundary-fill', boundaryHoverEnter);
+      m.on('mouseleave', 'comp-boundary-fill', boundaryHoverLeave);
+    }
+
     return () => {
       for (const d of detachers) { try { d(); } catch {} }
       try { removeHoverPopup(); } catch {}
+      try { m.off('mousemove', 'comp-boundary-fill', boundaryHoverEnter); } catch {}
+      try { m.off('mouseleave', 'comp-boundary-fill', boundaryHoverLeave); } catch {}
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+      }
     };
   }, [mapLoaded, attachHoverPopup, removeHoverPopup]);
 
@@ -2484,6 +2530,10 @@ export default function MapPage() {
     markersRef.current = [];
     popupsRef.current.forEach(p => p.remove());
     popupsRef.current = [];
+    // Boundary-hover popup map gets rebuilt below; clear stale entries so
+    // a comp that just left displayComps (filter change, CMA exit) can't
+    // still pop a popup from a hover on its boundary.
+    compPopupsRef.current.clear();
 
     displayComps.forEach(comp => {
       if (!comp.latitude || !comp.longitude) return;
@@ -2603,6 +2653,7 @@ export default function MapPage() {
       markersRef.current.push(marker);
       popupsRef.current.push(popup);
       markerElsRef.current.set(comp.id, el);
+      compPopupsRef.current.set(comp.id, popup);
     });
   }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode]);
 
