@@ -36,6 +36,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import * as turf from '@turf/turf';
 import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
+import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
 import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
@@ -151,11 +152,12 @@ export default function ReviewPage() {
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  // Single shared hover popup — attached to whichever layer the cursor
-  // is over (comp boundary in view mode; nearby/owner-match/selected
-  // parcels in reselect mode). Following-cursor label rather than a
-  // pinned popup, like id.land's parcel hover.
-  const hoverPopup = useRef<mapboxgl.Popup | null>(null);
+  // Hover popup — single shared instance via the useMapHover hook.
+  // Attached to whichever layer the cursor is over (comp boundary in
+  // view mode; nearby/owner-match/selected parcels in reselect mode).
+  // Following-cursor label rather than a pinned popup, like id.land's
+  // parcel hover. Same hook drives /dashboard/map for consistency.
+  const { attach: attachHoverPopup, removePopup: removeHoverPopup } = useMapHover();
   const [mapLoaded, setMapLoaded] = useState(false);
   // Diagnostic: visible on-page error if Mapbox fails to initialize or
   // tile loading errors. Without dev-tools access this is the only way
@@ -382,58 +384,6 @@ export default function ReviewPage() {
     return () => clearTimeout(t);
   }, [panelOpen, mapLoaded]);
 
-  // Hover-popup helper: wires mousemove + mouseleave on a layer so the
-  // shared `hoverPopup` ref follows the cursor with HTML built by
-  // `getContent(feature)`. Returns a cleanup function. Used by both the
-  // boundary effect (view mode) and the reselect-layers effect (reselect
-  // mode). Centralizing here keeps the popup lifecycle in one place —
-  // every consumer goes through the same ref so we can't accidentally
-  // leak two stacked popups during fast layer/mode transitions.
-  const attachHoverPopup = useCallback(
-    (m: mapboxgl.Map, layerId: string, getContent: (f: any) => string) => {
-      const onMove = (e: any) => {
-        const feature = e.features?.[0];
-        if (!feature) return;
-        if (m.getCanvas()) m.getCanvas().style.cursor = 'pointer';
-        const html = getContent(feature);
-        if (!hoverPopup.current) {
-          hoverPopup.current = new mapboxgl.Popup({
-            closeButton: false,
-            closeOnClick: false,
-            offset: 12,
-            className: 'parcel-hover-popup',
-            maxWidth: '260px',
-          });
-        }
-        hoverPopup.current.setLngLat(e.lngLat).setHTML(html).addTo(m);
-      };
-      const onLeave = () => {
-        if (m.getCanvas()) m.getCanvas().style.cursor = '';
-        try { hoverPopup.current?.remove(); } catch {}
-      };
-      m.on('mousemove', layerId, onMove);
-      m.on('mouseleave', layerId, onLeave);
-      return () => {
-        try { m.off('mousemove', layerId, onMove); } catch {}
-        try { m.off('mouseleave', layerId, onLeave); } catch {}
-      };
-    },
-    []
-  );
-
-  // Lightweight HTML-escape — the hover popup uses setHTML, and owner
-  // names from TxGIO are user-supplied text we don't fully control.
-  // Escapes <, >, &, ', " to prevent any HTML injection from a maliciously
-  // crafted parcel record.
-  function escHtml(s: any): string {
-    return String(s ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
   // ── Render the boundary + auto-fit when both map and comp are ready ─
   useEffect(() => {
     if (!mapLoaded || !comp || !map.current) return;
@@ -524,7 +474,7 @@ export default function ReviewPage() {
 
     return () => {
       try { detachHover?.(); } catch {}
-      try { hoverPopup.current?.remove(); } catch {}
+      try { removeHoverPopup(); } catch {}
     };
   }, [mapLoaded, comp, attachHoverPopup]);
 
@@ -720,7 +670,7 @@ export default function ReviewPage() {
       try { detachNearbyHover(); } catch {}
       try { detachOwnerHover(); } catch {}
       try { detachSelectedHover(); } catch {}
-      try { hoverPopup.current?.remove(); } catch {}
+      try { removeHoverPopup(); } catch {}
       try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
       for (const id of sourceIds) tryRemove('source', id);
