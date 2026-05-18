@@ -4,9 +4,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { ExtractedComp } from '@/types';
-import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X } from 'lucide-react';
+import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangle, Clock, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
+import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
+import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
@@ -55,6 +57,243 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
   // Stop words to drop from token set (super-common short words that
   // would otherwise match everything in a query).
   const CLIENT_STOP_WORDS = new Set(['THE', 'OF', 'AND', 'ET', 'AL']);
+
+  const tokensFor = (s: string): string[] =>
+    normalize(s).split(/\s+/)
+      .filter((t) => (t.length >= 3 || /\d/.test(t)) && !CLIENT_STOP_WORDS.has(t));
+
+  // ─────────────────────────────────────────────────────────────────────
+  // LAT/LNG-FIRST SEED PATH (new, additive)
+  // ─────────────────────────────────────────────────────────────────────
+  // When the appraisal printed explicit Geographic Location coordinates
+  // (Stouffer-format reports sometimes do), use them as a deterministic
+  // seed BEFORE running owner search. Lat/lng is the only direct location
+  // signal — every other signal is an inference.
+  //
+  // Flow:
+  //   1. Point-in-polygon TxGIO query at (lat, lng) → seed parcel
+  //   2. Use seed's owner_name as the tokens to query the county
+  //   3. Apply same tight-filter + adjacency-cluster as the owner-search path
+  //   4. Find the cluster CONTAINING the seed parcel
+  //   5. CORROBORATE: either the seed's owner_name matches one of the
+  //      appraisal owner signals (grantee/grantor/property_name) OR the
+  //      cluster total acres matches the appraisal acres within 15%.
+  //   6. If corroborated → return early with HIGH (both) or MEDIUM (one).
+  //   7. If neither → DROP the seed, fall through to existing owner search.
+  //
+  // Safety: this path runs ONLY when lat/lng is present. The corroboration
+  // guard means a typo'd lat/lng (lands in wrong parcel) gets dropped
+  // cleanly and the existing pipeline runs — same as if lat/lng were absent.
+  const lat = Number(comp?.latitude);
+  const lng = Number(comp?.longitude);
+  const hasLatLng = Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
+
+  if (hasLatLng) {
+    // Local mutable record we fill in as the lat/lng path runs. Mirrored to
+    // _diag.lat_lng_data at the end so TypeScript can narrow the optional
+    // _diag without lots of `if (_diag)` guards.
+    const lld: NonNullable<AutoLocateDiagCollector['lat_lng_data']> = { tried: true };
+    try {
+      // Step 1: point-in-polygon via /api/parcel (existing endpoint, cached)
+      const seedRes = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
+      const seedJson = seedRes.ok ? await seedRes.json() : null;
+      const seedOwner: string | null = seedJson?.parcel?.owner_name || null;
+      const seedParcelId: string | null = seedJson?.parcel?.parcel_id || null;
+      lld.seed_found = Boolean(seedOwner && seedParcelId);
+      lld.seed_owner = seedOwner;
+      lld.seed_parcel_id = seedParcelId;
+
+      if (seedOwner && seedParcelId) {
+        // Step 2: use seed's owner tokens to query the full county set
+        const seedTokens = tokensFor(seedOwner);
+        if (seedTokens.length > 0) {
+          const longestSeedToken = [...seedTokens].sort((a, b) => b.length - a.length)[0];
+          const url = `/api/parcels-by-owner?q=${encodeURIComponent(longestSeedToken)}&county=${encodeURIComponent(county)}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const data = await res.json();
+            const features: any[] = Array.isArray(data?.features) ? data.features : [];
+            // Tight filter on ALL seed-owner tokens
+            const tight = features.filter((f: any) => {
+              const own = (f.properties?.owner_name || '').toString().toUpperCase();
+              return seedTokens.every((t) => own.includes(t));
+            });
+
+            if (tight.length > 0) {
+              // Step 3: cluster (adjacency or centroid, same as owner path)
+              const items = tight.map((f: any) => {
+                let centroid: [number, number] | null = null;
+                try {
+                  const c = turf.centroid(f);
+                  const coords = c?.geometry?.coordinates;
+                  if (Array.isArray(coords) && coords.length >= 2) centroid = [coords[0], coords[1]];
+                } catch {}
+                return {
+                  feature: f,
+                  centroid,
+                  acres: Number(f.properties?.gis_area) || 0,
+                };
+              }).filter((i: any) => i.centroid) as Array<{ feature: any; centroid: [number, number]; acres: number }>;
+
+              const useAdjacency = process.env.NEXT_PUBLIC_ADJACENCY_CLUSTERING === '1';
+              let clusters: Array<{ parcels: any[]; centroid: [number, number]; totalAcres: number }> = [];
+              if (useAdjacency) {
+                const buffered: any[] = items.map((it: any) => {
+                  try { return turf.buffer(it.feature, 2, { units: 'meters' }); } catch { return null; }
+                });
+                const parent: number[] = items.map((_: any, i: number) => i);
+                const find = (i: number): number => parent[i] === i ? i : (parent[i] = find(parent[i]));
+                const union = (i: number, j: number) => {
+                  const ri = find(i), rj = find(j);
+                  if (ri !== rj) parent[ri] = rj;
+                };
+                for (let i = 0; i < items.length; i++) {
+                  if (!buffered[i]) continue;
+                  for (let j = i + 1; j < items.length; j++) {
+                    if (!buffered[j]) continue;
+                    try { if (turf.booleanIntersects(buffered[i], buffered[j])) union(i, j); } catch {}
+                  }
+                }
+                const groups = new Map<number, any[]>();
+                for (let i = 0; i < items.length; i++) {
+                  const r = find(i);
+                  if (!groups.has(r)) groups.set(r, []);
+                  groups.get(r)!.push(items[i]);
+                }
+                clusters = Array.from(groups.values()).map((groupItems: any[]) => {
+                  let sx = 0, sy = 0;
+                  for (const it of groupItems) { sx += it.centroid[0]; sy += it.centroid[1]; }
+                  return {
+                    parcels: groupItems.map((it) => it.feature),
+                    centroid: [sx / groupItems.length, sy / groupItems.length] as [number, number],
+                    totalAcres: groupItems.reduce((s: number, it: any) => s + it.acres, 0),
+                  };
+                });
+              } else {
+                const GRID_DEG = 0.015;
+                for (const it of items) {
+                  let best: typeof clusters[number] | null = null;
+                  let bestDist = Infinity;
+                  for (const c of clusters) {
+                    const d = Math.hypot(it.centroid[0] - c.centroid[0], it.centroid[1] - c.centroid[1]);
+                    if (d < bestDist && d <= GRID_DEG) { bestDist = d; best = c; }
+                  }
+                  if (best) {
+                    best.parcels.push(it.feature);
+                    best.totalAcres += it.acres;
+                    const n = best.parcels.length;
+                    best.centroid = [
+                      (best.centroid[0] * (n - 1) + it.centroid[0]) / n,
+                      (best.centroid[1] * (n - 1) + it.centroid[1]) / n,
+                    ];
+                  } else {
+                    clusters.push({ parcels: [it.feature], centroid: it.centroid, totalAcres: it.acres });
+                  }
+                }
+              }
+
+              // Recompute cluster acreage from unioned area (handles TxGIO duplicates)
+              for (const c of clusters) {
+                if (c.parcels.length > 1) {
+                  try {
+                    let u = c.parcels[0];
+                    for (let i = 1; i < c.parcels.length; i++) {
+                      try { const next = turf.union(u, c.parcels[i]); if (next) u = next; } catch {}
+                    }
+                    if (u?.geometry) {
+                      const a = turf.area(u) / 4046.8564224;
+                      if (Number.isFinite(a) && a > 0) c.totalAcres = a;
+                    }
+                  } catch {}
+                }
+              }
+
+              // Step 4: find the cluster containing the seed parcel
+              const seedCluster = clusters.find((c) =>
+                c.parcels.some((p: any) => String(p.properties?.prop_id || '') === String(seedParcelId))
+              );
+
+              if (seedCluster) {
+                // Step 5: corroborate
+                const ownerCorroborated = ownerSignals.some((sig) => {
+                  const sigTokens = tokensFor(sig);
+                  if (sigTokens.length === 0) return false;
+                  const seedOwnerUpper = seedOwner.toUpperCase();
+                  return sigTokens.every((t) => seedOwnerUpper.includes(t));
+                });
+                const acreDelta = Math.abs(seedCluster.totalAcres - acres) / acres;
+                const acresCorroborated = acreDelta <= 0.15;
+
+                lld.cluster_count = clusters.length;
+                lld.cluster_acres = seedCluster.totalAcres;
+                lld.cluster_parcel_count = seedCluster.parcels.length;
+                lld.cluster_delta = acreDelta;
+                lld.owner_corroborated = ownerCorroborated;
+                lld.acres_corroborated = acresCorroborated;
+
+                if (ownerCorroborated || acresCorroborated) {
+                  // Build pin from the seed cluster
+                  let merged: any = seedCluster.parcels[0];
+                  for (let i = 1; i < seedCluster.parcels.length; i++) {
+                    try { const u = turf.union(merged, seedCluster.parcels[i]); if (u) merged = u; } catch {}
+                  }
+                  let pinCoords = seedCluster.centroid;
+                  try {
+                    const c = turf.centroid(merged);
+                    if (c?.geometry?.coordinates) pinCoords = c.geometry.coordinates;
+                  } catch {}
+
+                  const confidence: 'high' | 'medium' =
+                    (ownerCorroborated && acresCorroborated) ? 'high' : 'medium';
+                  const corrobNote =
+                    ownerCorroborated && acresCorroborated ? 'owner+acres corroborated'
+                    : ownerCorroborated ? 'owner corroborated, acres Δ' + (acreDelta * 100).toFixed(1) + '%'
+                    : 'acres corroborated (Δ' + (acreDelta * 100).toFixed(1) + '%), owner mismatch';
+
+                  if (_diag) {
+                    _diag.path_used = 'latlng';
+                    _diag.lat_lng_data = lld;
+                  }
+                  return {
+                    latitude: pinCoords[1],
+                    longitude: pinCoords[0],
+                    parcel_id: seedCluster.parcels.map((p: any) => p.properties?.prop_id).filter(Boolean).join(',') || null,
+                    geometry: merged.geometry || merged,
+                    match_reason: `Lat/lng seed → "${seedOwner}" cluster of ${seedCluster.parcels.length} parcels (${seedCluster.totalAcres.toFixed(1)}ac, target ${acres}; ${corrobNote}).`,
+                    match_confidence: confidence,
+                  };
+                }
+                // Corroboration failed — fall through to owner search
+                lld.dropped_reason = 'no_corroboration';
+              } else {
+                lld.dropped_reason = 'seed_not_in_any_cluster';
+              }
+            } else {
+              lld.dropped_reason = 'no_tight_matches_for_seed_owner';
+            }
+          } else {
+            lld.dropped_reason = 'parcels_by_owner_query_failed';
+          }
+        } else {
+          lld.dropped_reason = 'seed_owner_no_tokens';
+        }
+      } else {
+        lld.dropped_reason = 'no_seed_found_at_latlng';
+      }
+    } catch (e: any) {
+      // Any error → fall through to existing pipeline (no behavior change)
+      lld.dropped_reason = `error: ${e?.message || 'unknown'}`;
+      console.warn('[autoLocate] lat/lng-first path threw, falling through:', e?.message);
+    }
+    // Mirror collected lat/lng diagnostics back to the optional _diag so the
+    // wrapper sees them in the payload (whether the path succeeded or fell
+    // through). When path_used was set to 'latlng' above, this is redundant
+    // but harmless; in all other cases this is the only assignment.
+    if (_diag) _diag.lat_lng_data = lld;
+  }
+  // ─────────────────────────────────────────────────────────────────────
+  // END LAT/LNG-FIRST. Existing owner-search loop below runs unchanged.
+  // ─────────────────────────────────────────────────────────────────────
 
   for (const owner of ownerSignals) {
     const normalized = normalize(owner);
@@ -229,6 +468,7 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
         winning_signal: owner,
         alternatives_within_tolerance: matched.length,
       };
+      _diag.path_used = 'owner';
     }
 
     return {
@@ -249,6 +489,24 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
 // endpoint at the end of each call.
 type AutoLocateDiagCollector = {
   reject_reason?: string;
+  // Which path produced the returned result, if any. Set by the function
+  // when it commits to a pin. The wrapper uses this to compute exit_stage.
+  path_used?: 'latlng' | 'owner';
+  // Captures what happened in the lat/lng-first seed path (only set when
+  // the appraisal had explicit lat/lng coordinates and we attempted it).
+  lat_lng_data?: {
+    tried: boolean;
+    seed_found?: boolean;
+    seed_owner?: string | null;
+    seed_parcel_id?: string | null;
+    cluster_count?: number;
+    cluster_acres?: number;
+    cluster_parcel_count?: number;
+    cluster_delta?: number;
+    owner_corroborated?: boolean;
+    acres_corroborated?: boolean;
+    dropped_reason?: string;
+  };
   owner_search_data?: Array<{
     signal: string;
     tokens: string[];
@@ -289,16 +547,37 @@ async function autoLocateInBrowserLogged(comp: any) {
   );
 
   // Decide exit_stage. Order matters — error trumps everything else.
+  // path_used distinguishes lat/lng-first wins from owner-search wins
+  // so we can analyze "how often does lat/lng-first actually pay off?"
   let exit_stage: string;
   if (threw) {
     exit_stage = 'error';
   } else if (result) {
-    exit_stage = 'owner_search_cluster';
+    exit_stage = diag.path_used === 'latlng' ? 'latlng_seed_cluster' : 'owner_search_cluster';
   } else if (diag.reject_reason) {
     exit_stage = 'manual_placeholder';
+  } else if (diag.lat_lng_data?.tried) {
+    // Lat/lng path was attempted but didn't corroborate, and then owner
+    // search also failed. Distinct stage so analysis can show "how often
+    // did lat/lng get dropped AND owner-search also returned nothing?"
+    exit_stage = 'latlng_dropped_owner_null';
   } else {
     exit_stage = 'owner_search_null';
   }
+
+  // Pick final_cluster_acres from whichever path produced the result.
+  const finalClusterAcres =
+    diag.path_used === 'latlng'
+      ? (diag.lat_lng_data?.cluster_acres ?? null)
+      : (diag.cluster_data?.picked_acres ?? null);
+
+  // Stash lat_lng_data inside cluster_data (JSONB) under a nested key so we
+  // don't need a schema migration. Queries can extract via
+  //   cluster_data->'lat_lng_path'->>'owner_corroborated' etc.
+  const cluster_data_to_send: any = {
+    ...(diag.cluster_data || {}),
+    ...(diag.lat_lng_data ? { lat_lng_path: diag.lat_lng_data } : {}),
+  };
 
   const payload = {
     input_acres: Number(comp?.acres) || null,
@@ -315,14 +594,16 @@ async function autoLocateInBrowserLogged(comp: any) {
       typeof comp?.description === 'string' && comp.description.trim().length > 0
     ),
     exit_stage,
+    // owner_search_data is captured even when lat/lng path won (when lat/lng
+    // fell through and then owner search ran, both paths' data is useful).
     owner_search_data: diag.owner_search_data || null,
-    cluster_data: diag.cluster_data || null,
+    cluster_data: Object.keys(cluster_data_to_send).length > 0 ? cluster_data_to_send : null,
     final_pin_lat: result?.latitude ?? null,
     final_pin_lng: result?.longitude ?? null,
     final_parcel_ids: result?.parcel_id
       ? String(result.parcel_id).split(',').filter(Boolean)
       : null,
-    final_cluster_acres: diag.cluster_data?.picked_acres ?? null,
+    final_cluster_acres: finalClusterAcres,
     final_confidence: result?.match_confidence ?? null,
     final_match_reason: result?.match_reason ?? null,
     ms_total,
@@ -385,7 +666,13 @@ export default function ImportPage() {
   const sendMessage = async (
     text: string,
     fileContent?: string,
-    images?: string[]
+    images?: string[],
+    // Optional extracted aerial photo from the source PDF — passed through
+    // from the upload handler. When present, this is the actual aerial
+    // image extracted from the PDF's embedded XObjects (via pdfExtractAerial),
+    // NOT a rendered page snapshot. The verification card shows it directly
+    // on the LEFT side so the broker can compare against the matched parcel.
+    sourceAerial?: string | null,
   ) => {
     const userMessage: Message = {
       role: 'user',
@@ -412,6 +699,17 @@ export default function ImportPage() {
       });
 
       const data = await response.json();
+
+      // Attach the source aerial to the extracted comp so the verification
+      // card can show it on the LEFT side (vs. the matched parcel on the
+      // RIGHT). `sourceAerial` is the actual aerial image extracted from
+      // the PDF's embedded XObjects — NOT a rendered page screenshot.
+      // Only attach when a single comp came back (multi-comp PDFs can't
+      // reliably attribute one image to one comp without per-page AI
+      // extraction; safer to leave aerialImage null and fall back to text).
+      if (sourceAerial && Array.isArray(data.comps) && data.comps.length === 1) {
+        (data.comps[0] as any).aerialImage = sourceAerial;
+      }
 
       // Browser-side auto-locate: server-side auto-locate fails inside Vercel
       // functions because function-to-self URL calls don't hit the edge cache.
@@ -678,6 +976,17 @@ export default function ImportPage() {
       visibility: 'team',
       confidence: conf,
       boundary_geojson: (comp as any).geometry ?? null,
+      // Math identity gate flag from extraction (see /api/import-chat).
+      needs_extraction_review: comp.needs_extraction_review || false,
+      // Silent (batched/chunked) inserts skip the visual verification screen,
+      // so always flag for review — broker can come back via the vault and
+      // confirm or fix each one. Manual saves from the verification card
+      // (saveComp) decide this per-row based on broker action.
+      needs_location_review: true,
+      // Persist source aerial from PDF extraction (see saveComp comment for
+      // details). insertCompResilient transparently retries without this
+      // column if migration 021 hasn't been applied yet — no hard dependency.
+      aerial_image: (comp as any).aerialImage || null,
     });
 
     if (error || !inserted) return false;
@@ -992,8 +1301,17 @@ export default function ImportPage() {
       // Images (jpg/png): pass straight through as a single-image array.
       if (file.type === 'application/pdf') {
         toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
-        // Higher quality now that we chunk — no token-budget worry per call
-        const images = await pdfToImages(file, { scale: 1.5, maxPages: 60 });
+        // Higher quality now that we chunk — no token-budget worry per call.
+        // Extract the largest embedded aerial in PARALLEL with page rendering
+        // — both operations parse the PDF, but pdfjs caches the parse so the
+        // second open is cheap, and the network/AI call is the dominant cost
+        // anyway. Aerial extraction returns null when no qualifying image
+        // exists (text-only PDFs, scanned-as-raster appraisals), in which
+        // case the verification card falls back to the text panel.
+        const [images, sourceAerial] = await Promise.all([
+          pdfToImages(file, { scale: 1.5, maxPages: 60 }),
+          extractLargestAerial(file).catch(() => null),
+        ]);
         toast.dismiss('pdf-render');
         if (images.length === 0) {
           toast.error('Could not render PDF');
@@ -1007,7 +1325,7 @@ export default function ImportPage() {
           await extractFromChunkedPdf(file, images);
           return;
         }
-        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images);
+        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images, sourceAerial);
         return;
       }
 
@@ -1045,7 +1363,25 @@ export default function ImportPage() {
     await sendMessage(input.trim());
   };
 
-  const saveComp = async (comp: ExtractedComp) => {
+  // saveComp persists a comp to the vault. Caller controls intent via opts:
+  //   needsReview: TRUE  → save flagged for follow-up (gray clock in vault)
+  //                FALSE → save verified (no badge)
+  //   silent: TRUE       → suppress toast + skip the "View on map" interaction.
+  //                        Used when the caller is doing batch save + their
+  //                        own navigation (e.g. the Needs review button which
+  //                        parallel-saves all pending comps then navigates
+  //                        same-tab itself).
+  //                FALSE → show the normal success toast (with optional
+  //                        "View on map" link for verified-with-pin comps).
+  // When called without opts, defaults to verified + with-toast.
+  const saveComp = async (
+    comp: ExtractedComp,
+    opts?: { needsReview?: boolean; silent?: boolean }
+  ) => {
+    const needsReview = opts?.needsReview ?? false;
+    const silent = opts?.silent ?? false;
+    const hasPin = comp.latitude != null && comp.longitude != null;
+
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
@@ -1079,40 +1415,77 @@ export default function ImportPage() {
       visibility: 'team',
       confidence: comp.confidence.overall > 80 ? 'Verified' : comp.confidence.overall > 50 ? 'Estimated' : 'Unverified',
       boundary_geojson: (comp as any).geometry ?? null,
+      // Carry the math-identity-gate flag through to the row so the vault
+      // UI can show its warning badge. False (default) if the gate passed
+      // or couldn't run (one of price/ppa/acres was missing).
+      needs_extraction_review: comp.needs_extraction_review || false,
+      // From the verification screen: TRUE when broker skipped/flagged
+      // (clock badge in vault); FALSE when broker visually confirmed.
+      needs_location_review: needsReview,
+      // Persist the source aerial extracted from the original PDF so the
+      // review page can render it later (as a side panel or as a
+      // georeferenced overlay). NULL when no aerial was extracted —
+      // multi-comp PDFs, text-only appraisals, or extraction failures.
+      // See docs/DESIGN_DECISIONS.md §5 (review page architecture).
+      aerial_image: (comp as any).aerialImage || null,
     });
 
     if (error) {
-      toast.error('Failed to save comp');
+      if (!silent) toast.error('Failed to save comp');
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
-      if (comp.latitude != null && comp.longitude != null) {
-        toast.success(
-          (t) => (
-            <span>
-              {label} added to vault.{' '}
-              <button
-                onClick={() => {
-                  toast.dismiss(t.id);
-                  router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`);
-                }}
-                className="underline font-bold text-sage"
-              >
-                View on map →
-              </button>
-            </span>
-          ),
-          { duration: 6000 }
-        );
-      } else {
-        toast.success(`${label} added to vault!`);
+
+      if (!silent) {
+        if (needsReview) {
+          // Toast-only confirmation — caller (the Needs review button) handles
+          // navigation itself (parallel-saves other pending comps first, then
+          // same-tab navigates so nothing's lost).
+          toast.success(
+            hasPin
+              ? `${label} flagged for review`
+              : `${label} added — needs location`,
+            { duration: 2500 }
+          );
+        } else if (hasPin) {
+          // "Looks right" path with a pin — keep the existing toast-with-link
+          // pattern. Broker can ignore the toast or click "View on map".
+          // The link itself uses an anchor target=_blank (rendered below as
+          // a Link element since we're inside a toast.success render fn) so
+          // Safari's popup blocker doesn't apply — anchor target=_blank is
+          // browser-native navigation, not a programmatic popup.
+          toast.success(
+            (t) => (
+              <span>
+                {label} added to vault.{' '}
+                <a
+                  href={`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => toast.dismiss(t.id)}
+                  className="underline font-bold text-sage cursor-pointer"
+                >
+                  View on map →
+                </a>
+              </span>
+            ),
+            { duration: 6000 }
+          );
+        } else {
+          toast.success(`${label} added to vault!`);
+        }
       }
+
       setPendingComps(prev => prev.filter(c => c !== comp));
     }
   };
 
+  // Bulk-save shortcut — broker chose to skip the per-comp visual
+  // verification and triage the batch later from the vault. Every row
+  // gets flagged needs_location_review=true so the vault badge surfaces
+  // them for follow-up.
   const saveAllComps = async () => {
     for (const comp of pendingComps) {
-      await saveComp(comp);
+      await saveComp(comp, { needsReview: true });
     }
   };
 
@@ -1230,10 +1603,45 @@ export default function ImportPage() {
                 )}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
 
-                {/* Extracted comps */}
+                {/* Extracted comps — verification cards with thumbnails.
+                    Each card shows a source thumbnail (aerial from PDF if
+                    extracted, satellite of source-provided coords, or a
+                    text fallback) alongside a system-pinned thumbnail
+                    (Mapbox satellite centered on the autoLocate result).
+                    Broker picks "Looks right" (save verified) or "Needs
+                    review" (save flagged) per comp. */}
                 {msg.comps && msg.comps.length > 0 && (
                   <div className="mt-3 space-y-2">
-                    {msg.comps.map((comp, ci) => (
+                    {msg.comps.map((comp, ci) => {
+                      const aerial = (comp as any).aerialImage as string | undefined;
+                      const sysLat = comp.latitude;
+                      const sysLng = comp.longitude;
+                      // When autoLocate produced a parcel boundary, pass it
+                      // to Mapbox as a polygon overlay so the broker sees the
+                      // actual parcel SHAPE, not just a pin in the middle.
+                      // When no boundary (manual entry, autoLocate null), the
+                      // helper falls back to pin-only rendering.
+                      const sysBoundary = (comp as any).geometry;
+                      const sysPinUrl = (sysLat != null && sysLng != null)
+                        ? mapboxStaticUrl({
+                            lat: sysLat,
+                            lng: sysLng,
+                            zoom: 14,
+                            boundary: sysBoundary || undefined,
+                          })
+                        : null;
+                      // Source thumbnail priority: explicit aerial from PDF >
+                      // source-provided lat/lng (rare — Stouffer-format) >
+                      // text panel.
+                      const sourceLatLng = (comp as any)._source_latitude != null
+                        && (comp as any)._source_longitude != null
+                        ? { lat: (comp as any)._source_latitude, lng: (comp as any)._source_longitude }
+                        : null;
+                      const sourceMapUrl = !aerial && sourceLatLng
+                        ? mapboxStaticUrl({ lat: sourceLatLng.lat, lng: sourceLatLng.lng, zoom: 14 })
+                        : null;
+
+                      return (
                       <div key={ci} className="bg-night border border-border rounded-xl p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
@@ -1262,21 +1670,135 @@ export default function ImportPage() {
                             <span className="text-xs text-slate-500">{comp.confidence.overall}%</span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => saveComp(comp)}
-                          className="mt-2 w-full py-1.5 bg-sage/10 hover:bg-sage/20 border border-sage/20 text-sage rounded-lg text-xs font-bold transition-colors"
-                        >
-                          + Add to Vault
-                        </button>
+
+                        {/* Side-by-side thumbnails: source vs system match */}
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          {/* LEFT: source */}
+                          <div>
+                            {aerial ? (
+                              // Aerial is the actual aerial photo extracted
+                              // from the PDF's embedded image XObjects (via
+                              // pdfExtractAerial), NOT a rendered page
+                              // screenshot. Use plain object-cover — no CSS
+                              // zoom hack needed because the image is already
+                              // just the photo. Aspect ratio varies by source
+                              // (landscape, square, occasionally portrait),
+                              // and object-cover handles all of them.
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={aerial}
+                                alt="From source"
+                                className="w-full h-32 object-cover rounded border border-border bg-night"
+                              />
+                            ) : sourceMapUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={sourceMapUrl}
+                                alt="Source coords"
+                                className="w-full h-32 object-cover rounded border border-border"
+                              />
+                            ) : (
+                              <div className="w-full h-32 bg-card border border-border rounded p-2 text-[10px] text-slate-400 flex flex-col gap-0.5 overflow-hidden">
+                                <div className="text-slate-500 uppercase tracking-wide">Source data</div>
+                                {comp.grantee && <div className="text-white truncate">→ {comp.grantee}</div>}
+                                {comp.grantor && <div className="text-slate-400 truncate">from {comp.grantor}</div>}
+                                {comp.address && <div className="text-slate-400 truncate">{comp.address}</div>}
+                                {comp.description && (
+                                  <div className="text-slate-500 line-clamp-3 mt-0.5">
+                                    {comp.description.slice(0, 120)}{comp.description.length > 120 ? '…' : ''}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div className="text-[10px] text-slate-500 text-center mt-1">From source</div>
+                          </div>
+
+                          {/* RIGHT: system match */}
+                          <div>
+                            {sysPinUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={sysPinUrl}
+                                alt="System pin"
+                                className="w-full h-32 object-cover rounded border border-border"
+                              />
+                            ) : (
+                              <div className="w-full h-32 bg-amber-900/20 border border-amber-700/40 rounded p-2 text-[10px] flex flex-col items-center justify-center text-center gap-1">
+                                <AlertTriangle className="text-amber-400" size={20} />
+                                <div className="text-amber-300 font-bold">Could not locate</div>
+                                <div className="text-amber-200/70 text-[9px]">Place manually in vault</div>
+                              </div>
+                            )}
+                            <div className="text-[10px] text-slate-500 text-center mt-1">System pinned</div>
+                          </div>
+                        </div>
+
+                        {/* Two-button verification action row */}
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => saveComp(comp, { needsReview: false })}
+                            disabled={sysLat == null || sysLng == null}
+                            title={sysLat == null ? 'No pin to confirm — use Needs review and fix manually' : 'Mark this comp as verified and save to vault'}
+                            className="py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Check size={12} />
+                            Looks right
+                          </button>
+                          <button
+                            onClick={async () => {
+                              // Option B (per docs/DESIGN_DECISIONS.md §4):
+                              // Save THIS comp + all OTHER pending comps as
+                              // needs_location_review=true in parallel, then
+                              // same-tab navigate to the map. Preserves the
+                              // broker's work on multi-comp PDFs — the other
+                              // cards appear in the vault with gray clock
+                              // badges instead of disappearing entirely.
+                              //
+                              // Same-tab nav avoids Safari popup blocker
+                              // entirely. The cost (you lose import-page
+                              // state) is mitigated by saving everything
+                              // first so nothing's truly lost.
+                              const mapUrl = (sysLat != null && sysLng != null)
+                                ? `/dashboard/map?focus=${sysLat},${sysLng},14`
+                                : `/dashboard/vault`;
+                              const others = pendingComps.filter((c) => c !== comp);
+                              try {
+                                await Promise.all([
+                                  saveComp(comp, { needsReview: true, silent: false }),
+                                  ...others.map((c) =>
+                                    saveComp(c, { needsReview: true, silent: true })
+                                  ),
+                                ]);
+                                if (others.length > 0) {
+                                  toast.success(
+                                    `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
+                                    { duration: 2500 }
+                                  );
+                                }
+                              } catch (e) {
+                                console.error('[needs-review] parallel save failed:', e);
+                                toast.error('Some comps may not have saved — check the vault');
+                              }
+                              router.push(mapUrl);
+                            }}
+                            title="Save this and any other pending comps for review, then open the map"
+                            className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                          >
+                            <Clock size={12} />
+                            Needs review
+                          </button>
+                        </div>
                       </div>
-                    ))}
+                      );
+                    })}
 
                     {msg.comps.length > 1 && (
                       <button
                         onClick={saveAllComps}
-                        className="w-full py-2 bg-sage hover:bg-sage2 text-black rounded-xl text-xs font-bold transition-colors"
+                        className="w-full py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1"
                       >
-                        Add All {msg.comps.length} Comps to Vault
+                        <Clock size={12} />
+                        Save all {msg.comps.length} for review later
                       </button>
                     )}
                   </div>
