@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { TEXAS_COUNTIES } from '@/lib/utils';
+import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { X, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -37,7 +38,10 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
 
     const { error } = await supabase.from('comps').insert({
       created_by: user.id,
-      county,
+      // Normalize to canonical storage form so QuickCapture entries
+      // match the same county-name convention as imports and full
+      // CompModal saves.
+      county: normalizeCountyForStorage(county) || county,
       state: 'TX',
       acres: acresNum,
       sale_price: priceNum,

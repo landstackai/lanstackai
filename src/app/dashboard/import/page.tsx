@@ -9,6 +9,7 @@ import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
+import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
@@ -1388,7 +1389,10 @@ export default function ImportPage() {
     const { data: inserted, error } = await supabase.from('comps').insert({
       created_by: user.id,
       property_name: comp.property_name,
-      county: comp.county || '',
+      // Normalize to canonical storage form (titlecase, no "County" suffix,
+      // compounds comma-separated). Replaces the raw AI-extracted string
+      // which was inconsistent ("Frio" vs "Frio County" vs "frio").
+      county: normalizeCountyForStorage(comp.county) || '',
       state: comp.state || 'TX',
       acres: comp.acres || 0,
       sale_price: comp.sale_price || 0,
