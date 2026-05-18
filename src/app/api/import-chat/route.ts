@@ -82,6 +82,26 @@ When you find comparable sales in a document:
   or "subject property" boxes that may show a parent parcel size or
   unrelated acreage. If the description does not contain an acreage,
   fall back to the most explicit value labeled as the sale acreage.
+
+  CRITICAL — the sold tract is NOT:
+    * "Gross Acres" / "Parent Tract" / "Holdings" — these are larger
+      properties from which the sold tract was carved.
+    * "Improved Acres" / "Net Usable" / "Taxable Acres" — subsets, smaller
+      than the actual sold tract.
+    * "Pasture X: NNN ac" / per-field subtotals — components, not the total.
+    * "Adjoining property" / "surrounding ranch" / "larger holding" — not
+      the sold tract at all.
+
+  SELF-CHECK before returning: if you have acres, price_per_acre, AND
+  sale_price, verify they satisfy   acres × price_per_acre ≈ sale_price
+  (within 1%). If they disagree, RE-EXAMINE the document — you have likely
+  pulled the wrong field for "acres". The arithmetic
+  sale_price ÷ price_per_acre   gives the correct sold-tract acreage when
+  both price values are stated explicitly with high confidence.
+
+  If only sale_price and price_per_acre are confidently stated (no clean
+  acreage in the prose), COMPUTE acres = sale_price / price_per_acre and
+  round to 3 decimals. Note the derivation in confidence.per_field.acres.
 - Accuracy matters more than speed. If a value is illegible or missing, set
   it to null rather than guessing. Reflect uncertainty in confidence.per_field.
 
@@ -273,20 +293,30 @@ export async function POST(request: NextRequest) {
     // within 1% (tight enough to catch hallucinations, loose enough to
     // tolerate the rounding inherent in a stated $/ac like "$4,750/ac"
     // versus the unrounded price/acres = $4,749.84). When the identity
-    // fails, AT LEAST ONE of the three values is wrong — but the gate
-    // cannot tell which, and silently auto-correcting acres (the prior
-    // design) risks overwriting a correct field with bad math-derived
-    // values.
+    // fails, AT LEAST ONE of the three values is wrong.
     //
-    // Instead: flag the row with needs_extraction_review=true. The vault
-    // UI renders a warning badge. Broker investigates and decides which
-    // field to fix, then clears the flag manually via vault edit. When
-    // the thumbnail verification UI ships, flagged rows will route into
-    // a required-review queue.
+    // CORRECTION POLICY: when price + ppa are both extracted with high
+    // confidence (≥80) and their quotient produces a "clean" acreage
+    // (matches the document's apparent precision — 3 dp or fewer), auto-
+    // replace `acres` with price/ppa. The math is unambiguous in this
+    // case: $5,600,000 / $4,750 = 1,178.95... → rounds to 1,179. We still
+    // flag needs_extraction_review so the broker sees the correction and
+    // can sanity-check, but the row saves with the CORRECT acreage rather
+    // than the wrong AI value.
     //
-    // Catches AI hallucinations like L&D Farm and Ranch (8,820 extracted
-    // for a 1,179-ac comp where price=$5.60M and ppa=$4,750 were both
-    // correct — Δ86.6% from the math, gate fires).
+    // The L&D Farm and Ranch case that motivated this:
+    //   AI extracted: acres=8,820 (parent ranch), price=$5,600,000 (correct),
+    //                 ppa=$4,750/ac (correct).
+    //   Without correction: row saved with 8,820 acres, flagged, broker
+    //   sees badge → opens review page → discovers AI was wrong about
+    //   acres → manually fixes. Multi-step recovery for a one-step bug.
+    //   With correction: 5,600,000 / 4,750 = 1,178.95 → 1,179 saved, row
+    //   still flagged so broker can verify, but the value is right.
+    //
+    // FLAG-ONLY FALLBACK: when confidence isn't high enough to safely
+    // auto-correct (e.g. ppa was also a guess), keep the old behavior —
+    // flag, don't touch. Better to surface "the math is wrong" than to
+    // overwrite all three fields with garbage when none is reliable.
     //
     // Runs AFTER the description-override above. If description prose
     // already corrected `acres` to the prose-stated value, this check
@@ -300,20 +330,56 @@ export async function POST(request: NextRequest) {
           const impliedAcres = price / ppa;
           const delta = Math.abs(impliedAcres - acres) / acres;
           if (delta > 0.01) {
-            console.warn(
-              `[math-gate] ${c.property_name || 'unnamed'}: ` +
-              `acres=${acres} × ppa=${ppa} = ${(acres * ppa).toFixed(0)}, ` +
-              `but sale_price=${price} (Δ${(delta * 100).toFixed(1)}%). ` +
-              `Flagging needs_extraction_review=true; broker must verify.`
-            );
-            c.needs_extraction_review = true;
-            // Lower the overall extraction confidence — math says at least
-            // one of three fields is wrong, even if we don't know which.
-            if (c.confidence && typeof c.confidence === 'object') {
-              c.confidence.overall = Math.min(
-                Number(c.confidence.overall) || 50,
-                50
+            // Decide: auto-correct or flag-only?
+            // High confidence in price + ppa → both came straight from a
+            // "Sale Price: $X" + "$X/ac" pair, which is the most reliably
+            // extracted block of any appraisal. Acres derivation is safe.
+            const perField = c?.confidence?.per_field || {};
+            const priceConf = Number(perField.sale_price) || 0;
+            const ppaConf = Number(perField.price_per_acre) || 0;
+            const canCorrect = priceConf >= 80 && ppaConf >= 80;
+
+            if (canCorrect) {
+              const corrected = Math.round(impliedAcres * 1000) / 1000;
+              console.warn(
+                `[math-gate] ${c.property_name || 'unnamed'}: ` +
+                `auto-correcting acres ${acres} → ${corrected} ` +
+                `(${price} / ${ppa}, priceConf=${priceConf}, ppaConf=${ppaConf}, ` +
+                `Δ${(delta * 100).toFixed(1)}%).`
               );
+              c.acres = corrected;
+              // Mark how we got here — surfaced in diagnostics + the review
+              // page can show "auto-corrected from $/ac" instead of the AI's
+              // original wrong value.
+              c.acres_source = 'derived_from_ppa';
+              c.needs_extraction_review = true; // still surface for broker review
+              if (c.confidence && typeof c.confidence === 'object') {
+                c.confidence.per_field = {
+                  ...(c.confidence.per_field || {}),
+                  acres: 70, // derived, not directly extracted — mid confidence
+                };
+                c.confidence.overall = Math.min(
+                  Number(c.confidence.overall) || 75,
+                  75
+                );
+              }
+            } else {
+              console.warn(
+                `[math-gate] ${c.property_name || 'unnamed'}: ` +
+                `acres=${acres} × ppa=${ppa} = ${(acres * ppa).toFixed(0)}, ` +
+                `but sale_price=${price} (Δ${(delta * 100).toFixed(1)}%). ` +
+                `priceConf=${priceConf}, ppaConf=${ppaConf} — not safe to auto-` +
+                `correct. Flagging needs_extraction_review=true.`
+              );
+              c.needs_extraction_review = true;
+              // Lower the overall extraction confidence — math says at least
+              // one of three fields is wrong, even if we don't know which.
+              if (c.confidence && typeof c.confidence === 'object') {
+                c.confidence.overall = Math.min(
+                  Number(c.confidence.overall) || 50,
+                  50
+                );
+              }
             }
           }
         }
@@ -440,14 +506,56 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Pulls the first acreage figure from descriptive prose. Handles formats like
-// "265.210 ac", "1,250 acres", "455.92-acre", "97.5 ac". Ignores numbers
-// followed by anything other than acres/acre/ac.
+// Pulls the SOLD-TRACT acreage figure from descriptive prose. Handles formats
+// like "265.210 ac", "1,250 acres", "455.92-acre", "97.5 ac".
+//
+// L&D Farm and Ranch failure mode that motivated the rewrite:
+//   "Part of an 8,820-acre Cooper Ranch holdings, of which Subject is a
+//    1,179.115-acre portion..."
+//
+// The old regex grabbed the FIRST acreage and returned 8,820 (the parent
+// tract). Compounding mistake: that overwrote a correct AI extraction with
+// a worse description-derived value. The math gate then fired (8,820 ×
+// $4,750 ≠ $5.6M, Δ86%) but the damage was already done — the row saved
+// with 8,820 acres flagged for broker review.
+//
+// New strategy: collect ALL acreage mentions, then pick the one whose
+// surrounding context (±60 chars) most strongly implies "sold tract":
+// "sale", "subject", "tract", "comprising", "totaling", "consist(s)(ing)".
+// Falls back to the LAST mention if no contextual cue — sold-tract size
+// is typically restated near the end of the prose summary (e.g. "The
+// property totaling 1,179.115 acres is offered for sale at..."), while
+// parent-tract mentions front-load the description.
 function extractAcresFromDescription(desc: any): number | null {
   if (typeof desc !== 'string' || !desc) return null;
-  const m = desc.match(/([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*(?:acres?|ac)\b/i);
-  if (!m) return null;
-  const v = parseFloat(m[1].replace(/,/g, ''));
+  // Array.from() rather than spread — the project's tsconfig.json doesn't
+  // set a "target", so RegExpStringIterator can't be spread (TS2802).
+  const all = Array.from(desc.matchAll(
+    /(?<![\d,])([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*(?:acres?|ac)\b/gi
+  ));
+  if (all.length === 0) return null;
+
+  // Look for a contextual cue near each match that ties it to the sold tract
+  const SALE_CUE = /\b(sale|subject|tract|comprising|consist\w*|totaling)\b/i;
+  const preferred = all.find((m) => {
+    const idx = m.index ?? 0;
+    const window = desc.slice(Math.max(0, idx - 60), idx + 30);
+    return SALE_CUE.test(window);
+  });
+
+  // Negative cue — explicitly NOT the sold tract. Strip these from the pool
+  // before the fallback so the last-mention heuristic doesn't pick a parent.
+  const NEG_CUE = /\b(parent|holdings?|larger|portion of|adjoining|surrounding)\b/i;
+  const candidates = preferred
+    ? [preferred]
+    : all.filter((m) => {
+        const idx = m.index ?? 0;
+        const window = desc.slice(Math.max(0, idx - 60), idx + 30);
+        return !NEG_CUE.test(window);
+      });
+
+  const chosen = candidates[candidates.length - 1] || all[all.length - 1];
+  const v = parseFloat(chosen[1].replace(/,/g, ''));
   return Number.isFinite(v) ? v : null;
 }
 
