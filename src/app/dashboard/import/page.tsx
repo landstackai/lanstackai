@@ -10,6 +10,7 @@ import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
+import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
@@ -750,6 +751,38 @@ export default function ImportPage() {
           } catch (e: any) {
             console.error(`[import] auto-locate threw for ${label}:`, e);
             toast.error(`📍 ${label}: auto-locate error — ${e?.message || 'unknown'}`, { duration: 8000 });
+          }
+        }
+      }
+
+      // ─── Duplicate detection ────────────────────────────────────
+      // For each extracted comp, query existing comps with matching
+      // sale_date + sale_price (within $1) and check if grantor/grantee
+      // also match (fuzzy). Tags each comp with _duplicates so the
+      // verification card can render a warning banner.
+      //
+      // Targeted query (not "fetch all comps") so this scales — a broker
+      // with 1000 comps only fetches the handful that share the exact
+      // date + price, then fuzzy-matches the parties client-side.
+      if (Array.isArray(data.comps)) {
+        for (let i = 0; i < data.comps.length; i++) {
+          const c = data.comps[i];
+          if (!c.sale_date || !(Number(c.sale_price) > 0)) continue;
+          try {
+            const { data: candidates, error } = await supabase
+              .from('comps')
+              .select('id, property_name, county, grantor, grantee, sale_date, sale_price, created_at')
+              .eq('sale_date', c.sale_date)
+              .gte('sale_price', Number(c.sale_price) - 1)
+              .lte('sale_price', Number(c.sale_price) + 1);
+            if (error || !Array.isArray(candidates)) continue;
+            const matches = findDuplicateCandidates(c, candidates as any);
+            if (matches.length > 0) {
+              (data.comps[i] as any)._duplicates = matches;
+            }
+          } catch (e) {
+            // Silently skip — dedup detection is a nicety, not blocking
+            console.warn('[import] dedup check failed for', c.property_name, e);
           }
         }
       }
@@ -1647,8 +1680,71 @@ export default function ImportPage() {
                         ? mapboxStaticUrl({ lat: sourceLatLng.lat, lng: sourceLatLng.lng, zoom: 14 })
                         : null;
 
+                      const duplicates = (comp as any)._duplicates as DuplicateMatch[] | undefined;
+                      const hasDuplicates = duplicates && duplicates.length > 0;
                       return (
                       <div key={ci} className="bg-night border border-border rounded-xl p-3">
+                        {/* Duplicate-match warning — surfaces BEFORE the
+                            comp details so the broker knows what they're
+                            about to save is already in the vault. Lists
+                            the existing match(es) and gives a one-click
+                            Skip to drop this comp from the import batch. */}
+                        {hasDuplicates && (
+                          <div className="mb-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-2.5">
+                            <div className="flex items-center gap-1.5 text-amber-300 text-xs font-bold mb-1.5">
+                              <AlertTriangle size={12} />
+                              {duplicates!.length === 1
+                                ? 'Possible duplicate of:'
+                                : `Possible duplicate of ${duplicates!.length} existing comp${duplicates!.length === 1 ? '' : 's'}:`}
+                            </div>
+                            <ul className="space-y-1 mb-2">
+                              {duplicates!.slice(0, 3).map((m, di) => {
+                                const savedDate = m.comp.created_at
+                                  ? new Date(m.comp.created_at).toLocaleDateString()
+                                  : '?';
+                                return (
+                                  <li key={di} className="text-[11px] text-amber-200">
+                                    <span className="font-bold">
+                                      {m.comp.property_name || `${m.comp.county || 'Comp'} ${m.comp.sale_date}`}
+                                    </span>
+                                    <span className="text-amber-200/70"> · saved {savedDate}</span>
+                                    {m.confidence === 'exact' && (
+                                      <span className="ml-1.5 text-[9px] uppercase tracking-wide text-amber-300/80 bg-amber-500/15 px-1 py-0.5 rounded">exact</span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                onClick={() => {
+                                  // Remove this comp from the message's comps array
+                                  // so it doesn't get rendered or accidentally saved.
+                                  setMessages((prev) => prev.map((mm, mi) => {
+                                    if (mi !== i || mm.role !== 'assistant' || !mm.comps) return mm;
+                                    return { ...mm, comps: mm.comps.filter((_, idx) => idx !== ci) };
+                                  }));
+                                  setPendingComps((prev) =>
+                                    prev.filter((p) => p !== comp)
+                                  );
+                                  toast.success('Skipped duplicate');
+                                }}
+                                className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded text-[10px] font-bold text-amber-200 transition-colors"
+                              >
+                                Skip this
+                              </button>
+                              <button
+                                onClick={() => router.push(`/dashboard/review/${duplicates![0].comp.id}`)}
+                                className="px-2 py-1 border border-amber-500/30 hover:border-amber-500/60 rounded text-[10px] font-bold text-amber-200/80 hover:text-amber-200 transition-colors"
+                              >
+                                View existing
+                              </button>
+                              <span className="ml-auto text-[10px] text-amber-200/60">
+                                or save anyway below ↓
+                              </span>
+                            </div>
+                          </div>
+                        )}
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
                             <p className="text-sm font-bold text-white">
