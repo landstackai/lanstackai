@@ -983,6 +983,10 @@ export default function ImportPage() {
       // confirm or fix each one. Manual saves from the verification card
       // (saveComp) decide this per-row based on broker action.
       needs_location_review: true,
+      // Persist source aerial from PDF extraction (see saveComp comment for
+      // details). insertCompResilient transparently retries without this
+      // column if migration 021 hasn't been applied yet — no hard dependency.
+      aerial_image: (comp as any).aerialImage || null,
     });
 
     if (error || !inserted) return false;
@@ -1412,6 +1416,12 @@ export default function ImportPage() {
       // From the verification screen: TRUE when broker skipped/flagged
       // (clock badge in vault); FALSE when broker visually confirmed.
       needs_location_review: needsReview,
+      // Persist the source aerial extracted from the original PDF so the
+      // review page can render it later (as a side panel or as a
+      // georeferenced overlay). NULL when no aerial was extracted —
+      // multi-comp PDFs, text-only appraisals, or extraction failures.
+      // See docs/DESIGN_DECISIONS.md §5 (review page architecture).
+      aerial_image: (comp as any).aerialImage || null,
     });
 
     if (error) {
