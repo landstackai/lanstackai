@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Layers, Waves } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -64,15 +64,20 @@ export default function MapPage() {
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
-  const [mapStyle, setMapStyle] = useState<'satellite' | 'streets' | 'terrain'>('satellite');
-  // Toggleable raster overlays. Counties default ON (structural
-  // reference — brokers think in counties first when scoping comps).
-  // Floodplain defaults OFF — it's busy at low zoom and most workflows
+  // Map style options. Dark was removed per broker feedback (rarely used,
+  // wasted real estate). Both remaining options use the same satellite
+  // base imagery — "Terrain" is satellite WITH contour lines overlaid
+  // (USGS-style brown contours from Mapbox terrain-v2), which is what
+  // brokers actually want when they say "terrain view." The previous
+  // 'outdoors' style replaced the satellite imagery with topographic
+  // rendering, which loses the aerial context brokers rely on.
+  const [mapStyle, setMapStyle] = useState<'satellite' | 'terrain'>('satellite');
+  // Toggleable raster overlays. Counties always ON now (per broker
+  // feedback — they're structural reference data, same as state lines
+  // on a US map). Only floodplain has a user-facing toggle.
+  // Floodplain defaults OFF — busy at low zoom and most workflows
   // don't need it until the broker focuses on a specific property.
-  // Both layers are added to the map at load time with visibility set
-  // from this state; the sync effect below flips visibility on change.
-  const [overlays, setOverlays] = useState<{ counties: boolean; floodplain: boolean }>({
-    counties: true,
+  const [overlays, setOverlays] = useState<{ floodplain: boolean }>({
     floodplain: false,
   });
   const [mapLoaded, setMapLoaded] = useState(false);
@@ -227,10 +232,13 @@ export default function MapPage() {
     return () => { cancelled = true; };
   }, [supabase]);
 
+  // Both options share the same satellite base — "Terrain" layers contour
+  // lines on top via the overlay-ensure effect below. No setStyle() needed
+  // when switching, which avoids the basemap-switch wipes-custom-layers
+  // problem the old multi-style switcher created.
   const STYLE_URLS = {
     satellite: 'mapbox://styles/mapbox/satellite-streets-v12',
-    streets: 'mapbox://styles/mapbox/dark-v11',
-    terrain: 'mapbox://styles/mapbox/outdoors-v12',
+    terrain: 'mapbox://styles/mapbox/satellite-streets-v12',
   };
 
   const resetParcelState = useCallback(() => {
@@ -2409,7 +2417,8 @@ export default function MapPage() {
           id: 'tx-counties-layer',
           type: 'raster',
           source: 'tx-counties',
-          layout: { visibility: overlays.counties ? 'visible' : 'none' },
+          // Always visible — counties are structural reference data, not
+          // a togglable overlay. No layout.visibility needed.
           paint: {
             // Subtler at low zoom (don't dominate the wide TX view),
             // more visible mid-zoom for county comparison.
@@ -2442,14 +2451,67 @@ export default function MapPage() {
         });
       }
 
+      // ── Contour lines (Mapbox terrain-v2 vector tileset) ──────────
+      // Powers the "Terrain" style toggle — when active, brown USGS-
+      // style contour lines render on top of the satellite imagery.
+      // Vector source so we can style line color/width per-zoom and
+      // distinguish major (every 100m) vs minor (every 20m) contours.
+      // Free with any Mapbox token; same tileset that powers the
+      // outdoors-v12 style topography.
+      if (!m.getSource('mapbox-terrain-v2')) {
+        m.addSource('mapbox-terrain-v2', {
+          type: 'vector',
+          url: 'mapbox://mapbox.mapbox-terrain-v2',
+        });
+      }
+      // Minor contours (every 20m) — thinner, more transparent, only at
+      // higher zoom levels where you'd actually read them.
+      if (!m.getLayer('contour-lines-minor')) {
+        m.addLayer({
+          id: 'contour-lines-minor',
+          type: 'line',
+          source: 'mapbox-terrain-v2',
+          'source-layer': 'contour',
+          minzoom: 12,
+          filter: ['!=', ['get', 'index'], 5], // exclude major contours (drawn separately)
+          layout: { visibility: mapStyle === 'terrain' ? 'visible' : 'none' },
+          paint: {
+            'line-color': '#b45309', // amber-700 — readable on most TX terrain colors
+            'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.4, 16, 0.8],
+            'line-opacity': ['interpolate', ['linear'], ['zoom'], 12, 0.45, 16, 0.65],
+          },
+        });
+      }
+      // Major contours (every 100m / every 5th line) — bolder, visible
+      // at lower zoom too so the broker gets terrain context even on a
+      // wide view.
+      if (!m.getLayer('contour-lines-major')) {
+        m.addLayer({
+          id: 'contour-lines-major',
+          type: 'line',
+          source: 'mapbox-terrain-v2',
+          'source-layer': 'contour',
+          minzoom: 9,
+          filter: ['==', ['get', 'index'], 5],
+          layout: { visibility: mapStyle === 'terrain' ? 'visible' : 'none' },
+          paint: {
+            'line-color': '#92400e', // amber-800 — slightly darker than minor
+            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.6, 14, 1.2, 18, 1.6],
+            'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.5, 14, 0.75],
+          },
+        });
+      }
+
       // Sync visibility on every run — covers the case where the layer
-      // already existed but the toggle state has since changed.
-      m.setLayoutProperty('tx-counties-layer', 'visibility', overlays.counties ? 'visible' : 'none');
+      // already existed but the toggle state has since changed. Counties
+      // intentionally not synced here — always visible.
       m.setLayoutProperty('fema-floodplain-layer', 'visibility', overlays.floodplain ? 'visible' : 'none');
+      m.setLayoutProperty('contour-lines-minor', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
+      m.setLayoutProperty('contour-lines-major', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
     } catch (e) {
       console.warn('[overlays] failed to add/toggle overlay layers:', e);
     }
-  }, [overlays, mapLoaded]);
+  }, [overlays, mapLoaded, mapStyle]);
 
   // ── Comp boundary hover tooltip ──────────────────────────────────────
   // Parcel hover tooltips (owner + acres on TxGIO / Blanco CAD / owner-
@@ -2876,12 +2938,13 @@ export default function MapPage() {
     resetParcelState();
   }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState]);
 
-  const changeStyle = (style: 'satellite' | 'streets' | 'terrain') => {
-    if (!map.current) return;
+  // Switch between Satellite and Terrain views. Both use the same base
+  // style URL — the only difference is whether the contour-line overlay
+  // is visible. So we just update state; the overlay-ensure effect
+  // (below) handles toggling the contour layer's visibility on the next
+  // render. No setStyle() means no layer wipe + no mapLoaded reset.
+  const changeStyle = (style: 'satellite' | 'terrain') => {
     setMapStyle(style);
-    setMapLoaded(false);
-    map.current.setStyle(STYLE_URLS[style]);
-    map.current.once('style.load', () => setMapLoaded(true));
   };
 
   const allParcels = selectedParcels.length > 0 ? selectedParcels : tappedParcel ? [tappedParcel] : [];
@@ -3029,14 +3092,16 @@ export default function MapPage() {
 
         {/* Map controls */}
         <div className="absolute top-16 left-3 z-10 flex flex-col gap-2">
-          {/* Style switcher */}
+          {/* Style switcher — Satellite (aerial only) vs Terrain (aerial
+              + contour line overlay). Dark removed per broker feedback. */}
           <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden flex">
-            {(['satellite', 'streets', 'terrain'] as const).map(s => (
+            {(['satellite', 'terrain'] as const).map(s => (
               <button key={s} onClick={() => changeStyle(s)}
                 className={`px-3 py-2 text-xs font-bold capitalize transition-colors ${
                   mapStyle === s ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
                 }`}
-              >{s === 'streets' ? 'Dark' : s}</button>
+                title={s === 'terrain' ? 'Satellite imagery with contour lines' : 'Satellite imagery'}
+              >{s}</button>
             ))}
           </div>
 
@@ -3062,27 +3127,14 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Overlay toggles — county lines + FEMA floodplain. Independent
-              toggles in a single pill so they share the visual rhythm of
-              the basemap/scope/pin-label controls above. Active = sage
-              for counties (structural reference data), sky for floodplain
-              (hazard data — distinct so brokers reading the map can tell
-              which is which from peripheral vision). */}
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[14rem]">
-            <button
-              onClick={() => setOverlays((o) => ({ ...o, counties: !o.counties }))}
-              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
-                overlays.counties ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
-              }`}
-              title={overlays.counties ? 'Hide county lines' : 'Show county lines'}
-              aria-pressed={overlays.counties}
-            >
-              <Layers size={12} />
-              Counties
-            </button>
+          {/* Flood toggle — FEMA NFHL hazard zones. Counties always
+              render as structural reference (no toggle). Standalone pill
+              now that Counties was removed; visually matches the other
+              control pills in this column. */}
+          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden w-[10rem]">
             <button
               onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
-              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+              className={`w-full py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
                 overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-slate-400 hover:text-white'
               }`}
               title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
