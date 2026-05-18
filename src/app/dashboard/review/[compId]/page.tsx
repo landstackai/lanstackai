@@ -34,7 +34,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // quirk). MapboxDraw CSS is also loaded globally there.
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -67,6 +67,7 @@ type Comp = {
   source_type: string | null;
   source_url: string | null;
   confidence: string | null;
+  description: string | null;
 };
 
 export default function ReviewPage() {
@@ -80,10 +81,18 @@ export default function ReviewPage() {
   // Aerial panel collapses to a small toggle button after verification —
   // see DESIGN_DECISIONS §5 (aerial as verification tool, not permanent UI).
   const [aerialCollapsed, setAerialCollapsed] = useState(false);
+  // Full-screen aerial modal — click the floating thumbnail to study the
+  // source aerial at full size against the map. Closes on backdrop click,
+  // X button, or Escape key.
+  const [aerialExpanded, setAerialExpanded] = useState(false);
   // Side panel collapsible — broker can hide to maximize map area, or
   // to make the page usable on narrow viewports / mobile. Default open
   // on first render; toggled via the button on the panel edge.
   const [panelOpen, setPanelOpen] = useState(true);
+  // Description collapse — appraisal descriptions run 300-500+ words and
+  // would dominate the side panel if always expanded. Default collapsed
+  // to a 1-line preview; broker clicks to read in full.
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
 
   // Editing mode for the workspace.
   //   'view'     — read-only (Stage A behavior)
@@ -103,6 +112,21 @@ export default function ReviewPage() {
   const [nearbyParcels, setNearbyParcels] = useState<any[] | null>(null);
   const [loadingParcels, setLoadingParcels] = useState(false);
   const [reselectSaving, setReselectSaving] = useState(false);
+
+  // Owner-search subsystem inside reselect mode. Broker types an owner
+  // name (e.g. "Grundhoefer Farms") and we hit /api/parcels-by-owner to
+  // find every parcel statewide (filtered by county when known) where
+  // owner_name matches. Matched parcels render in sky-blue overlay
+  // (distinct from gold selection), are clickable to add to the cluster,
+  // and the map auto-fits to their bbox so broker can immediately see
+  // them. Lets brokers find parcels the bbox-fetch missed — e.g. when
+  // the appraisal pin was wrong and the actual parcels are 5 miles
+  // away. Highlighted, not auto-selected: broker still confirms which
+  // ones belong by clicking.
+  const [ownerQuery, setOwnerQuery] = useState('');
+  const [ownerSearching, setOwnerSearching] = useState(false);
+  const [ownerMatches, setOwnerMatches] = useState<any[] | null>(null);
+  const [ownerSearchError, setOwnerSearchError] = useState<string | null>(null);
 
   // Draw mode (Stage C). Holds the user's drawn polygon feature once
   // MapboxDraw's 'draw.create' event fires.
@@ -133,12 +157,12 @@ export default function ReviewPage() {
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
         'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
-        'needs_extraction_review, needs_location_review, source_type, source_url, confidence';
+        'needs_extraction_review, needs_location_review, source_type, source_url, confidence, description';
       const SELECT_WITHOUT_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
         'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
-        'needs_extraction_review, needs_location_review, confidence';
+        'needs_extraction_review, needs_location_review, confidence, description';
 
       let { data, error } = await supabase
         .from('comps')
@@ -272,6 +296,18 @@ export default function ReviewPage() {
     // — crashing the page right after Save.
   }, [comp?.id]);
 
+  // Escape-key closes the expanded aerial modal. Mounted once and only
+  // fires when the modal is open — cheap, no listener churn from
+  // re-binding on every render.
+  useEffect(() => {
+    if (!aerialExpanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAerialExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [aerialExpanded]);
+
   // Resize the map canvas whenever the side panel toggles — flex
   // reflow changes the map column width, but Mapbox can't detect that
   // by itself and renders to the old canvas size, leaving black space
@@ -371,8 +407,15 @@ export default function ReviewPage() {
         if (kind === 'source' && m.getSource(id)) m.removeSource(id);
       } catch { /* defensive — never let cleanup throw */ }
     };
-    const layerIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'selected-parcels-fill', 'selected-parcels-line'];
-    const sourceIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'selected-parcels-fill'];
+    const layerIds = [
+      'txgio-parcels-raster',
+      'nearby-parcels-fill',
+      'owner-matches-fill',
+      'owner-matches-line',
+      'selected-parcels-fill',
+      'selected-parcels-line',
+    ];
+    const sourceIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'owner-matches-fill', 'selected-parcels-fill'];
     for (const id of layerIds) tryRemove('layer', id);
     for (const id of sourceIds) tryRemove('source', id);
 
@@ -408,6 +451,30 @@ export default function ReviewPage() {
         paint: { 'fill-color': '#000000', 'fill-opacity': 0 },
       });
 
+      // Owner-search match overlay. Starts EMPTY; the dedicated effect
+      // (below) sets data when the broker runs a search. Sky-blue chosen
+      // so it's distinct from both selected (gold) and the raster parcel
+      // grid — broker can tell at a glance "these are matches, not yet
+      // added to the cluster." Click-through is enabled (handler at the
+      // bottom of this effect treats the matches layer the same as
+      // nearby-parcels-fill — clicking a match toggles it into selection).
+      m.addSource('owner-matches-fill', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] } as any,
+      });
+      m.addLayer({
+        id: 'owner-matches-fill',
+        type: 'fill',
+        source: 'owner-matches-fill',
+        paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.28 },
+      });
+      m.addLayer({
+        id: 'owner-matches-line',
+        type: 'line',
+        source: 'owner-matches-fill',
+        paint: { 'line-color': '#38bdf8', 'line-width': 2, 'line-dasharray': [3, 2] },
+      });
+
       // Selected source starts EMPTY — Effect 2 populates it via setData
       m.addSource('selected-parcels-fill', {
         type: 'geojson',
@@ -429,10 +496,14 @@ export default function ReviewPage() {
       console.error('[review] failed to add reselect layers:', e?.message);
     }
 
-    // Click + cursor handlers
+    // Click + cursor handlers. Both layers (nearby + owner matches) are
+    // clickable — clicking a parcel from either set toggles it into the
+    // selected cluster. Owner matches are also added to a merged feature
+    // bag at click time so the centroid + acreage math in saveReselect
+    // sees the parcel even though it wasn't in the original bbox fetch.
     const handleClick = (e: any) => {
       const features = m.queryRenderedFeatures(e.point, {
-        layers: ['nearby-parcels-fill'],
+        layers: ['nearby-parcels-fill', 'owner-matches-fill'],
       });
       if (features.length === 0) return;
       const propId = features[0].properties?.prop_id;
@@ -454,6 +525,9 @@ export default function ReviewPage() {
     m.on('click', 'nearby-parcels-fill', handleClick);
     m.on('mouseenter', 'nearby-parcels-fill', handleEnter);
     m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
+    m.on('click', 'owner-matches-fill', handleClick);
+    m.on('mouseenter', 'owner-matches-fill', handleEnter);
+    m.on('mouseleave', 'owner-matches-fill', handleLeave);
 
     return () => {
       // The captured `m` reference may point to a destroyed map by the
@@ -463,6 +537,9 @@ export default function ReviewPage() {
       try { m.off('click', 'nearby-parcels-fill', handleClick); } catch {}
       try { m.off('mouseenter', 'nearby-parcels-fill', handleEnter); } catch {}
       try { m.off('mouseleave', 'nearby-parcels-fill', handleLeave); } catch {}
+      try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
+      try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
+      try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
       try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
       for (const id of sourceIds) tryRemove('source', id);
@@ -472,15 +549,36 @@ export default function ReviewPage() {
   // Effect 2: update the selected source data when selection changes.
   // Pure data update via setData — no layer add/remove. Runs on every
   // parcel click but is cheap and doesn't churn Mapbox internals.
+  // Merges nearbyParcels + ownerMatches when computing the selected
+  // feature set so brokers can include owner-matched parcels that
+  // weren't in the original bbox fetch.
   useEffect(() => {
-    if (!map.current || mode !== 'reselect' || !nearbyParcels) return;
+    if (!map.current || mode !== 'reselect') return;
     const src = map.current.getSource('selected-parcels-fill') as any;
     if (!src || typeof src.setData !== 'function') return;
-    const selected = nearbyParcels.filter((f: any) =>
-      selectedPropIds.has(String(f.properties?.prop_id))
-    );
+    const pool: any[] = [...(nearbyParcels || []), ...(ownerMatches || [])];
+    // Dedupe by prop_id — owner search may return parcels already in
+    // the bbox-fetch pool, and rendering both would z-fight and double
+    // the polygon area in any union math.
+    const seen = new Set<string>();
+    const selected = pool.filter((f: any) => {
+      const id = String(f?.properties?.prop_id ?? '');
+      if (!id || !selectedPropIds.has(id)) return false;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
     src.setData({ type: 'FeatureCollection', features: selected });
-  }, [mode, nearbyParcels, selectedPropIds]);
+  }, [mode, nearbyParcels, ownerMatches, selectedPropIds]);
+
+  // Effect 3: update the owner-matches source when ownerMatches changes.
+  // Same setData pattern as effect 2 — pure data swap, no layer churn.
+  useEffect(() => {
+    if (!map.current || mode !== 'reselect') return;
+    const src = map.current.getSource('owner-matches-fill') as any;
+    if (!src || typeof src.setData !== 'function') return;
+    src.setData({ type: 'FeatureCollection', features: ownerMatches || [] });
+  }, [mode, ownerMatches]);
 
   // ── Mark verified handler ───────────────────────────────────────────
   // Clears needs_location_review = false. The gray clock badge in the
@@ -572,6 +670,62 @@ export default function ReviewPage() {
     setMode('view');
     setSelectedPropIds(new Set());
     setNearbyParcels(null);
+    setOwnerQuery('');
+    setOwnerMatches(null);
+    setOwnerSearchError(null);
+  }, []);
+
+  // Run an owner-name search against TxGIO. Scoped to comp.county when
+  // available — drastically narrows results (common surnames otherwise
+  // return hundreds of state-wide matches). On success: stash matches +
+  // pan/fit the map to their bbox so broker sees what came back.
+  const runOwnerSearch = useCallback(async () => {
+    const q = ownerQuery.trim();
+    if (q.length < 3) {
+      setOwnerSearchError('Type at least 3 characters');
+      return;
+    }
+    setOwnerSearchError(null);
+    setOwnerSearching(true);
+    try {
+      const params = new URLSearchParams({ q });
+      if (comp?.county) params.set('county', comp.county);
+      const res = await fetch(`/api/parcels-by-owner?${params}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `Search failed (${res.status})`);
+      }
+      const data = await res.json();
+      const features = Array.isArray(data?.features) ? data.features : [];
+      setOwnerMatches(features);
+      if (features.length === 0) {
+        setOwnerSearchError('No parcels matched that owner in this county');
+        return;
+      }
+      // Auto-fit to the matches' bbox so broker doesn't have to pan
+      // looking for them. Padding leaves the side panel + banner room.
+      if (map.current) {
+        try {
+          const fc = { type: 'FeatureCollection', features } as any;
+          const bbox = turf.bbox(fc);
+          map.current.fitBounds(bbox, { padding: 80, duration: 800, maxZoom: 15 });
+        } catch (e) {
+          console.warn('[review] failed to fit owner-match bounds:', e);
+        }
+      }
+      toast.success(`Found ${features.length} parcel${features.length === 1 ? '' : 's'}`);
+    } catch (e: any) {
+      setOwnerSearchError(e?.message || 'Search failed');
+      setOwnerMatches(null);
+    } finally {
+      setOwnerSearching(false);
+    }
+  }, [ownerQuery, comp?.county]);
+
+  const clearOwnerSearch = useCallback(() => {
+    setOwnerQuery('');
+    setOwnerMatches(null);
+    setOwnerSearchError(null);
   }, []);
 
   const toggleParcel = useCallback((propId: string) => {
@@ -594,12 +748,22 @@ export default function ReviewPage() {
     }
     setReselectSaving(true);
     try {
-      // Find selected features
-      const selected = nearbyParcels.filter((f: any) =>
-        selectedPropIds.has(String(f.properties?.prop_id))
-      );
+      // Find selected features — pool both bbox-fetched parcels AND
+      // owner-search matches, deduping by prop_id. Without this merge,
+      // any parcel the broker added from owner search (which lives in
+      // ownerMatches, not nearbyParcels) would be silently dropped at
+      // save time even though it appeared selected on the map.
+      const pool: any[] = [...nearbyParcels, ...(ownerMatches || [])];
+      const seen = new Set<string>();
+      const selected = pool.filter((f: any) => {
+        const id = String(f?.properties?.prop_id ?? '');
+        if (!id || !selectedPropIds.has(id)) return false;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
       if (selected.length === 0) {
-        toast.error('Selected parcels not found in current viewport');
+        toast.error('Selected parcels not found — try clicking them again');
         setReselectSaving(false);
         return;
       }
@@ -662,11 +826,14 @@ export default function ReviewPage() {
         setMode('view');
         setSelectedPropIds(new Set());
         setNearbyParcels(null);
+        setOwnerQuery('');
+        setOwnerMatches(null);
+        setOwnerSearchError(null);
       }
     } finally {
       setReselectSaving(false);
     }
-  }, [comp, nearbyParcels, selectedPropIds, reselectSaving, supabase]);
+  }, [comp, nearbyParcels, ownerMatches, selectedPropIds, reselectSaving, supabase]);
 
   // Compute running stats for the reselect side panel
   const reselectStats = (() => {
@@ -953,7 +1120,8 @@ export default function ReviewPage() {
 
         {/* FLOATING AERIAL PANEL — bottom-left corner of map area.
             Source aerial extracted at import time. Collapses to a
-            toggle button once the comp is verified. */}
+            toggle button once the comp is verified. Click the thumbnail
+            to expand to a full-screen modal for closer inspection. */}
         {comp.aerial_image ? (
           <div className="absolute bottom-3 left-3 z-10">
             {aerialCollapsed ? (
@@ -967,24 +1135,44 @@ export default function ReviewPage() {
               </button>
             ) : (
               <div className="bg-night/95 backdrop-blur border border-border rounded-lg p-2 shadow-xl">
-                <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center justify-between mb-1.5 gap-3">
                   <span className="text-[10px] uppercase tracking-wide text-slate-500">
                     Source aerial
                   </span>
-                  <button
-                    onClick={() => setAerialCollapsed(true)}
-                    className="text-slate-500 hover:text-white text-[10px]"
-                    title="Hide"
-                  >
-                    ✕
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setAerialExpanded(true)}
+                      className="text-slate-500 hover:text-white p-0.5"
+                      title="Expand to full size"
+                      aria-label="Expand aerial"
+                    >
+                      <Maximize2 size={11} />
+                    </button>
+                    <button
+                      onClick={() => setAerialCollapsed(true)}
+                      className="text-slate-500 hover:text-white text-[10px] p-0.5"
+                      title="Hide"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={comp.aerial_image}
-                  alt="Source aerial"
-                  className="w-[220px] h-[160px] object-cover rounded border border-border bg-night"
-                />
+                {/* Click the thumbnail itself to expand — saves the
+                    broker from hunting for the icon. Cursor + title hint
+                    that it's clickable. */}
+                <button
+                  onClick={() => setAerialExpanded(true)}
+                  className="block cursor-zoom-in"
+                  title="Click to expand"
+                  aria-label="Expand source aerial"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={comp.aerial_image}
+                    alt="Source aerial"
+                    className="w-[220px] h-[160px] object-cover rounded border border-border bg-night"
+                  />
+                </button>
               </div>
             )}
           </div>
@@ -995,6 +1183,41 @@ export default function ReviewPage() {
           </div>
         )}
       </div>
+
+      {/* AERIAL EXPAND MODAL — full-screen backdrop with the aerial sized
+          to fit. Renders at the outermost level so it covers BOTH the
+          map column and the side panel. Click backdrop or X to close;
+          Escape key also closes via the effect at the top of the file. */}
+      {aerialExpanded && comp.aerial_image && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-6"
+          onClick={() => setAerialExpanded(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Source aerial expanded"
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); setAerialExpanded(false); }}
+            className="absolute top-4 right-4 bg-night/80 hover:bg-night border border-border rounded-lg p-2 text-slate-300 hover:text-white"
+            title="Close (Esc)"
+            aria-label="Close aerial"
+          >
+            <X size={16} />
+          </button>
+          <div className="absolute top-4 left-4 bg-night/80 border border-border rounded-lg px-3 py-2 text-xs text-slate-300">
+            Source aerial — {label}
+          </div>
+          {/* Stop propagation on the image itself so clicking it doesn't
+              close the modal. Backdrop click still closes. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={comp.aerial_image}
+            alt="Source aerial (expanded)"
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border border-border"
+          />
+        </div>
+      )}
 
       {/* SIDE PANEL — collapsible. Responsive width: 288px on mobile/small,
           320px on md and up. When closed, hides entirely and the map column
@@ -1041,6 +1264,67 @@ export default function ReviewPage() {
                     cluster. Selected parcels are gold; unselected are
                     thin gray outlines.
                   </p>
+
+                  {/* OWNER SEARCH — find parcels by appraisal-district
+                      owner name (e.g. "Grundhoefer Farms"). Matches
+                      render in sky-blue and are clickable to add to the
+                      cluster. Scoped to comp.county when known.
+                      Useful when the bbox fetch misses parcels — pin
+                      was wrong, or the cluster spans further than the
+                      initial viewport. */}
+                  <div className="border-t border-sage/20 pt-2 space-y-2">
+                    <label className="text-[10px] uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                      <Search size={10} />
+                      Search by owner name
+                      {comp?.county && (
+                        <span className="text-slate-600 normal-case tracking-normal">
+                          · {comp.county} only
+                        </span>
+                      )}
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={ownerQuery}
+                        onChange={(e) => setOwnerQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            runOwnerSearch();
+                          }
+                        }}
+                        placeholder="e.g. Grundhoefer Farms"
+                        disabled={ownerSearching}
+                        className="flex-1 bg-night/60 border border-border rounded px-2 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sage/60 disabled:opacity-50"
+                      />
+                      <button
+                        onClick={runOwnerSearch}
+                        disabled={ownerSearching || ownerQuery.trim().length < 3}
+                        className="px-2.5 bg-sage/20 hover:bg-sage/30 border border-sage/40 text-sage rounded text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
+                        title="Search TxGIO by owner"
+                      >
+                        {ownerSearching ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+                      </button>
+                    </div>
+                    {ownerSearchError && (
+                      <div className="text-[10px] text-red-300 leading-relaxed">{ownerSearchError}</div>
+                    )}
+                    {ownerMatches && ownerMatches.length > 0 && (
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-sky-300">
+                          {ownerMatches.length} match{ownerMatches.length === 1 ? '' : 'es'} (sky blue) — click to add
+                        </span>
+                        <button
+                          onClick={clearOwnerSearch}
+                          className="text-slate-500 hover:text-slate-300 underline"
+                          title="Clear owner matches"
+                        >
+                          clear
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   {reselectStats && (
                     <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
                       <div>
@@ -1209,6 +1493,40 @@ export default function ReviewPage() {
               <Stat label="Sale date" value={comp.sale_date || '—'} />
             </div>
           </div>
+
+          {/* Property description — appraiser remarks, often 200-500
+              words. Default collapsed to a 2-line preview because long
+              descriptions otherwise dominate the side panel and push
+              the action buttons below the fold. Click the header to
+              toggle. Whitespace preserved so paragraph breaks survive. */}
+          {comp.description && comp.description.trim().length > 0 && (
+            <div className="border-t border-border pt-3">
+              <button
+                onClick={() => setDescriptionOpen((v) => !v)}
+                className="w-full flex items-center justify-between text-[10px] uppercase tracking-wide text-slate-500 hover:text-slate-300 mb-1.5"
+                aria-expanded={descriptionOpen}
+                title={descriptionOpen ? 'Collapse description' : 'Expand description'}
+              >
+                <span>Description</span>
+                {descriptionOpen
+                  ? <ChevronDown size={12} />
+                  : <ChevronRight size={12} />}
+              </button>
+              {descriptionOpen ? (
+                <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto pr-1">
+                  {comp.description}
+                </div>
+              ) : (
+                <div
+                  className="text-xs text-slate-400 leading-relaxed line-clamp-2 cursor-pointer hover:text-slate-300"
+                  onClick={() => setDescriptionOpen(true)}
+                  title="Click to expand"
+                >
+                  {comp.description}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Transaction parties */}
           {(comp.grantor || comp.grantee) && (
