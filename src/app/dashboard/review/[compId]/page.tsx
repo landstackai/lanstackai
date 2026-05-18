@@ -146,8 +146,36 @@ export default function ReviewPage() {
   }, [params?.compId, supabase]);
 
   // ── Initialize the Mapbox map once the container mounts ─────────────
+  // CRITICAL: gated on `comp` being loaded. Previous version ran once on
+  // mount with deps=[], but the map container DIV is inside a conditional
+  // render that only fires AFTER the comp loads. So mapContainer.current
+  // was null at the first useEffect invocation, the function silently
+  // early-returned, and never re-ran because of empty deps. Result: black
+  // map. Hours of debugging well-spent. Adding `comp` to deps means we
+  // try again every time comp changes — first try fails because comp is
+  // null, second try succeeds because comp is loaded AND the container
+  // is now in the DOM.
   useEffect(() => {
-    if (!mapContainer.current || map.current) return;
+    console.log('[review] init useEffect fired', {
+      hasComp: !!comp,
+      hasContainer: !!mapContainer.current,
+      hasMapAlready: !!map.current,
+      hasToken: !!process.env.NEXT_PUBLIC_MAPBOX_TOKEN,
+    });
+
+    if (!comp) {
+      // Comp not loaded yet — container DIV isn't in the DOM. Wait.
+      return;
+    }
+    if (!mapContainer.current) {
+      console.warn('[review] mapContainer.current is null even after comp loaded — this is the real bug');
+      setMapError('Map container ref not attached.');
+      return;
+    }
+    if (map.current) {
+      console.log('[review] map already initialized, skipping');
+      return;
+    }
 
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
     if (!token) {
@@ -206,7 +234,7 @@ export default function ReviewPage() {
       map.current?.remove();
       map.current = null;
     };
-  }, []);
+  }, [comp]);
 
   // ── Render the boundary + auto-fit when both map and comp are ready ─
   useEffect(() => {
