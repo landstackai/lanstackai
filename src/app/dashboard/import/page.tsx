@@ -693,6 +693,18 @@ export default function ImportPage() {
 
       const data = await response.json();
 
+      // Attach the page-1 aerial to the extracted comp so the verification
+      // card can show it on the LEFT side (vs. the matched parcel on the
+      // RIGHT). For single-comp PDFs (the common Stouffer "Farm Sale" format
+      // pattern) page 1 IS the aerial of the subject property. For multi-
+      // comp PDFs we can't reliably attribute one image to one comp without
+      // per-page AI extraction, so we leave aerialImage null and the card
+      // falls back to the text panel. Conservative on purpose — better to
+      // show no aerial than the WRONG aerial.
+      if (Array.isArray(data.comps) && data.comps.length === 1 && Array.isArray(images) && images.length > 0) {
+        (data.comps[0] as any).aerialImage = images[0];
+      }
+
       // Browser-side auto-locate: server-side auto-locate fails inside Vercel
       // functions because function-to-self URL calls don't hit the edge cache.
       // Re-run from the browser where /api/parcels-by-owner cache hits work.
@@ -1553,8 +1565,19 @@ export default function ImportPage() {
                       const aerial = (comp as any).aerialImage as string | undefined;
                       const sysLat = comp.latitude;
                       const sysLng = comp.longitude;
+                      // When autoLocate produced a parcel boundary, pass it
+                      // to Mapbox as a polygon overlay so the broker sees the
+                      // actual parcel SHAPE, not just a pin in the middle.
+                      // When no boundary (manual entry, autoLocate null), the
+                      // helper falls back to pin-only rendering.
+                      const sysBoundary = (comp as any).geometry;
                       const sysPinUrl = (sysLat != null && sysLng != null)
-                        ? mapboxStaticUrl({ lat: sysLat, lng: sysLng, zoom: 14 })
+                        ? mapboxStaticUrl({
+                            lat: sysLat,
+                            lng: sysLng,
+                            zoom: 14,
+                            boundary: sysBoundary || undefined,
+                          })
                         : null;
                       // Source thumbnail priority: explicit aerial from PDF >
                       // source-provided lat/lng (rare — Stouffer-format) >
