@@ -1630,17 +1630,20 @@ export default function ImportPage() {
                               // below). Default `object-cover` centered would
                               // show the data tables; anchor to top + scale up
                               // via CSS background so the thumbnail crops to
-                              // just the aerial portion. 165% zoom is tuned to
+                              // just the aerial portion. 240% zoom is tuned to
                               // Stouffer-format pages where the aerial occupies
-                              // roughly the top third — adjust here if other
-                              // appraisal formats have different layouts.
+                              // roughly the top 20-30% — most appraisal pages
+                              // have generous margins above the aerial so we
+                              // need more zoom than first guess. Adjust here
+                              // if other appraisal formats have different
+                              // layouts.
                               <div
                                 role="img"
                                 aria-label="From source"
                                 className="w-full h-32 rounded border border-border bg-night"
                                 style={{
                                   backgroundImage: `url("${aerial}")`,
-                                  backgroundSize: '165% auto',
+                                  backgroundSize: '240% auto',
                                   backgroundPosition: 'center top',
                                   backgroundRepeat: 'no-repeat',
                                 }}
