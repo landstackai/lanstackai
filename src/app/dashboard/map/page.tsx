@@ -119,12 +119,16 @@ export default function MapPage() {
   // Scope filter for the map: All (everything visible) / Company (only
   // is_company_transaction comps) / Mine (only comps created by current user).
   const [mapScope, setMapScope] = useState<'all' | 'company' | 'mine'>('all');
-  // County filter — set of county names (case-insensitive match against
-  // comp.county). Empty Set = no filter, show all counties. Populated
-  // via the Filters popover. The set of selectable counties is derived
-  // from comps actually present in the user's data (typically 5-30 for
-  // a working broker), keeping the picker short.
+  // County filter — set of normalized county names (e.g. "frio", "real")
+  // matched case-insensitively against comp.county. Empty Set = no
+  // filter. Populated via the Filters popover, which lists ALL 254 TX
+  // counties (not just ones present in the user's data) so brokers can
+  // pre-filter to a county before they have comps there — useful for
+  // scoping owner searches or planning ahead.
   const [countyFilter, setCountyFilter] = useState<Set<string>>(new Set());
+  // Live text filter for the county picker (filters the visible list,
+  // not the comps). Typing "frio" reduces 254 to ~1.
+  const [countySearch, setCountySearch] = useState('');
 
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [detectingBoundary, setDetectingBoundary] = useState(false);
@@ -2279,9 +2283,27 @@ export default function MapPage() {
         return true;
       };
 
+      // County matcher — strips " County" suffix and lowercases on
+      // BOTH sides before comparison. Otherwise the AI's preferred
+      // output ("Frio") never matches the comp's stored value
+      // ("Frio County"), and every county-scoped search silently
+      // returns zero matches. This was the
+      // "show me 500+ acre comps frio county returned nothing" bug.
+      // Inlined (not using the component-level normalizeCounty) so
+      // there's no source-order dependency for this critical matcher.
+      const normCounty = (v: any) => String(v ?? '')
+        .toLowerCase()
+        .replace(/\bcounty\b/g, '')
+        .trim();
+      const matchesCounty = (val: any, allowed: string[] | null | undefined) => {
+        if (!allowed || allowed.length === 0) return true;
+        if (val == null) return false;
+        const normalized = normCounty(val);
+        return allowed.some((a) => normCounty(a) === normalized);
+      };
       const matchingIds = new Set<string>();
       for (const comp of comps) {
-        if (!matchesArr(comp.county, c.counties)) continue;
+        if (!matchesCounty(comp.county, c.counties)) continue;
         if (!matchesArr(comp.state, c.states)) continue;
         if (!matchesArr(comp.water, c.water)) continue;
         if (!matchesArr(comp.road_frontage, c.road_frontage)) continue;

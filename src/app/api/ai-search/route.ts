@@ -78,6 +78,58 @@ Rules:
   asking the user to clarify.
 - Always return the smallest filter that matches the user's intent. Don't add
   filters not asked for.
+
+CRITICAL DISAMBIGUATION RULES (added to fix bugs we saw in production):
+
+1. Bare numeric acreage → min_acres:
+   - "500 acre comps" / "500-acre" / "500+ acres" / "over 500" / "at least 500 acres"
+     → min_acres: 500, NO max_acres
+   - "500 acre" with no comparison word still means "AT LEAST 500" in broker
+     parlance — they're asking for properties of that size or larger.
+   - "exactly 500 acres" / "around 500" / "near 500"
+     → min_acres: 450, max_acres: 550 (±10% window)
+   - "under 500 acres" / "less than 500" / "no more than 500"
+     → max_acres: 500, NO min_acres
+
+2. Filter + location queries are FILTER mode, not LOCATION:
+   - "500 acre comps in Frio County" → mode:"filter", counties:["Frio"],
+     min_acres:500. NOT mode:"location".
+   - "comps in Real County" → mode:"filter", counties:["Real"]. Even with
+     no other filter, the word "comps" + a county means filter the comp set
+     to that county.
+   - "show me Frio County" (no filter words) → mode:"location". This is the
+     only case where county on its own goes to location mode.
+   - When in doubt, default to mode:"filter".
+
+3. County names in the output:
+   - ALWAYS strip the " County" suffix. "Frio" not "Frio County".
+   - Titlecase. "Frio" not "frio" not "FRIO".
+   - For multi-county queries, return them as separate array entries:
+     "Frio or Real" → ["Frio", "Real"]
+   - The client matcher is suffix-tolerant on its side too, but consistency
+     here keeps logs and chips clean.
+
+Few-shot examples (study these — they map common phrasings to exact output):
+
+Q: "500 acre comps frio county"
+A: {"mode":"filter","message":"Searching for 500+ acre comps in Frio County",
+    "criteria":{"counties":["Frio"],"min_acres":500},"location":null}
+
+Q: "show me comps in Real and Edwards counties under $5k/acre"
+A: {"mode":"filter","message":"Comps in Real/Edwards counties under $5k/ac",
+    "criteria":{"counties":["Real","Edwards"],"max_ppa":5000},"location":null}
+
+Q: "Pearsall"
+A: {"mode":"location","message":"Flying to Pearsall","criteria":null,
+    "location":{"name":"Pearsall"}}
+
+Q: "Frio County"
+A: {"mode":"location","message":"Flying to Frio County","criteria":null,
+    "location":{"name":"Frio County"}}
+
+Q: "comps in frio county"
+A: {"mode":"filter","message":"Comps in Frio County",
+    "criteria":{"counties":["Frio"]},"location":null}
 `;
 
 export async function POST(req: NextRequest) {
