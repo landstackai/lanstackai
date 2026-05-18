@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2 } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -80,6 +80,11 @@ export default function MapPage() {
   const [overlays, setOverlays] = useState<{ floodplain: boolean }>({
     floodplain: false,
   });
+  // Advanced-filters popover (opens from the sliders icon next to the
+  // search bar). Holds the owner-search input + scope filter so we can
+  // collapse the two top-of-map search bars into one without losing the
+  // owner-search and scope-toggle capabilities.
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [mapLoaded, setMapLoaded] = useState(false);
 
   const [mapMode, setMapMode] = useState<MapMode>('view');
@@ -2984,7 +2989,11 @@ export default function MapPage() {
           </div>
         )}
 
-        {/* Chat bar — natural-language queries to filter comps or fly to places */}
+        {/* Search bar — single input that drives the AI search (filter +
+            location + place). Owner search and scope filter live in the
+            advanced-filters popover opened by the sliders button to the
+            right of the input. Consolidates what used to be two stacked
+            bars into one row of map chrome. */}
         <div className="absolute top-3 left-3 right-3 md:left-1/2 md:right-auto md:-translate-x-1/2 md:w-[36rem] z-20">
           <div className="relative">
             <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-300 pointer-events-none" />
@@ -3001,17 +3010,34 @@ export default function MapPage() {
                 }
               }}
               placeholder="Ask: show me all 400+ acre comps in Real County"
-              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
+              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-32 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
             />
             {searchQuery && (
               <button
                 onClick={() => { setSearchQuery(''); clearAiSearch(); }}
                 title="Clear"
-                className="absolute right-[5.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
               >
                 <X size={12} />
               </button>
             )}
+            {/* Filters button — opens the advanced-filter popover. Highlights
+                gold when any filter inside is active (owner search has
+                results, OR scope ≠ All) so brokers see at a glance that
+                they have a non-default filter on. */}
+            <button
+              onClick={() => setFiltersOpen((v) => !v)}
+              title="Advanced filters"
+              aria-expanded={filtersOpen}
+              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-lg text-[11px] font-bold transition-colors flex items-center gap-1 ${
+                ownerSearchCount !== null || mapScope !== 'all'
+                  ? 'bg-sage/20 hover:bg-sage/30 border-sage/40 text-sage'
+                  : 'bg-slate-500/10 hover:bg-slate-500/20 border-border text-slate-300 hover:text-white'
+              }`}
+            >
+              <SlidersHorizontal size={11} />
+              Filters
+            </button>
             <button
               onClick={askAi}
               disabled={askingAi || !searchQuery.trim()}
@@ -3033,61 +3059,140 @@ export default function MapPage() {
                 </button>
               </div>
             )}
-          </div>
-
-          {/* Owner search — find every TX parcel matching an owner name */}
-          <div className="relative mt-2">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-fuchsia-300 pointer-events-none" />
-            <input
-              type="text"
-              value={ownerSearchQuery}
-              onChange={(e) => setOwnerSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  (e.target as HTMLInputElement).blur();
-                } else if (e.key === 'Enter') {
-                  e.preventDefault();
-                  searchOwners();
-                }
-              }}
-              placeholder="Find parcels by owner (e.g. Grundhoefer Farms)"
-              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-fuchsia-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-fuchsia-400/30 transition-colors shadow-lg"
-            />
-            {(ownerSearchQuery || ownerSearchCount !== null) && (
-              <button
-                onClick={clearOwnerSearch}
-                title="Clear owner search"
-                className="absolute right-[5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
-              >
-                <X size={12} />
-              </button>
-            )}
-            <button
-              onClick={searchOwners}
-              disabled={ownerSearching || ownerSearchQuery.trim().length < 3}
-              title="Search parcels by owner name"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-fuchsia-500/25 hover:bg-fuchsia-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-fuchsia-400/40 hover:border-fuchsia-400 rounded-lg text-[11px] font-bold text-fuchsia-100 transition-colors flex items-center gap-1"
-            >
-              <Search size={11} />
-              {ownerSearching ? '…' : 'Find'}
-            </button>
+            {/* Owner-search result chip — lives below the bar same as the
+                AI result chip. Distinct fuchsia tint so brokers can tell
+                which kind of filter is active when both happen to be set. */}
             {ownerSearchCount !== null && (
-              <div className="absolute top-full mt-1 left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+              <div className={`absolute left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2 ${
+                aiResultMessage ? 'top-[calc(100%+2.5rem)]' : 'top-full mt-1'
+              }`}>
                 <p className="text-[11px] text-fuchsia-200 truncate">
                   {ownerSearchCount === 0
-                    ? `No matches for "${ownerSearchQuery}"`
-                    : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched${ownerSearchTruncated ? ' (showing first 200)' : ''}`}
+                    ? `No owner matches for "${ownerSearchQuery}"`
+                    : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched "${ownerSearchQuery}"${ownerSearchTruncated ? ' (first 200)' : ''}`}
                 </p>
                 <button
                   onClick={clearOwnerSearch}
                   className="text-fuchsia-300/80 hover:text-fuchsia-200 flex-shrink-0"
-                  title="Clear search"
+                  title="Clear owner search"
                 >
                   <X size={12} />
                 </button>
               </div>
             )}
           </div>
+
+          {/* ── Advanced filters popover ────────────────────────────────
+              Drops down from below the search bar. Holds the controls
+              that were previously top-of-map pills/bars: owner search
+              input + scope toggle. Designed to grow over time (acres
+              range, county multi-select, sold-after date, etc.) without
+              re-introducing always-visible chrome. */}
+          {filtersOpen && (
+            <div className="absolute top-full mt-2 left-0 right-0 bg-panel/95 backdrop-blur-md border border-border rounded-xl shadow-2xl p-3 z-30 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                  <SlidersHorizontal size={11} />
+                  Filters
+                </div>
+                <button
+                  onClick={() => setFiltersOpen(false)}
+                  className="text-slate-500 hover:text-white"
+                  title="Close filters"
+                  aria-label="Close filters"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              {/* Owner search — TX-wide parcel lookup by owner_name. Kept
+                  out of the AI bar above because it's a separate data
+                  source (TxGIO parcels statewide, not the comps table)
+                  and a separate code path. */}
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 flex items-center gap-1.5">
+                  <Search size={10} />
+                  Search by owner
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={ownerSearchQuery}
+                    onChange={(e) => setOwnerSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        (e.target as HTMLInputElement).blur();
+                      } else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        searchOwners();
+                      }
+                    }}
+                    placeholder="e.g. Grundhoefer Farms"
+                    disabled={ownerSearching}
+                    className="w-full bg-night/60 border border-border focus:border-fuchsia-400 rounded-lg px-2.5 py-1.5 pr-20 text-xs text-white placeholder-slate-500 outline-none disabled:opacity-50"
+                  />
+                  {(ownerSearchQuery || ownerSearchCount !== null) && (
+                    <button
+                      onClick={clearOwnerSearch}
+                      title="Clear owner search"
+                      className="absolute right-[4.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                  <button
+                    onClick={searchOwners}
+                    disabled={ownerSearching || ownerSearchQuery.trim().length < 3}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-fuchsia-500/25 hover:bg-fuchsia-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-fuchsia-400/40 rounded text-[10px] font-bold text-fuchsia-100 flex items-center gap-1"
+                  >
+                    {ownerSearching ? <Loader2 size={10} className="animate-spin" /> : <Search size={10} />}
+                    Find
+                  </button>
+                </div>
+              </div>
+
+              {/* Scope filter — moved out of the standalone pill row.
+                  Hidden in CMA workspace (which filters to its own comps).
+                  All / Company / Mine remains a quick toggle since brokers
+                  switch between scopes frequently. */}
+              {!viewingCMA && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 block">
+                    Scope
+                  </label>
+                  <div className="bg-night/60 border border-border rounded-lg overflow-hidden grid grid-cols-3">
+                    <button
+                      onClick={() => setMapScope('all')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Show every comp you have access to"
+                    >
+                      All
+                    </button>
+                    <button
+                      onClick={() => setMapScope('company')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Only comps marked as Company Transaction"
+                    >
+                      Company
+                    </button>
+                    <button
+                      onClick={() => setMapScope('mine')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Only deals you personally closed"
+                    >
+                      My Sales
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Map controls */}
@@ -3145,39 +3250,11 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Scope filter — All / Company / Mine. Hidden in CMA workspace
-              (which already filters to its own comps). */}
-          {!viewingCMA && (
-            <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-3 w-[17rem]">
-              <button
-                onClick={() => setMapScope('all')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Show every comp you have access to"
-              >
-                All
-              </button>
-              <button
-                onClick={() => setMapScope('company')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Only comps marked as Company Transaction (deals the firm handled)"
-              >
-                Company
-              </button>
-              <button
-                onClick={() => setMapScope('mine')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Only deals you personally closed (tagged as the transaction agent)"
-              >
-                My Sales
-              </button>
-            </div>
-          )}
+          {/* Scope filter (All / Company / Mine) moved into the Filters
+              popover next to the search bar — one less always-visible
+              pill. Active scope still shows on the Filters button itself
+              (gold tint when scope ≠ All) so brokers see at a glance
+              that a non-default filter is on. */}
 
           {/* Parcel mode button */}
           {mapMode === 'view' && !drawingActive && (
