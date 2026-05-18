@@ -493,8 +493,14 @@ export default function ReviewPage() {
       const acresStr = displayAcres != null
         ? `${displayAcres.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`
         : '— ac';
+      // Generic "Boundary" label (not "Comp boundary") so the same
+      // hover treatment is reusable across surfaces — comps today,
+      // marketplace listings / CMA subject tracts / drawn boundaries
+      // later. The label is the affordance ("this polygon represents a
+      // boundary, here are the acres"); the context (which boundary,
+      // which property) lives in the side panel and page chrome.
       detachHover = attachHoverPopup(m, 'comp-boundary-fill', () =>
-        `<div style="font-weight:700;color:#facc15;">Comp boundary</div>` +
+        `<div style="font-weight:700;color:#facc15;">Boundary</div>` +
         `<div style="color:#cbd5e1;">${acresStr}</div>`
       );
 
