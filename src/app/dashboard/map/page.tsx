@@ -2385,14 +2385,23 @@ export default function MapPage() {
 
   // Normalize a county string for comparison — strips "County" suffix,
   // collapses whitespace, lowercases. So "Frio County" / "frio" / "FRIO"
-  // all match the same bucket. Used both for the unique-counties list
-  // (deduping) and for filter matching against comp.county.
+  // all match the same bucket.
   const normalizeCounty = (raw: any): string => {
     return String(raw ?? '')
       .toLowerCase()
       .replace(/\bcounty\b/g, '')
       .trim();
   };
+  // Split a compound county string into individual normalized counties.
+  // "Frio and Medina" / "Atascosa & Frio" / "Atascosa, Wilson" all become
+  // ['frio','medina'] / ['atascosa','frio'] / ['atascosa','wilson'].
+  // Used so a multi-county comp shows up under BOTH counties in the
+  // filter picker (once each) AND matches when EITHER county is filtered —
+  // while still being a single row, single pin on the map.
+  const splitCounties = (raw: any): string[] => String(raw ?? '')
+    .split(/\s+and\s+|\s*&\s*|\s*,\s*/i)
+    .map(normalizeCounty)
+    .filter(Boolean);
 
   // When viewing a CMA, restrict everything to its selected comps.
   // Otherwise apply the map-level scope + county filters.
@@ -2404,29 +2413,48 @@ export default function MapPage() {
         // created_by (who typed it in). Research comps you entered but didn't
         // sell stay out of this view.
         if (mapScope === 'mine' && !(currentUserId != null && (c as any).transaction_agent_id === currentUserId)) return false;
-        if (countyFilter.size > 0 && !countyFilter.has(normalizeCounty(c.county))) return false;
+        // County filter: split compound county strings ("Frio and Medina")
+        // so the comp matches whenever ANY of its counties is in the
+        // filter set. One comp, one pin — but appears under multiple
+        // county filters (broker mental model: the property is in both).
+        if (countyFilter.size > 0) {
+          const compCounties = splitCounties(c.county);
+          const hit = compCounties.some((cc) => countyFilter.has(cc));
+          if (!hit) return false;
+        }
         return true;
       });
 
   // Distinct counties present in the user's comps — drives the county
-  // multi-select in the Filters popover. Sorted alphabetically for a
-  // predictable list. Computed from the unfiltered `comps` pool so the
-  // picker doesn't shrink as filters tighten (which would trap brokers
-  // in narrowing dead-ends).
+  // multi-select in the Filters popover. Sorted alphabetically with a
+  // per-county comp count so brokers see at a glance where their data
+  // lives. Computed from the unfiltered `comps` pool so the picker
+  // doesn't shrink as filters tighten (which would trap brokers in
+  // narrowing dead-ends).
+  //
+  // Compound county strings ("Frio and Medina", "Atascosa & Frio") are
+  // SPLIT into individual counties — that comp contributes +1 to BOTH
+  // Frio and Medina in the picker. The comp itself is still one row /
+  // one pin on the map, but appears under either county's filter. This
+  // matches the broker's mental model: the property is in both
+  // counties, so it should be findable under either one.
   const availableCounties = (() => {
-    const seen = new Map<string, string>(); // normalized -> display
+    const seen = new Map<string, { display: string; count: number }>();
+    const titleCase = (s: string) =>
+      s.split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
     for (const c of comps) {
-      const norm = normalizeCounty(c.county);
-      if (!norm) continue;
-      // Preserve the first nice-looking version we see for display
-      // (e.g. "Frio" not "FRIO"), but key on normalized for dedupe.
-      if (!seen.has(norm)) {
-        const display = String(c.county || '').replace(/\bcounty\b/gi, '').trim();
-        seen.set(norm, display);
+      for (const norm of splitCounties(c.county)) {
+        if (!norm) continue;
+        const existing = seen.get(norm);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          seen.set(norm, { display: titleCase(norm), count: 1 });
+        }
       }
     }
     return Array.from(seen.entries())
-      .map(([norm, display]) => ({ norm, display }))
+      .map(([norm, { display, count }]) => ({ norm, display, count }))
       .sort((a, b) => a.display.localeCompare(b.display));
   })();
 
@@ -3266,8 +3294,15 @@ export default function MapPage() {
                             }}
                             className="w-3 h-3 accent-emerald-400"
                           />
-                          <span className={`text-[11px] ${checked ? 'text-emerald-300 font-bold' : 'text-slate-300'}`}>
+                          <span className={`text-[11px] flex-1 ${checked ? 'text-emerald-300 font-bold' : 'text-slate-300'}`}>
                             {c.display}
+                          </span>
+                          {/* Comp count — helps brokers see where their
+                              working data actually lives. Multi-county
+                              comps are counted in each of their counties
+                              (so totals can exceed comps.length). */}
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {c.count}
                           </span>
                         </label>
                       );
