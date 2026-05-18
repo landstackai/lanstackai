@@ -663,6 +663,15 @@ export default function ImportPage() {
     return patterns.filter(p => p.test(text)).length >= 3;
   };
 
+  // Detect when the user pasted JUST a URL (no surrounding text). When true,
+  // we route to /api/import-url instead of the document-extraction path
+  // because listing pages are a different shape of data than appraisals.
+  const isStandaloneUrl = (text: string): boolean => {
+    const t = text.trim();
+    if (t.length < 10 || t.length > 2000) return false;
+    return /^https?:\/\/[^\s]+$/i.test(t);
+  };
+
   const sendMessage = async (
     text: string,
     fileContent?: string,
@@ -987,6 +996,10 @@ export default function ImportPage() {
       // details). insertCompResilient transparently retries without this
       // column if migration 021 hasn't been applied yet — no hard dependency.
       aerial_image: (comp as any).aerialImage || null,
+      // Source provenance — see migration 022. insertCompResilient drops
+      // these gracefully if the columns don't exist.
+      source_type: (comp as any).source_type || 'pdf_appraisal',
+      source_url: (comp as any).source_url || null,
     });
 
     if (error || !inserted) return false;
@@ -1358,9 +1371,111 @@ export default function ImportPage() {
     }
   };
 
+  // Extract a comp from a listing URL via /api/import-url. Mirrors the
+  // sendMessage flow (renders a chat bubble + queues the comp into
+  // pendingComps so the verification card appears), but uses the URL-
+  // specific server endpoint and skips the OpenAI image-extraction
+  // call entirely. The server side handles fetch + HTML parsing + AI
+  // cleanup; we get back a partial comp ready for the verification card.
+  //
+  // Same downstream as PDF imports: comp lands in a chat message, the
+  // verification card renders, broker clicks Looks right / Needs review.
+  const extractFromUrl = async (url: string) => {
+    const userMessage: Message = {
+      role: 'user',
+      content: `[Listing URL]\n${url}`,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      const response = await fetch('/api/import-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+
+      if (!response.ok) {
+        let hint = 'Unknown error.';
+        try {
+          const err = await response.json();
+          hint = err?.hint || err?.error || hint;
+        } catch {}
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `Couldn't extract from this URL. ${hint}\n\nTip: if the site blocks automated fetches, copy the listing text and paste it into this chat instead.`,
+          timestamp: new Date().toISOString(),
+        }]);
+        return;
+      }
+
+      const data = await response.json();
+      const comp = data?.comp;
+      if (!comp) {
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `The server fetched the page but couldn't extract a comp from it.`,
+          timestamp: new Date().toISOString(),
+        }]);
+        return;
+      }
+
+      // Run autoLocate if the listing didn't include explicit coords
+      // (which most don't). Same wrapper the PDF flow uses so diagnostic
+      // logging still captures the run.
+      if (comp.latitude == null || comp.longitude == null) {
+        try {
+          const located = await autoLocateInBrowserLogged(comp);
+          if (located) {
+            comp.latitude = located.latitude;
+            comp.longitude = located.longitude;
+            comp.parcel_id = located.parcel_id ?? comp.parcel_id;
+            (comp as any).geometry = located.geometry;
+            (comp as any)._auto_located_confidence = located.match_confidence;
+          }
+        } catch (e: any) {
+          console.warn('[extractFromUrl] autoLocate threw:', e?.message);
+        }
+      }
+
+      const hostname = (() => {
+        try { return new URL(url).hostname; } catch { return 'listing'; }
+      })();
+      const completionNote = comp.needs_completion
+        ? ` ${comp.missing_fields?.length ? `Missing: ${comp.missing_fields.join(', ')}.` : ''} Complete these before saving as a comp.`
+        : '';
+
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        content: `Extracted listing data from ${hostname}.${completionNote}`,
+        timestamp: new Date().toISOString(),
+        comps: [comp as ExtractedComp],
+      }]);
+      setPendingComps((prev) => [...prev, comp as ExtractedComp]);
+    } catch (e: any) {
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        content: `Error fetching that URL: ${e?.message || 'unknown'}. Try pasting the listing text instead.`,
+        timestamp: new Date().toISOString(),
+      }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!input.trim() || loading) return;
-    await sendMessage(input.trim());
+    const text = input.trim();
+    // Standalone URL → listing-extraction path. Anything else (free text,
+    // pasted appraisal body) goes through the existing chat-extraction
+    // path which handles both AI Q&A and structured extraction.
+    if (isStandaloneUrl(text)) {
+      await extractFromUrl(text);
+    } else {
+      await sendMessage(text);
+    }
   };
 
   // saveComp persists a comp to the vault. Caller controls intent via opts:
@@ -1428,6 +1543,12 @@ export default function ImportPage() {
       // multi-comp PDFs, text-only appraisals, or extraction failures.
       // See docs/DESIGN_DECISIONS.md §5 (review page architecture).
       aerial_image: (comp as any).aerialImage || null,
+      // Track where this comp came from so the vault can render a "from
+      // listing" indicator and the broker can click through to the source.
+      // 'pdf_appraisal' for PDF imports, 'listing_url' for URL imports,
+      // NULL for legacy / manual. See migration 022.
+      source_type: (comp as any).source_type || 'pdf_appraisal',
+      source_url: (comp as any).source_url || null,
     });
 
     if (error) {
@@ -1641,13 +1762,31 @@ export default function ImportPage() {
                         ? mapboxStaticUrl({ lat: sourceLatLng.lat, lng: sourceLatLng.lng, zoom: 14 })
                         : null;
 
+                      // Listing-sourced comps render with a distinguishing
+                      // "From listing" badge + a missing-fields warning so
+                      // the broker knows it needs completion before save.
+                      const isListing = (comp as any).source_type === 'listing_url';
+                      const sourceUrl = (comp as any).source_url as string | undefined;
+                      const missingFields = (comp as any).missing_fields as string[] | undefined;
+                      const needsCompletion = (comp as any).needs_completion === true;
+
                       return (
                       <div key={ci} className="bg-night border border-border rounded-xl p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
-                            <p className="text-sm font-bold text-white">
-                              {comp.property_name || `${comp.county} County — ${comp.acres} ac`}
-                            </p>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-sm font-bold text-white">
+                                {comp.property_name || `${comp.county} County — ${comp.acres} ac`}
+                              </p>
+                              {isListing && (
+                                <span
+                                  className="text-[9px] uppercase tracking-wide bg-sky-500/15 text-sky-300 border border-sky-500/30 rounded px-1.5 py-0.5"
+                                  title={sourceUrl ? `Source: ${sourceUrl}` : 'Extracted from a listing URL'}
+                                >
+                                  From listing
+                                </span>
+                              )}
+                            </div>
                             <p className="text-xs text-slate-400 mt-0.5">
                               {comp.county}, {comp.state} · {comp.acres} acres
                             </p>
@@ -1670,6 +1809,20 @@ export default function ImportPage() {
                             <span className="text-xs text-slate-500">{comp.confidence.overall}%</span>
                           </div>
                         </div>
+
+                        {/* Missing-fields warning — listings rarely include
+                            sold price, sold date, grantor/grantee, recording
+                            info. Surface what's missing so broker fills it
+                            in before clicking Looks right. */}
+                        {needsCompletion && missingFields && missingFields.length > 0 && (
+                          <div className="mt-2 p-2 bg-amber-500/10 border border-amber-500/30 rounded text-[11px] text-amber-200">
+                            <span className="font-bold">Missing fields:</span>{' '}
+                            {missingFields.join(', ')}
+                            <span className="block text-amber-200/70 mt-0.5">
+                              Edit in the vault to fill these in — listings don't include sold price / deed records.
+                            </span>
+                          </div>
+                        )}
 
                         {/* Side-by-side thumbnails: source vs system match */}
                         <div className="mt-3 grid grid-cols-2 gap-2">
