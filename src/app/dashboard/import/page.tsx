@@ -18,7 +18,7 @@ import { pdfToImages } from '@/lib/utils/pdfToImages';
 // whose summed acreage matches the appraisal within 50%.
 //
 // Returns { latitude, longitude, parcel_id, geometry, match_reason } or null.
-async function autoLocateInBrowser(comp: any): Promise<{
+async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): Promise<{
   latitude: number;
   longitude: number;
   parcel_id: string | null;
@@ -28,11 +28,17 @@ async function autoLocateInBrowser(comp: any): Promise<{
 } | null> {
   const acres = Number(comp?.acres);
   const county = String(comp?.county || '').trim();
-  if (!Number.isFinite(acres) || acres <= 0 || !county) return null;
+  if (!Number.isFinite(acres) || acres <= 0 || !county) {
+    if (_diag) _diag.reject_reason = 'missing_acres_or_county';
+    return null;
+  }
 
   const ownerSignals = [comp.grantee, comp.grantor, comp.property_name]
     .filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
-  if (ownerSignals.length === 0) return null;
+  if (ownerSignals.length === 0) {
+    if (_diag) _diag.reject_reason = 'no_owner_signals';
+    return null;
+  }
 
   // @ts-expect-error — turf v6.5 .d.ts not exposed
   const turf = await import('@turf/turf') as any;
@@ -78,6 +84,19 @@ async function autoLocateInBrowser(comp: any): Promise<{
       return allTokens.every((t) => own.includes(t));
     });
     console.log(`[client-autoLocate] "${owner}" → ${features.length} raw, ${tight.length} tight`);
+
+    // Per-signal diagnostic capture — useful for analyzing which owner
+    // signals (grantee vs grantor vs property_name) tend to find vs fail.
+    if (_diag) {
+      _diag.owner_search_data = _diag.owner_search_data || [];
+      _diag.owner_search_data.push({
+        signal: owner,
+        tokens: allTokens,
+        raw_count: features.length,
+        tight_count: tight.length,
+      });
+    }
+
     if (tight.length === 0) continue;
 
     // Cluster by centroid distance (~1mi threshold)
@@ -197,6 +216,21 @@ async function autoLocateInBrowser(comp: any): Promise<{
       if (c?.geometry?.coordinates) pinCoords = c.geometry.coordinates;
     } catch {}
 
+    // Capture winning cluster details for diagnostics — useful for
+    // "which cluster size wins most often" and "how often does the
+    // winning cluster have multiple alternatives within tolerance"
+    // type queries.
+    if (_diag) {
+      _diag.cluster_data = {
+        cluster_count: clusters.length,
+        picked_parcel_count: winner.c.parcels.length,
+        picked_acres: winner.c.totalAcres,
+        picked_delta: winner.delta,
+        winning_signal: owner,
+        alternatives_within_tolerance: matched.length,
+      };
+    }
+
     return {
       latitude: pinCoords[1],
       longitude: pinCoords[0],
@@ -208,6 +242,105 @@ async function autoLocateInBrowser(comp: any): Promise<{
   }
 
   return null;
+}
+
+// Type for the optional diagnostic collector that autoLocateInBrowser fills
+// in as it runs. The wrapper below builds it up + POSTs to the diagnostic
+// endpoint at the end of each call.
+type AutoLocateDiagCollector = {
+  reject_reason?: string;
+  owner_search_data?: Array<{
+    signal: string;
+    tokens: string[];
+    raw_count: number;
+    tight_count: number;
+  }>;
+  cluster_data?: {
+    cluster_count: number;
+    picked_parcel_count: number;
+    picked_acres: number;
+    picked_delta: number;
+    winning_signal: string;
+    alternatives_within_tolerance: number;
+  };
+};
+
+// Wrapper around autoLocateInBrowser that captures input + per-stage data
+// + outcome and POSTs a diagnostic row (fire-and-forget). Use this from
+// import flows instead of calling autoLocateInBrowser directly.
+//
+// Hard rule: this function NEVER throws and NEVER blocks. Even if the
+// diagnostic POST fails or the wrapped call throws, the user-facing
+// pipeline gets back whatever autoLocateInBrowser would have returned
+// (or null on error). Observability is invisible to the user.
+async function autoLocateInBrowserLogged(comp: any) {
+  const diag: AutoLocateDiagCollector = {};
+  const startMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  let result: Awaited<ReturnType<typeof autoLocateInBrowser>> = null;
+  let threw = false;
+  try {
+    result = await autoLocateInBrowser(comp, diag);
+  } catch (e: any) {
+    threw = true;
+    console.warn('[autoLocate] threw:', e?.message);
+  }
+  const ms_total = Math.round(
+    (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startMs
+  );
+
+  // Decide exit_stage. Order matters — error trumps everything else.
+  let exit_stage: string;
+  if (threw) {
+    exit_stage = 'error';
+  } else if (result) {
+    exit_stage = 'owner_search_cluster';
+  } else if (diag.reject_reason) {
+    exit_stage = 'manual_placeholder';
+  } else {
+    exit_stage = 'owner_search_null';
+  }
+
+  const payload = {
+    input_acres: Number(comp?.acres) || null,
+    input_sale_price: Number(comp?.sale_price) || null,
+    input_ppa: Number(comp?.price_per_acre) || null,
+    input_grantee: comp?.grantee || null,
+    input_grantor: comp?.grantor || null,
+    input_property_name: comp?.property_name || null,
+    input_county: comp?.county || null,
+    input_lat: typeof comp?.latitude === 'number' ? comp.latitude : null,
+    input_lng: typeof comp?.longitude === 'number' ? comp.longitude : null,
+    input_has_aerial: Boolean(comp?.aerialImage),
+    input_has_description: Boolean(
+      typeof comp?.description === 'string' && comp.description.trim().length > 0
+    ),
+    exit_stage,
+    owner_search_data: diag.owner_search_data || null,
+    cluster_data: diag.cluster_data || null,
+    final_pin_lat: result?.latitude ?? null,
+    final_pin_lng: result?.longitude ?? null,
+    final_parcel_ids: result?.parcel_id
+      ? String(result.parcel_id).split(',').filter(Boolean)
+      : null,
+    final_cluster_acres: diag.cluster_data?.picked_acres ?? null,
+    final_confidence: result?.match_confidence ?? null,
+    final_match_reason: result?.match_reason ?? null,
+    ms_total,
+  };
+
+  // Fire-and-forget. NEVER await, NEVER throw upward.
+  try {
+    void fetch('/api/diagnostics/autolocate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true, // survives the page-navigation race
+    }).catch(() => { /* swallow */ });
+  } catch {
+    // Even constructing the fetch shouldn't be able to throw, but be defensive
+  }
+
+  return result;
 }
 
 interface Message {
@@ -296,7 +429,7 @@ export default function ImportPage() {
             continue;
           }
           try {
-            const located = await autoLocateInBrowser(c);
+            const located = await autoLocateInBrowserLogged(c);
             if (located) {
               console.log(`[import] auto-locate ✓ ${label}: ${located.match_reason}`);
               toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
@@ -449,7 +582,7 @@ export default function ImportPage() {
       // because function-to-self URLs don't hit the edge cache. Re-run from
       // here where /api/parcels-by-owner cache hits work.
       for (let i = 0; i < comps.length; i++) {
-        const located = await autoLocateInBrowser(comps[i]);
+        const located = await autoLocateInBrowserLogged(comps[i]);
         if (located) {
           console.log(`[batch] auto-located ${comps[i].property_name || comps[i].county}: ${located.match_reason}`);
           comps[i] = {
@@ -802,7 +935,7 @@ export default function ImportPage() {
         continue;
       }
       try {
-        const located = await autoLocateInBrowser(c);
+        const located = await autoLocateInBrowserLogged(c);
         if (located) {
           dedupedComps[i] = {
             ...c,
