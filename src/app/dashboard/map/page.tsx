@@ -8,7 +8,6 @@ import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils'
 import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Layers, Waves } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
-import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
 import * as turf from '@turf/turf';
 import CompModal from '@/components/comp/CompModal';
@@ -77,10 +76,6 @@ export default function MapPage() {
     floodplain: false,
   });
   const [mapLoaded, setMapLoaded] = useState(false);
-  // Shared parcel-hover popup (id.land-style — cursor over a parcel
-  // surfaces owner + acreage). Same hook backs the review page so the
-  // tooltip look + lifecycle is consistent across surfaces.
-  const { attach: attachHoverPopup, removePopup: removeHoverPopup } = useMapHover();
 
   const [mapMode, setMapMode] = useState<MapMode>('view');
   const [sheetMode, setSheetMode] = useState<SheetMode>('none');
@@ -1446,29 +1441,9 @@ export default function MapPage() {
         },
       });
 
-      // Hover tooltip on the TxGIO vector parcels. Lives here (not in the
-      // load-time hover effect above) because this layer is added lazily
-      // on first viewport-into-zoom-13 — the load-time effect would have
-      // skipped it. Attached ONCE the first time the source is created;
-      // subsequent panning swaps the source data via setData but keeps
-      // the same layer id, so this handler keeps working for the life of
-      // the map.
-      attachHoverPopup(map.current, 'txgio-bbox-fill', (f: any) => {
-        const p = f.properties || {};
-        const owner = escHtml(p.owner_name || 'Unknown owner');
-        const acres = Number(p.gis_area);
-        const acresStr = Number.isFinite(acres) && acres > 0
-          ? `${acres.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`
-          : '— ac';
-        const county = p.county
-          ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px;">${escHtml(String(p.county).replace(/\b\w/g, (c: string) => c.toUpperCase()))}</div>`
-          : '';
-        return (
-          `<div style="font-weight:700;color:#ffffff;max-width:260px;white-space:normal;">${owner}</div>` +
-          `<div style="color:#cbd5e1;">${acresStr}</div>` +
-          county
-        );
-      });
+      // (TxGIO parcel hover tooltip removed per broker feedback.
+      // Click still surfaces full parcel info via the existing
+      // map-click → bottom sheet flow.)
     }
 
     let timer: any = null;
@@ -2476,83 +2451,20 @@ export default function MapPage() {
     }
   }, [overlays, mapLoaded]);
 
-  // ── Parcel + boundary hover tooltips ────────────────────────────────
-  // id.land-style: cursor over any vector polygon shows owner + acres in
-  // a small dark tooltip that follows the pointer. Wired ONCE at
-  // map-load against the layers added inside the map 'load' callback —
-  // those layers (cma-subject-fill, comp-boundary-fill, selected-parcel-
-  // fill, owner-search-fill, cad-blanco-fill) exist for the lifetime of
-  // the map. The txgio-bbox-fill layer is added dynamically by the
-  // viewport-driven parcel-fetch effect; its hover is attached inline
-  // there so it wires up the first time that layer exists.
+  // ── Comp boundary hover tooltip ──────────────────────────────────────
+  // Parcel hover tooltips (owner + acres on TxGIO / Blanco CAD / owner-
+  // search / selected / tapped / CMA subject / merged) were removed per
+  // broker feedback — they cluttered the map without adding signal
+  // brokers needed in flow. Owner lookups stay available via the owner-
+  // search input + the per-comp parcel list in the side panel.
   //
-  // Helper formats a number-of-acres as "NNN.N ac" with thousand-
-  // separators, or "— ac" when null. Hoist so each per-layer attach
-  // can reuse it without redefining.
+  // The COMP boundary hover stays because it surfaces the rich price /
+  // acres / $/ac card that the comp marker hover already shows — same
+  // popup, two ways to trigger it. Worth the on-hover cost because the
+  // info isn't visible anywhere else on the map by default.
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
     const m = map.current;
-
-    const fmtAc = (n: any): string => {
-      const v = Number(n);
-      if (!Number.isFinite(v) || v <= 0) return '— ac';
-      return `${v.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`;
-    };
-
-    // Generic "owner + acres + status" builder — same pattern as the
-    // review page uses. Status is a small uppercase tag at the bottom
-    // ("selected", "owner match", "comp", "subject") so the broker
-    // doesn't have to memorize the color legend.
-    const ownerAcresContent = (status: string) => (f: any) => {
-      const p = f.properties || {};
-      const owner = escHtml(p.owner_name || p.file_as_name || 'Unknown owner');
-      // gis_area (TxGIO) | legal_acreage (Blanco CAD) | acres (comp)
-      const acres = fmtAc(p.gis_area ?? p.legal_acreage ?? p.acres);
-      const statusHtml = status
-        ? `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">${escHtml(status)}</div>`
-        : '';
-      return (
-        `<div style="font-weight:700;color:#ffffff;max-width:260px;white-space:normal;">${owner}</div>` +
-        `<div style="color:#cbd5e1;">${acres}</div>` +
-        statusHtml
-      );
-    };
-
-    // NOTE: comp-boundary-fill is NOT in the dark-tooltip layerConfigs
-    // below. Hovering a comp boundary should trigger the SAME rich
-    // .comp-hover-popup card that hovering its pin shows — one canonical
-    // comp preview, two ways to trigger it. That's wired separately
-    // below this block via compPopupsRef.
-
-    const detachers: Array<() => void> = [];
-    // Order matters subtly: layers stacked later in the style sit on top,
-    // so when overlapping (e.g. owner-search hits sitting over txgio-bbox)
-    // the top layer's hover wins. attachHoverPopup walks the topmost
-    // matching feature, so this gives broker the most-specific label.
-    const layerConfigs: Array<[string, (f: any) => string]> = [
-      ['cad-blanco-fill', ownerAcresContent('')],
-      ['selected-parcel-fill', ownerAcresContent('selected')],
-      ['owner-search-fill', ownerAcresContent('owner match')],
-      ['tapped-parcel-highlight-fill', ownerAcresContent('tapped')],
-      ['cma-subject-fill', () =>
-        `<div style="font-weight:700;color:#facc15;">Subject tract</div>` +
-        `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">CMA</div>`
-      ],
-      ['merged-fill', () =>
-        `<div style="font-weight:700;color:#34d399;">Merged boundary</div>` +
-        `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">Drawn / merged</div>`
-      ],
-    ];
-    for (const [layerId, builder] of layerConfigs) {
-      // attachHoverPopup is a no-op when the layer doesn't exist at
-      // wire-time (e.g. cad-blanco-fill won't exist if the user never
-      // pans Blanco county). Mapbox throws on `on()` for missing layers
-      // but the hook swallows that via try/catch in its onMove handler.
-      // We still defensively check via getLayer to avoid the warning.
-      if (m.getLayer(layerId)) {
-        detachers.push(attachHoverPopup(m, layerId, builder));
-      }
-    }
 
     // ─── Comp boundary hover: reuse the marker's rich .comp-hover-popup
     //
@@ -2608,15 +2520,13 @@ export default function MapPage() {
     }
 
     return () => {
-      for (const d of detachers) { try { d(); } catch {} }
-      try { removeHoverPopup(); } catch {}
       try { m.off('mousemove', 'comp-boundary-fill', boundaryHoverEnter); } catch {}
       try { m.off('mouseleave', 'comp-boundary-fill', boundaryHoverLeave); } catch {}
       if (activeBoundaryCompId) {
         try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
       }
     };
-  }, [mapLoaded, attachHoverPopup, removeHoverPopup]);
+  }, [mapLoaded]);
 
   // Comp markers
   useEffect(() => {

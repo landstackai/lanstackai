@@ -36,7 +36,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import * as turf from '@turf/turf';
 import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
-import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
+import { useMapHover } from '@/lib/hooks/useMapHover';
 import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
@@ -630,31 +630,12 @@ export default function ReviewPage() {
     m.on('mouseenter', 'owner-matches-fill', handleEnter);
     m.on('mouseleave', 'owner-matches-fill', handleLeave);
 
-    // Hover tooltips: show owner + acreage for every layer the cursor
-    // can land on. setData() swaps below preserve the layer ids, so a
-    // single attach here covers the full lifetime of reselect mode.
-    // Status word in the tooltip ("selected", "match", or blank) tells
-    // the broker WHY this parcel is rendered without them having to
-    // memorize the color legend.
-    const buildContent = (status: string) => (f: any) => {
-      const p = f.properties || {};
-      const owner = escHtml(p.owner_name || 'Unknown owner');
-      const acres = Number(p.gis_area);
-      const acresStr = Number.isFinite(acres) && acres > 0
-        ? `${acres.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`
-        : '— ac';
-      const statusHtml = status
-        ? `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">${escHtml(status)}</div>`
-        : '';
-      return (
-        `<div style="font-weight:700;color:#ffffff;max-width:240px;white-space:normal;">${owner}</div>` +
-        `<div style="color:#cbd5e1;">${acresStr}</div>` +
-        statusHtml
-      );
-    };
-    const detachNearbyHover = attachHoverPopup(m, 'nearby-parcels-fill', buildContent(''));
-    const detachOwnerHover = attachHoverPopup(m, 'owner-matches-fill', buildContent('owner match'));
-    const detachSelectedHover = attachHoverPopup(m, 'selected-parcels-fill', buildContent('selected'));
+    // NOTE: parcel hover tooltips removed per broker feedback - owner
+    // names cluttered the map. Brokers find what they need via the
+    // owner-search input + the side-panel parcel list; on-map hover
+    // doesn't add enough signal to justify the visual noise. The
+    // boundary hover ("Boundary · NNN ac" on the gold comp polygon)
+    // is kept since it surfaces info that isn't visible elsewhere.
 
     return () => {
       // The captured `m` reference may point to a destroyed map by the
@@ -667,9 +648,6 @@ export default function ReviewPage() {
       try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
       try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
       try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
-      try { detachNearbyHover(); } catch {}
-      try { detachOwnerHover(); } catch {}
-      try { detachSelectedHover(); } catch {}
       try { removeHoverPopup(); } catch {}
       try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
