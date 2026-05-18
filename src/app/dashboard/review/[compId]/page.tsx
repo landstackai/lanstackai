@@ -27,13 +27,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import mapboxgl from 'mapbox-gl';
+import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // Mapbox CSS is loaded globally in src/app/layout.tsx via a <link> tag
 // from Mapbox's CDN. No local import needed (and the local import was
 // failing on some builds — known Next.js + node_modules CSS interaction
-// quirk).
+// quirk). MapboxDraw CSS is also loaded globally there.
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2 } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -84,11 +85,15 @@ export default function ReviewPage() {
   // on first render; toggled via the button on the panel edge.
   const [panelOpen, setPanelOpen] = useState(true);
 
-  // Editing mode for the workspace. 'view' = read-only (Stage A behavior).
-  // 'reselect' = parcel-selection mode (Stage B): broker clicks parcels on
-  // the map to add/remove them from the cluster; save merges and writes
-  // the new boundary back to the comp.
-  const [mode, setMode] = useState<'view' | 'reselect'>('view');
+  // Editing mode for the workspace.
+  //   'view'     — read-only (Stage A behavior)
+  //   'reselect' — parcel-selection mode (Stage B): broker clicks TxGIO
+  //                parcels to add/remove them from the cluster
+  //   'draw'     — freehand polygon draw (Stage C): broker draws a new
+  //                boundary from scratch via MapboxDraw, for cases where
+  //                TxGIO doesn't have the right parcels (subdivisions,
+  //                carve-outs, unrecorded boundary changes)
+  const [mode, setMode] = useState<'view' | 'reselect' | 'draw'>('view');
   // Parcels currently selected for the cluster (in reselect mode).
   // Stored as a Set of prop_id strings for O(1) toggle lookup.
   const [selectedPropIds, setSelectedPropIds] = useState<Set<string>>(new Set());
@@ -98,6 +103,12 @@ export default function ReviewPage() {
   const [nearbyParcels, setNearbyParcels] = useState<any[] | null>(null);
   const [loadingParcels, setLoadingParcels] = useState(false);
   const [reselectSaving, setReselectSaving] = useState(false);
+
+  // Draw mode (Stage C). Holds the user's drawn polygon feature once
+  // MapboxDraw's 'draw.create' event fires.
+  const drawRef = useRef<MapboxDraw | null>(null);
+  const [drawnFeature, setDrawnFeature] = useState<any | null>(null);
+  const [drawSaving, setDrawSaving] = useState(false);
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -677,6 +688,173 @@ export default function ReviewPage() {
     };
   })();
 
+  // ── Stage C: Draw new boundary mode ─────────────────────────────────
+  // Broker uses this when TxGIO doesn't have the right parcels at all —
+  // subdivisions, carve-outs, easements, unrecorded boundary changes.
+  // Uses MapboxDraw plugin (already installed at @mapbox/mapbox-gl-draw).
+  //
+  // Workflow:
+  //   1. Click 'Draw new boundary' → enters draw mode, switches MapboxDraw
+  //      to draw_polygon mode (broker clicks vertices, double-click closes)
+  //   2. Once polygon complete, draw.create event fires → stash the feature
+  //   3. Side panel shows vertex count + area (acres) + Save/Cancel
+  //   4. Save → write polygon as boundary_geojson, clear parcel_id (drawn
+  //      polygon doesn't correspond to TxGIO parcels), update lat/lng
+  //   5. Cancel → discard drawing, return to view mode
+
+  const enterDrawMode = useCallback(() => {
+    if (!comp || !map.current) return;
+    setMode('draw');
+    setDrawnFeature(null);
+    // Zoom in if too far out — broker needs accurate vertex placement
+    if (map.current.getZoom() < 13.5) {
+      map.current.easeTo({ zoom: 14, duration: 600 });
+    }
+  }, [comp]);
+
+  const cancelDraw = useCallback(() => {
+    setMode('view');
+    setDrawnFeature(null);
+  }, []);
+
+  const saveDraw = useCallback(async () => {
+    if (!comp || !drawnFeature || drawSaving) return;
+    const geom = drawnFeature.geometry;
+    if (!geom || (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon')) {
+      toast.error('Invalid polygon — try drawing again');
+      return;
+    }
+
+    setDrawSaving(true);
+    try {
+      // Compute new pin = centroid of drawn polygon
+      let pinLat: number | null = null;
+      let pinLng: number | null = null;
+      try {
+        const c = turf.centroid(drawnFeature);
+        const coords = c?.geometry?.coordinates;
+        if (Array.isArray(coords) && coords.length >= 2) {
+          pinLng = coords[0];
+          pinLat = coords[1];
+        }
+      } catch {}
+
+      const { error } = await supabase
+        .from('comps')
+        .update({
+          boundary_geojson: geom,
+          // Drawn polygons don't correspond to TxGIO parcels — clear the
+          // parcel_id list so it doesn't show stale prop_ids that no
+          // longer match the boundary.
+          parcel_id: null,
+          latitude: pinLat,
+          longitude: pinLng,
+          // Broker actively drew the boundary — that IS the verification.
+          needs_location_review: false,
+        })
+        .eq('id', comp.id);
+
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+      } else {
+        toast.success('Saved — new boundary set');
+        setComp({
+          ...comp,
+          boundary_geojson: geom,
+          parcel_id: null,
+          latitude: pinLat,
+          longitude: pinLng,
+          needs_location_review: false,
+        });
+        setMode('view');
+        setDrawnFeature(null);
+      }
+    } finally {
+      setDrawSaving(false);
+    }
+  }, [comp, drawnFeature, drawSaving, supabase]);
+
+  // Compute area of drawn polygon for side panel stats
+  const drawStats = (() => {
+    if (mode !== 'draw' || !drawnFeature) return null;
+    let acres = 0;
+    let vertexCount = 0;
+    try {
+      acres = turf.area(drawnFeature) / 4046.8564224;
+      const coords = drawnFeature.geometry?.coordinates;
+      if (coords && coords[0]) {
+        // Polygon outer ring; subtract 1 for the closing duplicate vertex
+        vertexCount = Math.max(0, coords[0].length - 1);
+      }
+    } catch {}
+    const target = Number(comp?.acres) || 0;
+    const delta = target > 0 ? Math.abs(acres - target) / target : null;
+    return { acres, vertexCount, target, delta };
+  })();
+
+  // Effect: setup MapboxDraw when entering draw mode, tear down on exit.
+  // Lives separately from the reselect-layers effect — different control
+  // (Mapbox Draw vs raw layers) and different teardown semantics.
+  useEffect(() => {
+    if (!mapLoaded || !map.current || mode !== 'draw') return;
+    const m = map.current;
+
+    // Create a fresh Draw instance each time we enter draw mode. Custom
+    // styles match the gold theme used for selected parcels in reselect.
+    const GOLD = '#facc15';
+    const draw = new MapboxDraw({
+      displayControlsDefault: false,
+      defaultMode: 'draw_polygon',
+      styles: [
+        // Polygon fill (active/in-progress)
+        { id: 'gl-draw-polygon-fill-active', type: 'fill', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'active', 'true']], paint: { 'fill-color': GOLD, 'fill-opacity': 0.25 } },
+        // Polygon stroke (active)
+        { id: 'gl-draw-polygon-stroke-active', type: 'line', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'active', 'true']], paint: { 'line-color': GOLD, 'line-width': 2.5, 'line-dasharray': [2, 2] } },
+        // Polygon fill (inactive/committed)
+        { id: 'gl-draw-polygon-fill-inactive', type: 'fill', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'active', 'false']], paint: { 'fill-color': GOLD, 'fill-opacity': 0.2 } },
+        // Polygon stroke (inactive)
+        { id: 'gl-draw-polygon-stroke-inactive', type: 'line', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'active', 'false']], paint: { 'line-color': GOLD, 'line-width': 2.5 } },
+        // Vertex points (corners)
+        { id: 'gl-draw-polygon-vertex', type: 'circle', filter: ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point']], paint: { 'circle-radius': 5, 'circle-color': GOLD, 'circle-stroke-color': '#000', 'circle-stroke-width': 1 } },
+        // Midpoints (clickable to add new vertex)
+        { id: 'gl-draw-polygon-midpoint', type: 'circle', filter: ['all', ['==', 'meta', 'midpoint'], ['==', '$type', 'Point']], paint: { 'circle-radius': 3, 'circle-color': GOLD, 'circle-opacity': 0.7 } },
+      ],
+    });
+    drawRef.current = draw;
+
+    try {
+      m.addControl(draw as any, 'top-left');
+    } catch (e: any) {
+      console.error('[review] failed to add Draw control:', e?.message);
+    }
+
+    const handleCreate = (e: any) => {
+      const feature = e?.features?.[0];
+      if (feature) {
+        setDrawnFeature(feature);
+        // Switch to simple_select so broker can adjust vertices if needed
+        try { draw.changeMode('simple_select', { featureIds: [feature.id] }); } catch {}
+      }
+    };
+    const handleUpdate = (e: any) => {
+      const feature = e?.features?.[0];
+      if (feature) setDrawnFeature(feature);
+    };
+    const handleDelete = () => setDrawnFeature(null);
+
+    m.on('draw.create', handleCreate);
+    m.on('draw.update', handleUpdate);
+    m.on('draw.delete', handleDelete);
+
+    return () => {
+      try { m.off('draw.create', handleCreate); } catch {}
+      try { m.off('draw.update', handleUpdate); } catch {}
+      try { m.off('draw.delete', handleDelete); } catch {}
+      try { m.removeControl(draw as any); } catch {}
+      drawRef.current = null;
+    };
+  }, [mapLoaded, mode]);
+
   // ── Loading / error states ──────────────────────────────────────────
   if (loadError) {
     return (
@@ -913,6 +1091,80 @@ export default function ReviewPage() {
             </div>
           )}
 
+          {/* DRAW MODE BANNER — broker draws a freehand polygon. Click
+              to add vertices, double-click to close the polygon. Once
+              closed, the drawn feature shows area + vertex count, and
+              Save commits it as the new boundary_geojson (clearing
+              parcel_id because drawn polygons don't correspond to
+              TxGIO parcels). */}
+          {mode === 'draw' && (
+            <div className="bg-sage/10 border border-sage/40 rounded-lg p-3 space-y-3">
+              <div className="flex items-center gap-1.5 text-sage font-bold text-xs uppercase tracking-wide">
+                <Pencil size={12} />
+                Draw mode
+              </div>
+              {!drawnFeature ? (
+                <p className="text-[11px] text-slate-300 leading-relaxed">
+                  Click points on the map to draw the boundary. Double-
+                  click to close the polygon. Cancel exits without
+                  saving.
+                </p>
+              ) : (
+                <>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Boundary drawn. Drag vertices to adjust, or save to
+                    commit as the new comp boundary.
+                  </p>
+                  {drawStats && (
+                    <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+                      <div>
+                        <span className="text-slate-500">Vertices:</span>{' '}
+                        <span className="text-white font-bold font-mono">{drawStats.vertexCount}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Area:</span>{' '}
+                        <span className="text-white font-bold font-mono">{drawStats.acres.toFixed(1)}ac</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Target:</span>{' '}
+                        <span className="text-slate-300 font-mono">{drawStats.target.toFixed(1)}ac</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Δ:</span>{' '}
+                        <span className={`font-mono font-bold ${
+                          drawStats.delta == null ? 'text-slate-400' :
+                          drawStats.delta < 0.05 ? 'text-emerald-400' :
+                          drawStats.delta < 0.15 ? 'text-amber-400' :
+                          'text-red-400'
+                        }`}>
+                          {drawStats.delta != null ? `${(drawStats.delta * 100).toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  onClick={cancelDraw}
+                  disabled={drawSaving}
+                  className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                >
+                  <X size={12} />
+                  Cancel
+                </button>
+                <button
+                  onClick={saveDraw}
+                  disabled={drawSaving || !drawnFeature}
+                  className="py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {drawSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                  {drawSaving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Status badges — same set as the vault list uses */}
           <div className="flex flex-wrap gap-1.5">
             {!hasPin && (
@@ -1005,8 +1257,8 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* Action row. Hidden in reselect mode (the reselect banner
-              above has its own Save/Cancel controls). */}
+          {/* Action row. Hidden in reselect AND draw modes (those each
+              have their own Save/Cancel controls in their banner above). */}
           {mode === 'view' && (
           <div className="border-t border-border pt-3 space-y-2">
             <button
@@ -1017,6 +1269,15 @@ export default function ReviewPage() {
             >
               <Edit3 size={12} />
               Reselect parcels
+            </button>
+            <button
+              onClick={enterDrawMode}
+              disabled={!map.current}
+              title="Draw a new boundary from scratch — for unrecorded subdivisions, carve-outs, or anything TxGIO doesn't have"
+              className="w-full py-2 bg-sage/10 hover:bg-sage/20 border border-sage/30 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Pencil size={12} />
+              Draw new boundary
             </button>
             <button
               onClick={handleMarkVerified}
@@ -1031,9 +1292,6 @@ export default function ReviewPage() {
               <Check size={12} />
               {comp.needs_location_review ? 'Mark verified' : 'Verified'}
             </button>
-            <p className="text-[10px] text-slate-500 leading-relaxed">
-              Drawing a new boundary from scratch comes in the next build.
-            </p>
           </div>
           )}
         </div>
