@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff } from 'lucide-react';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
@@ -465,17 +465,32 @@ export default function VaultPage() {
                             className="border-b border-border last:border-b-0 hover:bg-sage/5 cursor-pointer group transition-colors"
                           >
                             {/* County (with property name as subtext if set).
-                                Two possible badges:
-                                  ⚠ amber  — math identity gate flagged this
-                                             comp at extraction time (acres ×
-                                             ppa didn't match sale_price)
-                                  🕐 gray  — location wasn't visually verified
-                                             by the broker via the import
-                                             verification screen (or it came
-                                             in via a batched import path)
-                                Both can be present at once. */}
+                                Three possible badges, any combination:
+                                  📍❌ red    — comp has no latitude/longitude
+                                                at all (autoLocate returned
+                                                null and broker hasn't placed
+                                                manually yet). Most urgent.
+                                  ⚠ amber    — math identity gate flagged this
+                                                comp at extraction time (acres
+                                                × ppa didn't match sale_price)
+                                  🕐 gray    — location wasn't visually
+                                                verified by the broker via the
+                                                import verification screen.
+                                                The pin exists but hasn't been
+                                                confirmed.
+                                Red sorts first because it's the most actionable:
+                                you literally cannot show this comp on a map
+                                until someone places it. */}
                             <td className="py-2.5 px-3">
                               <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                                {(comp.latitude == null || comp.longitude == null) && (
+                                  <span
+                                    title="No map location set. Open this comp to place a pin manually via the location picker."
+                                    className="inline-flex items-center"
+                                  >
+                                    <MapPinOff className="w-3.5 h-3.5 text-red-400" />
+                                  </span>
+                                )}
                                 {(comp as any).needs_extraction_review && (
                                   <span
                                     title="Extracted acres × $/acre doesn't match the sale price. At least one of these values is likely wrong — verify before using this comp in a CMA."
@@ -484,7 +499,9 @@ export default function VaultPage() {
                                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                                   </span>
                                 )}
-                                {(comp as any).needs_location_review && (
+                                {(comp as any).needs_location_review
+                                  && comp.latitude != null
+                                  && comp.longitude != null && (
                                   <span
                                     title="Location wasn't visually verified at import. Open this comp to confirm the pin is on the correct parcel."
                                     className="inline-flex items-center"
