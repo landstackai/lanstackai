@@ -367,9 +367,13 @@ export default function ReviewPage() {
       type: 'line',
       source: 'nearby-parcels-line',
       paint: {
-        'line-color': '#94a3b8',
-        'line-width': 1,
-        'line-opacity': 0.55,
+        // Sky-blue with high opacity — bright enough to stand out
+        // against dense satellite textures (forest, irrigated cropland)
+        // and clearly different from the gold selected fill. Slate at
+        // 1px/55% was nearly invisible in V1.
+        'line-color': '#7dd3fc',
+        'line-width': 1.5,
+        'line-opacity': 0.9,
       },
     });
 
