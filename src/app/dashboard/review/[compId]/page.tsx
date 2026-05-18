@@ -27,7 +27,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import mapboxgl from 'mapbox-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
+// Mapbox CSS is loaded globally in src/app/layout.tsx via a <link> tag
+// from Mapbox's CDN. No local import needed (and the local import was
+// failing on some builds — known Next.js + node_modules CSS interaction
+// quirk).
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
 import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff } from 'lucide-react';
@@ -80,6 +83,10 @@ export default function ReviewPage() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
+  // Diagnostic: visible on-page error if Mapbox fails to initialize or
+  // tile loading errors. Without dev-tools access this is the only way
+  // for the broker to communicate WHY the map isn't rendering.
+  const [mapError, setMapError] = useState<string | null>(null);
 
   // ── Fetch the comp by id ────────────────────────────────────────────
   useEffect(() => {
@@ -141,32 +148,56 @@ export default function ReviewPage() {
   // ── Initialize the Mapbox map once the container mounts ─────────────
   useEffect(() => {
     if (!mapContainer.current || map.current) return;
-    if (!process.env.NEXT_PUBLIC_MAPBOX_TOKEN) {
-      console.warn('[review] NEXT_PUBLIC_MAPBOX_TOKEN not set — map will not render');
+
+    const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
+    if (!token) {
+      const msg = 'NEXT_PUBLIC_MAPBOX_TOKEN is not set in the browser bundle';
+      console.error('[review]', msg);
+      setMapError(msg);
+      return;
+    }
+    mapboxgl.accessToken = token;
+
+    // Verify container size — Mapbox renders a black canvas when it
+    // initializes against a 0×0 container. Logging visible dimensions
+    // also helps diagnose layout chain issues from broker-reported bugs.
+    const rect = mapContainer.current.getBoundingClientRect();
+    console.log('[review] map container size at init:', rect.width, 'x', rect.height);
+    if (rect.width < 1 || rect.height < 1) {
+      setMapError(`Map container has zero size at init (${rect.width}×${rect.height}px). Layout issue.`);
       return;
     }
 
-    map.current = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: MAPBOX_STYLE,
-      // Default to a TX-wide view; we'll fit to the comp's geometry below
-      // once the comp loads and the map's 'load' event has fired.
-      center: [-99.5, 30.2],
-      zoom: 6,
+    try {
+      map.current = new mapboxgl.Map({
+        container: mapContainer.current,
+        style: MAPBOX_STYLE,
+        center: [-99.5, 30.2],
+        zoom: 6,
+      });
+    } catch (e: any) {
+      const msg = `Mapbox init threw: ${e?.message || 'unknown'}`;
+      console.error('[review]', msg, e);
+      setMapError(msg);
+      return;
+    }
+
+    // Surface runtime errors visibly so broker can SEE why the map
+    // failed (token rejection, tile load failure, style fetch failure).
+    map.current.on('error', (e: any) => {
+      const msg = e?.error?.message || e?.message || 'unknown mapbox error';
+      console.error('[review] mapbox error event:', msg, e);
+      setMapError((prev) => prev || `Mapbox error: ${msg}`);
     });
+
     map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
     map.current.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
     map.current.once('load', () => {
-      // Force a resize after load — defensive against the container
-      // having had stale dimensions when Mapbox first measured it.
-      // The flex layout should give correct dims now, but this is cheap
-      // insurance against a black-canvas render.
+      console.log('[review] map loaded successfully');
       map.current?.resize();
       setMapLoaded(true);
     });
 
-    // Window resize handler — same instinct, keep the canvas matched
-    // to its container if the viewport changes.
     const handleWindowResize = () => map.current?.resize();
     window.addEventListener('resize', handleWindowResize);
 
@@ -299,7 +330,26 @@ export default function ReviewPage() {
       {/* MAP COLUMN — relative so absolute overlays (top bar, aerial)
           position against the map area, not the whole viewport. */}
       <div className="flex-1 relative">
-        <div ref={mapContainer} className="w-full h-full" />
+        <div ref={mapContainer} className="w-full h-full bg-slate-900" />
+
+        {/* Visible error banner if Mapbox failed to initialize. Without
+            this the broker just sees a black map and has no signal as
+            to why. Shows the specific error message + a hint about
+            where it most likely originates. */}
+        {mapError && (
+          <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 mx-auto max-w-md z-20 px-4">
+            <div className="bg-red-500/15 border border-red-500/40 rounded-xl p-4 backdrop-blur">
+              <div className="text-red-300 font-bold mb-1 flex items-center gap-2">
+                <AlertTriangle size={16} />
+                Map failed to load
+              </div>
+              <div className="text-red-200/80 text-xs leading-relaxed">{mapError}</div>
+              <div className="text-red-200/60 text-[11px] mt-2 leading-relaxed">
+                Check the browser console for more detail. Refresh to retry.
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Top bar: back link + comp label (absolute over map) */}
         <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 max-w-[60%]">
