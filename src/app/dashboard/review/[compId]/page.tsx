@@ -344,17 +344,30 @@ export default function ReviewPage() {
     if (!mapLoaded || !map.current) return;
     const m = map.current;
 
-    // Helper to remove a layer/source pair if present
-    const removeLayerAndSource = (id: string) => {
+    // Cleanup. Order matters: REMOVE ALL LAYERS FIRST, then sources.
+    // selected-parcels-fill and selected-parcels-line both consume the
+    // selected-parcels-fill SOURCE, so we have to drop both layers before
+    // Mapbox will let us drop the source. Previous version paired each
+    // layer with same-id-source removal one at a time, which tried to
+    // remove the shared source while the line layer still referenced it
+    // → 'cannot be removed while layer is using it' error → React crash.
+    const layersToRemove = [
+      'txgio-parcels-raster',
+      'nearby-parcels-fill',
+      'selected-parcels-fill',
+      'selected-parcels-line',
+    ];
+    for (const id of layersToRemove) {
       if (m.getLayer(id)) m.removeLayer(id);
+    }
+    const sourcesToRemove = [
+      'txgio-parcels-raster',
+      'nearby-parcels-fill',
+      'selected-parcels-fill',
+    ];
+    for (const id of sourcesToRemove) {
       if (m.getSource(id)) m.removeSource(id);
-    };
-
-    // Always start clean — remove prior reselect layers
-    removeLayerAndSource('txgio-parcels-raster');
-    removeLayerAndSource('nearby-parcels-fill');
-    removeLayerAndSource('selected-parcels-fill');
-    removeLayerAndSource('selected-parcels-line');
+    }
 
     if (mode !== 'reselect' || !nearbyParcels) return;
 
