@@ -324,16 +324,22 @@ export default function ReviewPage() {
     // panel will surface this state with the red MapPinOff badge.
   }, [mapLoaded, comp]);
 
-  // ── Reselect mode: render nearby parcels as a clickable layer ────────
-  // Two layers:
-  //   nearby-parcels-line   — thin gray outline on every parcel in bbox
-  //                            (the click target). Excludes parcels that
-  //                            are currently selected to avoid double-
-  //                            painting and z-fighting with the gold fill.
-  //   selected-parcels-fill — gold filled polygon for selected parcels,
-  //                            including parcels not in the nearby set
-  //                            (e.g. the originally-selected ones that
-  //                            might extend past the bbox)
+  // ── Reselect mode: render the TxGIO parcel grid + clickable overlay ─
+  //
+  // Three layers in reselect mode (added in order, painted bottom→top):
+  //   txgio-parcels-raster  — TxGIO's official parcel boundary tiles
+  //                            rendered via raster from their ArcGIS
+  //                            service. Same layer the main /dashboard/map
+  //                            page uses — gives visual consistency with
+  //                            the rest of the app (familiar yellow grid).
+  //                            Only renders at zoom >= 13.
+  //   nearby-parcels-fill   — INVISIBLE fill polygons matching the TxGIO
+  //                            geometry. Pure click hit-test surface; the
+  //                            raster tiles above provide the visual
+  //                            outlines so this layer doesn't need to be
+  //                            visible itself.
+  //   selected-parcels-fill — Gold-filled selected polygons on top so
+  //                            broker sees the current selection state.
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
     const m = map.current;
@@ -345,17 +351,42 @@ export default function ReviewPage() {
     };
 
     // Always start clean — remove prior reselect layers
-    removeLayerAndSource('nearby-parcels-line');
+    removeLayerAndSource('txgio-parcels-raster');
+    removeLayerAndSource('nearby-parcels-fill');
     removeLayerAndSource('selected-parcels-fill');
     removeLayerAndSource('selected-parcels-line');
 
     if (mode !== 'reselect' || !nearbyParcels) return;
 
-    // Render ALL nearby parcels as a thin gray outline so broker can
-    // see what's clickable. Selected parcels get their own gold layer
-    // on top, so we include all parcels here (overlap is fine — the
-    // selected layer paints over).
-    m.addSource('nearby-parcels-line', {
+    // TxGIO raster parcel tiles — matches the visual style on the main
+    // map page. Renders parcel outlines as part of the satellite tile
+    // image at zoom 13+. Broker sees the familiar yellow parcel grid.
+    m.addSource('txgio-parcels-raster', {
+      type: 'raster',
+      tiles: [
+        'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+      ],
+      tileSize: 512,
+      minzoom: 11,
+      maxzoom: 19,
+    });
+    m.addLayer({
+      id: 'txgio-parcels-raster',
+      type: 'raster',
+      source: 'txgio-parcels-raster',
+      minzoom: 13,
+      paint: {
+        'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1] as any,
+      },
+    });
+
+    // Invisible fill polygons for click hit-testing. Fill (not line)
+    // because Mapbox click events fire when you click ANYWHERE inside
+    // the polygon — way more forgiving than requiring pixel-precise
+    // clicks on a line. Opacity 0 means the layer is fully transparent
+    // (the raster above provides all the visible outlines) but still
+    // responds to clicks.
+    m.addSource('nearby-parcels-fill', {
       type: 'geojson',
       data: {
         type: 'FeatureCollection',
@@ -363,17 +394,12 @@ export default function ReviewPage() {
       } as any,
     });
     m.addLayer({
-      id: 'nearby-parcels-line',
-      type: 'line',
-      source: 'nearby-parcels-line',
+      id: 'nearby-parcels-fill',
+      type: 'fill',
+      source: 'nearby-parcels-fill',
       paint: {
-        // Sky-blue with high opacity — bright enough to stand out
-        // against dense satellite textures (forest, irrigated cropland)
-        // and clearly different from the gold selected fill. Slate at
-        // 1px/55% was nearly invisible in V1.
-        'line-color': '#7dd3fc',
-        'line-width': 1.5,
-        'line-opacity': 0.9,
+        'fill-color': '#000000',
+        'fill-opacity': 0,
       },
     });
 
@@ -408,12 +434,12 @@ export default function ReviewPage() {
     });
 
     // Click handler: toggle the parcel under cursor in the selection set.
-    // Inlined here (vs calling toggleParcel) to avoid a useEffect-ordering
-    // dependency — this effect runs before toggleParcel is declared lower
-    // in the file.
+    // Hit-test against the INVISIBLE fill layer (not the raster layer
+    // above — raster layers don't expose features for click events).
+    // Inlined to avoid a useEffect-ordering dependency on toggleParcel.
     const handleClick = (e: any) => {
       const features = m.queryRenderedFeatures(e.point, {
-        layers: ['nearby-parcels-line'],
+        layers: ['nearby-parcels-fill'],
       });
       if (features.length === 0) return;
       const propId = features[0].properties?.prop_id;
@@ -426,7 +452,7 @@ export default function ReviewPage() {
         return next;
       });
     };
-    m.on('click', 'nearby-parcels-line', handleClick);
+    m.on('click', 'nearby-parcels-fill', handleClick);
 
     // Crosshair cursor when over a clickable parcel
     const handleEnter = () => {
@@ -435,13 +461,13 @@ export default function ReviewPage() {
     const handleLeave = () => {
       if (m.getCanvas()) m.getCanvas().style.cursor = '';
     };
-    m.on('mouseenter', 'nearby-parcels-line', handleEnter);
-    m.on('mouseleave', 'nearby-parcels-line', handleLeave);
+    m.on('mouseenter', 'nearby-parcels-fill', handleEnter);
+    m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
 
     return () => {
-      m.off('click', 'nearby-parcels-line', handleClick);
-      m.off('mouseenter', 'nearby-parcels-line', handleEnter);
-      m.off('mouseleave', 'nearby-parcels-line', handleLeave);
+      m.off('click', 'nearby-parcels-fill', handleClick);
+      m.off('mouseenter', 'nearby-parcels-fill', handleEnter);
+      m.off('mouseleave', 'nearby-parcels-fill', handleLeave);
       if (m.getCanvas()) m.getCanvas().style.cursor = '';
     };
   }, [mapLoaded, mode, nearbyParcels, selectedPropIds]);
@@ -489,6 +515,16 @@ export default function ReviewPage() {
       .map((s) => s.trim())
       .filter(Boolean);
     setSelectedPropIds(new Set(existingIds));
+
+    // Zoom in if we're too far out — TxGIO's raster parcel tiles have
+    // minzoom: 13, so below that the familiar yellow parcel grid won't
+    // render. Don't zoom out if broker was already in close.
+    if (map.current.getZoom() < 13.5) {
+      map.current.easeTo({ zoom: 14, duration: 600 });
+      // Wait for the ease to settle before fetching parcels so the
+      // bbox covers the right area at the new zoom level.
+      await new Promise((r) => setTimeout(r, 650));
+    }
 
     // Fetch nearby parcels for the current viewport. Use a slightly
     // expanded bbox so broker has room to grab adjacent parcels they
