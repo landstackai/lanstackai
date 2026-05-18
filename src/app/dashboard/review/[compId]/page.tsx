@@ -324,132 +324,95 @@ export default function ReviewPage() {
     // panel will surface this state with the red MapPinOff badge.
   }, [mapLoaded, comp]);
 
-  // ── Reselect mode: render the TxGIO parcel grid + clickable overlay ─
+  // ── Reselect mode: setup layers when entering, update data on clicks ─
   //
-  // Three layers in reselect mode (added in order, painted bottom→top):
-  //   txgio-parcels-raster  — TxGIO's official parcel boundary tiles
-  //                            rendered via raster from their ArcGIS
-  //                            service. Same layer the main /dashboard/map
-  //                            page uses — gives visual consistency with
-  //                            the rest of the app (familiar yellow grid).
-  //                            Only renders at zoom >= 13.
-  //   nearby-parcels-fill   — INVISIBLE fill polygons matching the TxGIO
-  //                            geometry. Pure click hit-test surface; the
-  //                            raster tiles above provide the visual
-  //                            outlines so this layer doesn't need to be
-  //                            visible itself.
-  //   selected-parcels-fill — Gold-filled selected polygons on top so
-  //                            broker sees the current selection state.
+  // Previous single-effect version recreated ALL layers + sources on every
+  // click (because selectedPropIds was in the deps). Mapbox state got into
+  // bad states during the cleanup→re-add cycle, producing
+  // 'cannot remove source while layer is using it' / 'already a source
+  // with ID' errors that crashed the React tree.
+  //
+  // New two-effect pattern:
+  //   Effect 1 (setup/teardown): runs when entering OR exiting reselect
+  //     mode. Adds layers on entry, cleans them up on exit via the
+  //     returned cleanup function. NO layer thrashing during selection.
+  //   Effect 2 (data update): runs when selectedPropIds OR nearbyParcels
+  //     changes. Uses setData() on the existing source — pure data swap,
+  //     no add/remove churn.
+
+  // Effect 1: layer setup + teardown
   useEffect(() => {
-    if (!mapLoaded || !map.current) return;
+    if (!mapLoaded || !map.current || mode !== 'reselect') return;
     const m = map.current;
 
-    // Cleanup. Order matters: REMOVE ALL LAYERS FIRST, then sources.
-    // selected-parcels-fill and selected-parcels-line both consume the
-    // selected-parcels-fill SOURCE, so we have to drop both layers before
-    // Mapbox will let us drop the source. Previous version paired each
-    // layer with same-id-source removal one at a time, which tried to
-    // remove the shared source while the line layer still referenced it
-    // → 'cannot be removed while layer is using it' error → React crash.
-    const layersToRemove = [
-      'txgio-parcels-raster',
-      'nearby-parcels-fill',
-      'selected-parcels-fill',
-      'selected-parcels-line',
-    ];
-    for (const id of layersToRemove) {
-      if (m.getLayer(id)) m.removeLayer(id);
+    // Defensive cleanup of any leftover layers from a previous mount
+    // that didn't tear down cleanly (e.g. fast navigation, error mid-
+    // mount). Order matters: layers first, then sources.
+    const tryRemove = (kind: 'layer' | 'source', id: string) => {
+      try {
+        if (kind === 'layer' && m.getLayer(id)) m.removeLayer(id);
+        if (kind === 'source' && m.getSource(id)) m.removeSource(id);
+      } catch { /* defensive — never let cleanup throw */ }
+    };
+    const layerIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'selected-parcels-fill', 'selected-parcels-line'];
+    const sourceIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'selected-parcels-fill'];
+    for (const id of layerIds) tryRemove('layer', id);
+    for (const id of sourceIds) tryRemove('source', id);
+
+    // Add all sources + layers fresh
+    try {
+      m.addSource('txgio-parcels-raster', {
+        type: 'raster',
+        tiles: [
+          'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+        ],
+        tileSize: 512,
+        minzoom: 11,
+        maxzoom: 19,
+      });
+      m.addLayer({
+        id: 'txgio-parcels-raster',
+        type: 'raster',
+        source: 'txgio-parcels-raster',
+        minzoom: 13,
+        paint: {
+          'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1] as any,
+        },
+      });
+
+      m.addSource('nearby-parcels-fill', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: nearbyParcels || [] } as any,
+      });
+      m.addLayer({
+        id: 'nearby-parcels-fill',
+        type: 'fill',
+        source: 'nearby-parcels-fill',
+        paint: { 'fill-color': '#000000', 'fill-opacity': 0 },
+      });
+
+      // Selected source starts EMPTY — Effect 2 populates it via setData
+      m.addSource('selected-parcels-fill', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] } as any,
+      });
+      m.addLayer({
+        id: 'selected-parcels-fill',
+        type: 'fill',
+        source: 'selected-parcels-fill',
+        paint: { 'fill-color': '#facc15', 'fill-opacity': 0.35 },
+      });
+      m.addLayer({
+        id: 'selected-parcels-line',
+        type: 'line',
+        source: 'selected-parcels-fill',
+        paint: { 'line-color': '#facc15', 'line-width': 2.5 },
+      });
+    } catch (e: any) {
+      console.error('[review] failed to add reselect layers:', e?.message);
     }
-    const sourcesToRemove = [
-      'txgio-parcels-raster',
-      'nearby-parcels-fill',
-      'selected-parcels-fill',
-    ];
-    for (const id of sourcesToRemove) {
-      if (m.getSource(id)) m.removeSource(id);
-    }
 
-    if (mode !== 'reselect' || !nearbyParcels) return;
-
-    // TxGIO raster parcel tiles — matches the visual style on the main
-    // map page. Renders parcel outlines as part of the satellite tile
-    // image at zoom 13+. Broker sees the familiar yellow parcel grid.
-    m.addSource('txgio-parcels-raster', {
-      type: 'raster',
-      tiles: [
-        'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
-      ],
-      tileSize: 512,
-      minzoom: 11,
-      maxzoom: 19,
-    });
-    m.addLayer({
-      id: 'txgio-parcels-raster',
-      type: 'raster',
-      source: 'txgio-parcels-raster',
-      minzoom: 13,
-      paint: {
-        'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1] as any,
-      },
-    });
-
-    // Invisible fill polygons for click hit-testing. Fill (not line)
-    // because Mapbox click events fire when you click ANYWHERE inside
-    // the polygon — way more forgiving than requiring pixel-precise
-    // clicks on a line. Opacity 0 means the layer is fully transparent
-    // (the raster above provides all the visible outlines) but still
-    // responds to clicks.
-    m.addSource('nearby-parcels-fill', {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: nearbyParcels,
-      } as any,
-    });
-    m.addLayer({
-      id: 'nearby-parcels-fill',
-      type: 'fill',
-      source: 'nearby-parcels-fill',
-      paint: {
-        'fill-color': '#000000',
-        'fill-opacity': 0,
-      },
-    });
-
-    // Render selected parcels as gold fill + thicker outline
-    const selectedFeatures = nearbyParcels.filter((f: any) =>
-      selectedPropIds.has(String(f.properties?.prop_id))
-    );
-    m.addSource('selected-parcels-fill', {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: selectedFeatures,
-      } as any,
-    });
-    m.addLayer({
-      id: 'selected-parcels-fill',
-      type: 'fill',
-      source: 'selected-parcels-fill',
-      paint: {
-        'fill-color': '#facc15',
-        'fill-opacity': 0.35,
-      },
-    });
-    m.addLayer({
-      id: 'selected-parcels-line',
-      type: 'line',
-      source: 'selected-parcels-fill',
-      paint: {
-        'line-color': '#facc15',
-        'line-width': 2.5,
-      },
-    });
-
-    // Click handler: toggle the parcel under cursor in the selection set.
-    // Hit-test against the INVISIBLE fill layer (not the raster layer
-    // above — raster layers don't expose features for click events).
-    // Inlined to avoid a useEffect-ordering dependency on toggleParcel.
+    // Click + cursor handlers
     const handleClick = (e: any) => {
       const features = m.queryRenderedFeatures(e.point, {
         layers: ['nearby-parcels-fill'],
@@ -465,15 +428,13 @@ export default function ReviewPage() {
         return next;
       });
     };
-    m.on('click', 'nearby-parcels-fill', handleClick);
-
-    // Crosshair cursor when over a clickable parcel
     const handleEnter = () => {
       if (m.getCanvas()) m.getCanvas().style.cursor = 'crosshair';
     };
     const handleLeave = () => {
       if (m.getCanvas()) m.getCanvas().style.cursor = '';
     };
+    m.on('click', 'nearby-parcels-fill', handleClick);
     m.on('mouseenter', 'nearby-parcels-fill', handleEnter);
     m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
 
@@ -482,8 +443,25 @@ export default function ReviewPage() {
       m.off('mouseenter', 'nearby-parcels-fill', handleEnter);
       m.off('mouseleave', 'nearby-parcels-fill', handleLeave);
       if (m.getCanvas()) m.getCanvas().style.cursor = '';
+      // Tear down ALL layers first, THEN sources. Try/catch each so a
+      // single failed removal can't crash the React tree.
+      for (const id of layerIds) tryRemove('layer', id);
+      for (const id of sourceIds) tryRemove('source', id);
     };
-  }, [mapLoaded, mode, nearbyParcels, selectedPropIds]);
+  }, [mapLoaded, mode, nearbyParcels]); // NOTE: selectedPropIds intentionally excluded
+
+  // Effect 2: update the selected source data when selection changes.
+  // Pure data update via setData — no layer add/remove. Runs on every
+  // parcel click but is cheap and doesn't churn Mapbox internals.
+  useEffect(() => {
+    if (!map.current || mode !== 'reselect' || !nearbyParcels) return;
+    const src = map.current.getSource('selected-parcels-fill') as any;
+    if (!src || typeof src.setData !== 'function') return;
+    const selected = nearbyParcels.filter((f: any) =>
+      selectedPropIds.has(String(f.properties?.prop_id))
+    );
+    src.setData({ type: 'FeatureCollection', features: selected });
+  }, [mode, nearbyParcels, selectedPropIds]);
 
   // ── Mark verified handler ───────────────────────────────────────────
   // Clears needs_location_review = false. The gray clock badge in the
