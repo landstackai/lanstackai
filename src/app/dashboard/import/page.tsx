@@ -4,9 +4,10 @@ import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { ExtractedComp } from '@/types';
-import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X } from 'lucide-react';
+import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangle, Clock, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
+import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
@@ -959,6 +960,11 @@ export default function ImportPage() {
       boundary_geojson: (comp as any).geometry ?? null,
       // Math identity gate flag from extraction (see /api/import-chat).
       needs_extraction_review: comp.needs_extraction_review || false,
+      // Silent (batched/chunked) inserts skip the visual verification screen,
+      // so always flag for review — broker can come back via the vault and
+      // confirm or fix each one. Manual saves from the verification card
+      // (saveComp) decide this per-row based on broker action.
+      needs_location_review: true,
     });
 
     if (error || !inserted) return false;
@@ -1326,9 +1332,21 @@ export default function ImportPage() {
     await sendMessage(input.trim());
   };
 
-  const saveComp = async (comp: ExtractedComp) => {
+  // saveComp accepts an optional second arg controlling the location
+  // review state. Called from the verification card with one of two
+  // intents:
+  //   { needsReview: false } — broker clicked "Looks right" (verified)
+  //   { needsReview: true }  — broker clicked "Needs review" (skipped
+  //                            the visual check or flagged it as wrong;
+  //                            either way the row lands with a clock
+  //                            badge in the vault for follow-up)
+  // When called without the second arg, defaults to false to preserve
+  // existing behavior for any non-verification-flow callers.
+  const saveComp = async (comp: ExtractedComp, opts?: { needsReview?: boolean }) => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+
+    const needsReview = opts?.needsReview ?? false;
 
     const { error } = await supabase.from('comps').insert({
       created_by: user.id,
@@ -1364,6 +1382,9 @@ export default function ImportPage() {
       // UI can show its warning badge. False (default) if the gate passed
       // or couldn't run (one of price/ppa/acres was missing).
       needs_extraction_review: comp.needs_extraction_review || false,
+      // From the verification screen: TRUE when broker skipped/flagged
+      // (clock badge in vault); FALSE when broker visually confirmed.
+      needs_location_review: needsReview,
     });
 
     if (error) {
@@ -1395,9 +1416,13 @@ export default function ImportPage() {
     }
   };
 
+  // Bulk-save shortcut — broker chose to skip the per-comp visual
+  // verification and triage the batch later from the vault. Every row
+  // gets flagged needs_location_review=true so the vault badge surfaces
+  // them for follow-up.
   const saveAllComps = async () => {
     for (const comp of pendingComps) {
-      await saveComp(comp);
+      await saveComp(comp, { needsReview: true });
     }
   };
 
@@ -1515,10 +1540,34 @@ export default function ImportPage() {
                 )}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
 
-                {/* Extracted comps */}
+                {/* Extracted comps — verification cards with thumbnails.
+                    Each card shows a source thumbnail (aerial from PDF if
+                    extracted, satellite of source-provided coords, or a
+                    text fallback) alongside a system-pinned thumbnail
+                    (Mapbox satellite centered on the autoLocate result).
+                    Broker picks "Looks right" (save verified) or "Needs
+                    review" (save flagged) per comp. */}
                 {msg.comps && msg.comps.length > 0 && (
                   <div className="mt-3 space-y-2">
-                    {msg.comps.map((comp, ci) => (
+                    {msg.comps.map((comp, ci) => {
+                      const aerial = (comp as any).aerialImage as string | undefined;
+                      const sysLat = comp.latitude;
+                      const sysLng = comp.longitude;
+                      const sysPinUrl = (sysLat != null && sysLng != null)
+                        ? mapboxStaticUrl({ lat: sysLat, lng: sysLng, zoom: 14 })
+                        : null;
+                      // Source thumbnail priority: explicit aerial from PDF >
+                      // source-provided lat/lng (rare — Stouffer-format) >
+                      // text panel.
+                      const sourceLatLng = (comp as any)._source_latitude != null
+                        && (comp as any)._source_longitude != null
+                        ? { lat: (comp as any)._source_latitude, lng: (comp as any)._source_longitude }
+                        : null;
+                      const sourceMapUrl = !aerial && sourceLatLng
+                        ? mapboxStaticUrl({ lat: sourceLatLng.lat, lng: sourceLatLng.lng, zoom: 14 })
+                        : null;
+
+                      return (
                       <div key={ci} className="bg-night border border-border rounded-xl p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
@@ -1547,21 +1596,92 @@ export default function ImportPage() {
                             <span className="text-xs text-slate-500">{comp.confidence.overall}%</span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => saveComp(comp)}
-                          className="mt-2 w-full py-1.5 bg-sage/10 hover:bg-sage/20 border border-sage/20 text-sage rounded-lg text-xs font-bold transition-colors"
-                        >
-                          + Add to Vault
-                        </button>
+
+                        {/* Side-by-side thumbnails: source vs system match */}
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          {/* LEFT: source */}
+                          <div>
+                            {aerial ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={aerial}
+                                alt="From source"
+                                className="w-full h-32 object-cover rounded border border-border"
+                              />
+                            ) : sourceMapUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={sourceMapUrl}
+                                alt="Source coords"
+                                className="w-full h-32 object-cover rounded border border-border"
+                              />
+                            ) : (
+                              <div className="w-full h-32 bg-card border border-border rounded p-2 text-[10px] text-slate-400 flex flex-col gap-0.5 overflow-hidden">
+                                <div className="text-slate-500 uppercase tracking-wide">Source data</div>
+                                {comp.grantee && <div className="text-white truncate">→ {comp.grantee}</div>}
+                                {comp.grantor && <div className="text-slate-400 truncate">from {comp.grantor}</div>}
+                                {comp.address && <div className="text-slate-400 truncate">{comp.address}</div>}
+                                {comp.description && (
+                                  <div className="text-slate-500 line-clamp-3 mt-0.5">
+                                    {comp.description.slice(0, 120)}{comp.description.length > 120 ? '…' : ''}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div className="text-[10px] text-slate-500 text-center mt-1">From source</div>
+                          </div>
+
+                          {/* RIGHT: system match */}
+                          <div>
+                            {sysPinUrl ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={sysPinUrl}
+                                alt="System pin"
+                                className="w-full h-32 object-cover rounded border border-border"
+                              />
+                            ) : (
+                              <div className="w-full h-32 bg-amber-900/20 border border-amber-700/40 rounded p-2 text-[10px] flex flex-col items-center justify-center text-center gap-1">
+                                <AlertTriangle className="text-amber-400" size={20} />
+                                <div className="text-amber-300 font-bold">Could not locate</div>
+                                <div className="text-amber-200/70 text-[9px]">Place manually in vault</div>
+                              </div>
+                            )}
+                            <div className="text-[10px] text-slate-500 text-center mt-1">System pinned</div>
+                          </div>
+                        </div>
+
+                        {/* Two-button verification action row */}
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => saveComp(comp, { needsReview: false })}
+                            disabled={sysLat == null || sysLng == null}
+                            title={sysLat == null ? 'No pin to confirm — use Needs review and fix manually' : 'Mark this comp as verified and save to vault'}
+                            className="py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Check size={12} />
+                            Looks right
+                          </button>
+                          <button
+                            onClick={() => saveComp(comp, { needsReview: true })}
+                            title="Save the comp but flag it for review — broker comes back later via the vault"
+                            className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                          >
+                            <Clock size={12} />
+                            Needs review
+                          </button>
+                        </div>
                       </div>
-                    ))}
+                      );
+                    })}
 
                     {msg.comps.length > 1 && (
                       <button
                         onClick={saveAllComps}
-                        className="w-full py-2 bg-sage hover:bg-sage2 text-black rounded-xl text-xs font-bold transition-colors"
+                        className="w-full py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1"
                       >
-                        Add All {msg.comps.length} Comps to Vault
+                        <Clock size={12} />
+                        Save all {msg.comps.length} for review later
                       </button>
                     )}
                   </div>

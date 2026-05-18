@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock } from 'lucide-react';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
@@ -465,11 +465,15 @@ export default function VaultPage() {
                             className="border-b border-border last:border-b-0 hover:bg-sage/5 cursor-pointer group transition-colors"
                           >
                             {/* County (with property name as subtext if set).
-                                Renders a warning badge when the math identity
-                                gate flagged this comp at extraction time —
-                                acres × ppa didn't match sale_price within 1%
-                                and at least one of those three fields needs
-                                broker review. */}
+                                Two possible badges:
+                                  ⚠ amber  — math identity gate flagged this
+                                             comp at extraction time (acres ×
+                                             ppa didn't match sale_price)
+                                  🕐 gray  — location wasn't visually verified
+                                             by the broker via the import
+                                             verification screen (or it came
+                                             in via a batched import path)
+                                Both can be present at once. */}
                             <td className="py-2.5 px-3">
                               <div className="text-sm font-bold text-white flex items-center gap-1.5">
                                 {(comp as any).needs_extraction_review && (
@@ -478,6 +482,14 @@ export default function VaultPage() {
                                     className="inline-flex items-center"
                                   >
                                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                                  </span>
+                                )}
+                                {(comp as any).needs_location_review && (
+                                  <span
+                                    title="Location wasn't visually verified at import. Open this comp to confirm the pin is on the correct parcel."
+                                    className="inline-flex items-center"
+                                  >
+                                    <Clock className="w-3.5 h-3.5 text-slate-400" />
                                   </span>
                                 )}
                                 <span>{comp.county || '—'}</span>
