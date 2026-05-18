@@ -286,24 +286,84 @@ Showing all aerials simultaneously across the full map would be unusable.
 
 ---
 
-## 7. Open questions / unresolved
+## 7. Build queue (next sessions, prioritized)
 
-### URL / link uploads vs PDF appraisals
+Active work for upcoming sessions, roughly in the order I expect to
+build them. Effort estimates are rough — the real ordering depends on
+what gets revealed during validation of the work already shipped.
 
-Brokers will paste listing URLs (Land.com, LandsOfTexas, etc.) as a comp
-source, distinct from uploading a Stouffer-format PDF. We need:
+| # | Build | Effort | Why this order |
+|---|---|---|---|
+| 1 | **Review page stages 2-6** (the rest of the review page — route + side panel + aerial overlay + reselect parcels + draw boundary + Tier 2 drag-to-align) | ~3-4 days | The Stage 1 foundation (aerial persistence) shipped tonight without a UI to consume it. Building the UI is the natural next step — gives brokers a real workspace for fixing flagged pins. |
+| 2 | **URL / link upload extraction** (see §7.1 below) | ~1-2 days | Listings are a real comp source brokers will use alongside PDFs. Currently the import flow only handles PDFs. Discussed in detail on May 17, design approved. |
+| 3 | **Vault "Needs review" banner** (counts of red/amber/gray badged comps at top of vault, click to filter) | ~30-45 min | Designed May 17, approved. Surfaces the review queue prominently — brokers shouldn't have to scroll the vault looking for items needing attention. |
+| 4 | **Validation + merge to main** of the four stacked branches (math-identity-gate / lat-lng-first / thumbnail-verification / aerial-persistence) | Validation: ongoing. Merge: 10 min. | Real-world usage is the only signal that catches edge cases the design didn't anticipate. Don't merge until broker has run a representative batch of imports through preview. |
 
-- How does extraction differ? Listings have structured fields (price, acres,
-  description) but no aerial in the same form, no grantor/grantee, no
-  recording info.
-- Where do we get the "source aerial" thumbnail equivalent? Some listings
-  embed satellite previews; others don't.
-- How does the verification card adapt — text panel only, or scrape the
-  listing's own map widget?
-- Different confidence model (listings are marketing copy, not legal
-  appraisals — should treat as lower-confidence by default).
+### 7.1 URL / link upload extraction (build #2 in queue)
 
-**Status: deferred to design discussion in next session.**
+**Status:** designed May 17, approved, awaiting build.
+
+Brokers will paste listing URLs (Land.com, LandsOfTexas, broker's own
+site, etc.) as a comp source alongside PDF appraisals. Different shape
+of data, different extraction approach, partially-filled comp at output.
+
+**Workflow:**
+
+```
+Broker pastes URL into Import
+   │
+   ▼
+Server fetches page (with realistic User-Agent) at /api/import-url
+   │
+   ├─ ✓ HTML success → structured extraction (OG tags, schema.org JSON-LD,
+   │                    known per-site selectors) → AI cleanup pass
+   ├─ ⚠ JS-required → fall back to headless browser screenshot → AI vision
+   └─ ✗ Blocked → notify broker: "this site blocks automated fetches —
+                  paste the listing text manually instead"
+   │
+   ▼
+Returned comp is PARTIALLY filled — flagged as such
+   - Has: property name, acres, price (asking), county, description, lat/lng
+          if listing has a map, photos
+   - Missing: actual sold price, sold date, grantor, grantee, recording info
+   │
+   ▼
+Verification card opens with two distinguishing things:
+   - "From listing" label instead of "From appraisal"
+   - "Complete missing fields" prompt before "Looks right" enables
+     (broker fills in actual sold price + sold date)
+   │
+   ▼
+Same flow from here: Looks right → verified, Needs review → flagged
+```
+
+**Site reality:**
+
+| Site | Approach | Notes |
+|---|---|---|
+| Land.com / LandsOfTexas | Structured HTML parsing | Public listings, OpenGraph metadata available. Probably easiest first target. |
+| LandWatch, Hall and Hall, TXLBN | Structured HTML parsing | Public listings, varying anti-scraping. Workable. |
+| Zillow / Redfin | Skip for V1 | Aggressive bot blocking, JS-rendered, ToS prohibits. Not worth the engineering. |
+| MLS systems (HAR, NTREIS) | Skip for V1 | Require login + IDX license for redistribution. Different category. |
+| Broker's own website | Easiest | Broker owns the data. |
+
+**Architectural decisions:**
+
+- **Server-side extraction** (CORS prevents browser fetches of arbitrary
+  third-party sites). New endpoint `/api/import-url`.
+- **No source aerial** for listing-sourced comps. Listings have ground-level
+  photos, not top-down aerials. Verification card's left side defaults to
+  text panel for listing imports.
+- **Partial comp completion** is mandatory before "Looks right" enables.
+  Broker must fill in actual sold price + sold date — listings have asking
+  price + list date, neither of which is correct for a CMA comp.
+- **Lower default confidence** — listings are marketing copy, not legal
+  records. AI extraction shouldn't claim HIGH confidence on listing data
+  the way it might on a Stouffer appraisal.
+
+---
+
+## 8. Open questions / unresolved
 
 ### Multi-comp PDF aerial attribution
 
@@ -345,7 +405,7 @@ over-build speculatively — wait for the data.
 
 ---
 
-## 8. Database schema summary (comps table additions this week)
+## 9. Database schema summary (comps table additions this week)
 
 | Column | Migration | Purpose |
 |---|---|---|
@@ -371,7 +431,7 @@ Status (as of last manual application):
 
 ---
 
-## 9. Branch structure (as of this commit)
+## 10. Branch structure (as of this commit)
 
 ```
 main
@@ -389,7 +449,7 @@ earlier merge.
 
 ---
 
-## 10. Conventions
+## 11. Conventions
 
 - New badges go in the vault list, county column, sorted by urgency
   (red → amber → gray)
