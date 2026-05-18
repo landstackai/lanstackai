@@ -151,6 +151,11 @@ export default function ReviewPage() {
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
+  // Single shared hover popup — attached to whichever layer the cursor
+  // is over (comp boundary in view mode; nearby/owner-match/selected
+  // parcels in reselect mode). Following-cursor label rather than a
+  // pinned popup, like id.land's parcel hover.
+  const hoverPopup = useRef<mapboxgl.Popup | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   // Diagnostic: visible on-page error if Mapbox fails to initialize or
   // tile loading errors. Without dev-tools access this is the only way
@@ -377,6 +382,58 @@ export default function ReviewPage() {
     return () => clearTimeout(t);
   }, [panelOpen, mapLoaded]);
 
+  // Hover-popup helper: wires mousemove + mouseleave on a layer so the
+  // shared `hoverPopup` ref follows the cursor with HTML built by
+  // `getContent(feature)`. Returns a cleanup function. Used by both the
+  // boundary effect (view mode) and the reselect-layers effect (reselect
+  // mode). Centralizing here keeps the popup lifecycle in one place —
+  // every consumer goes through the same ref so we can't accidentally
+  // leak two stacked popups during fast layer/mode transitions.
+  const attachHoverPopup = useCallback(
+    (m: mapboxgl.Map, layerId: string, getContent: (f: any) => string) => {
+      const onMove = (e: any) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        if (m.getCanvas()) m.getCanvas().style.cursor = 'pointer';
+        const html = getContent(feature);
+        if (!hoverPopup.current) {
+          hoverPopup.current = new mapboxgl.Popup({
+            closeButton: false,
+            closeOnClick: false,
+            offset: 12,
+            className: 'parcel-hover-popup',
+            maxWidth: '260px',
+          });
+        }
+        hoverPopup.current.setLngLat(e.lngLat).setHTML(html).addTo(m);
+      };
+      const onLeave = () => {
+        if (m.getCanvas()) m.getCanvas().style.cursor = '';
+        try { hoverPopup.current?.remove(); } catch {}
+      };
+      m.on('mousemove', layerId, onMove);
+      m.on('mouseleave', layerId, onLeave);
+      return () => {
+        try { m.off('mousemove', layerId, onMove); } catch {}
+        try { m.off('mouseleave', layerId, onLeave); } catch {}
+      };
+    },
+    []
+  );
+
+  // Lightweight HTML-escape — the hover popup uses setHTML, and owner
+  // names from TxGIO are user-supplied text we don't fully control.
+  // Escapes <, >, &, ', " to prevent any HTML injection from a maliciously
+  // crafted parcel record.
+  function escHtml(s: any): string {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // ── Render the boundary + auto-fit when both map and comp are ready ─
   useEffect(() => {
     if (!mapLoaded || !comp || !map.current) return;
@@ -386,6 +443,8 @@ export default function ReviewPage() {
     if (m.getLayer('comp-boundary-fill')) m.removeLayer('comp-boundary-fill');
     if (m.getLayer('comp-boundary-line')) m.removeLayer('comp-boundary-line');
     if (m.getSource('comp-boundary')) m.removeSource('comp-boundary');
+
+    let detachHover: (() => void) | null = null;
 
     const boundary = comp.boundary_geojson;
     if (boundary && (boundary.type === 'Polygon' || boundary.type === 'MultiPolygon')) {
@@ -416,6 +475,29 @@ export default function ReviewPage() {
         },
       });
 
+      // Hover tooltip on the comp boundary — shows total acreage at a
+      // glance, like id.land's "Boundary NNN.NN acres" label. Acres can
+      // come from either the saved comp.acres OR a fresh turf.area calc
+      // on the geometry — prefer comp.acres since that's the broker-
+      // verified value, fall back to turf when comp.acres is null (e.g.
+      // before extraction-review has been resolved).
+      let displayAcres: number | null = null;
+      if (typeof comp.acres === 'number' && comp.acres > 0) {
+        displayAcres = comp.acres;
+      } else {
+        try {
+          const f: any = { type: 'Feature', properties: {}, geometry: boundary };
+          displayAcres = turf.area(f) / 4046.8564224;
+        } catch {}
+      }
+      const acresStr = displayAcres != null
+        ? `${displayAcres.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`
+        : '— ac';
+      detachHover = attachHoverPopup(m, 'comp-boundary-fill', () =>
+        `<div style="font-weight:700;color:#facc15;">Comp boundary</div>` +
+        `<div style="color:#cbd5e1;">${acresStr}</div>`
+      );
+
       // Fit map to the boundary
       try {
         const feature: any = { type: 'Feature', properties: {}, geometry: boundary };
@@ -433,7 +515,12 @@ export default function ReviewPage() {
     }
     // No boundary AND no lat/lng: map stays at the wide TX view. Side
     // panel will surface this state with the red MapPinOff badge.
-  }, [mapLoaded, comp]);
+
+    return () => {
+      try { detachHover?.(); } catch {}
+      try { hoverPopup.current?.remove(); } catch {}
+    };
+  }, [mapLoaded, comp, attachHoverPopup]);
 
   // ── Reselect mode: setup layers when entering, update data on clicks ─
   //
@@ -587,6 +674,32 @@ export default function ReviewPage() {
     m.on('mouseenter', 'owner-matches-fill', handleEnter);
     m.on('mouseleave', 'owner-matches-fill', handleLeave);
 
+    // Hover tooltips: show owner + acreage for every layer the cursor
+    // can land on. setData() swaps below preserve the layer ids, so a
+    // single attach here covers the full lifetime of reselect mode.
+    // Status word in the tooltip ("selected", "match", or blank) tells
+    // the broker WHY this parcel is rendered without them having to
+    // memorize the color legend.
+    const buildContent = (status: string) => (f: any) => {
+      const p = f.properties || {};
+      const owner = escHtml(p.owner_name || 'Unknown owner');
+      const acres = Number(p.gis_area);
+      const acresStr = Number.isFinite(acres) && acres > 0
+        ? `${acres.toLocaleString(undefined, { maximumFractionDigits: 1 })} ac`
+        : '— ac';
+      const statusHtml = status
+        ? `<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:2px;">${escHtml(status)}</div>`
+        : '';
+      return (
+        `<div style="font-weight:700;color:#ffffff;max-width:240px;white-space:normal;">${owner}</div>` +
+        `<div style="color:#cbd5e1;">${acresStr}</div>` +
+        statusHtml
+      );
+    };
+    const detachNearbyHover = attachHoverPopup(m, 'nearby-parcels-fill', buildContent(''));
+    const detachOwnerHover = attachHoverPopup(m, 'owner-matches-fill', buildContent('owner match'));
+    const detachSelectedHover = attachHoverPopup(m, 'selected-parcels-fill', buildContent('selected'));
+
     return () => {
       // The captured `m` reference may point to a destroyed map by the
       // time cleanup runs (e.g. saveReselect updates comp, which used
@@ -598,11 +711,15 @@ export default function ReviewPage() {
       try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
       try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
       try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
+      try { detachNearbyHover(); } catch {}
+      try { detachOwnerHover(); } catch {}
+      try { detachSelectedHover(); } catch {}
+      try { hoverPopup.current?.remove(); } catch {}
       try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
       for (const id of sourceIds) tryRemove('source', id);
     };
-  }, [mapLoaded, mode, nearbyParcels]); // NOTE: selectedPropIds intentionally excluded
+  }, [mapLoaded, mode, nearbyParcels, attachHoverPopup]); // NOTE: selectedPropIds intentionally excluded
 
   // Effect 2: update the selected source data when selection changes.
   // Pure data update via setData — no layer add/remove. Runs on every

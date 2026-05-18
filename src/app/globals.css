@@ -84,6 +84,23 @@ html, body {
   border-right-color: var(--panel) !important;
 }
 
+/* Parcel hover tooltip on the review page — tighter than the comp-hover
+   variant since it carries a one-line label ("Owner · NNN ac") rather
+   than the comp grid. Smaller padding, no tip — feels like a label
+   following the cursor rather than a heavy popup. */
+.parcel-hover-popup .mapboxgl-popup-content {
+  background: rgba(15, 23, 42, 0.95) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  padding: 6px 10px !important;
+  color: var(--text) !important;
+  font-size: 11px !important;
+  line-height: 1.35 !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
+  pointer-events: none;
+}
+.parcel-hover-popup .mapboxgl-popup-tip { display: none !important; }
+
 .mapboxgl-ctrl-group {
   background: var(--panel) !important;
   border: 1px solid var(--border) !important;
