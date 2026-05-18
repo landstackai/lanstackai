@@ -7,6 +7,7 @@ import { ExtractedComp } from '@/types';
 import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangle, Clock, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
+import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
@@ -665,7 +666,13 @@ export default function ImportPage() {
   const sendMessage = async (
     text: string,
     fileContent?: string,
-    images?: string[]
+    images?: string[],
+    // Optional extracted aerial photo from the source PDF — passed through
+    // from the upload handler. When present, this is the actual aerial
+    // image extracted from the PDF's embedded XObjects (via pdfExtractAerial),
+    // NOT a rendered page snapshot. The verification card shows it directly
+    // on the LEFT side so the broker can compare against the matched parcel.
+    sourceAerial?: string | null,
   ) => {
     const userMessage: Message = {
       role: 'user',
@@ -693,16 +700,15 @@ export default function ImportPage() {
 
       const data = await response.json();
 
-      // Attach the page-1 aerial to the extracted comp so the verification
+      // Attach the source aerial to the extracted comp so the verification
       // card can show it on the LEFT side (vs. the matched parcel on the
-      // RIGHT). For single-comp PDFs (the common Stouffer "Farm Sale" format
-      // pattern) page 1 IS the aerial of the subject property. For multi-
-      // comp PDFs we can't reliably attribute one image to one comp without
-      // per-page AI extraction, so we leave aerialImage null and the card
-      // falls back to the text panel. Conservative on purpose — better to
-      // show no aerial than the WRONG aerial.
-      if (Array.isArray(data.comps) && data.comps.length === 1 && Array.isArray(images) && images.length > 0) {
-        (data.comps[0] as any).aerialImage = images[0];
+      // RIGHT). `sourceAerial` is the actual aerial image extracted from
+      // the PDF's embedded XObjects — NOT a rendered page screenshot.
+      // Only attach when a single comp came back (multi-comp PDFs can't
+      // reliably attribute one image to one comp without per-page AI
+      // extraction; safer to leave aerialImage null and fall back to text).
+      if (sourceAerial && Array.isArray(data.comps) && data.comps.length === 1) {
+        (data.comps[0] as any).aerialImage = sourceAerial;
       }
 
       // Browser-side auto-locate: server-side auto-locate fails inside Vercel
@@ -1291,8 +1297,17 @@ export default function ImportPage() {
       // Images (jpg/png): pass straight through as a single-image array.
       if (file.type === 'application/pdf') {
         toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
-        // Higher quality now that we chunk — no token-budget worry per call
-        const images = await pdfToImages(file, { scale: 1.5, maxPages: 60 });
+        // Higher quality now that we chunk — no token-budget worry per call.
+        // Extract the largest embedded aerial in PARALLEL with page rendering
+        // — both operations parse the PDF, but pdfjs caches the parse so the
+        // second open is cheap, and the network/AI call is the dominant cost
+        // anyway. Aerial extraction returns null when no qualifying image
+        // exists (text-only PDFs, scanned-as-raster appraisals), in which
+        // case the verification card falls back to the text panel.
+        const [images, sourceAerial] = await Promise.all([
+          pdfToImages(file, { scale: 1.5, maxPages: 60 }),
+          extractLargestAerial(file).catch(() => null),
+        ]);
         toast.dismiss('pdf-render');
         if (images.length === 0) {
           toast.error('Could not render PDF');
@@ -1306,7 +1321,7 @@ export default function ImportPage() {
           await extractFromChunkedPdf(file, images);
           return;
         }
-        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images);
+        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images, sourceAerial);
         return;
       }
 
@@ -1625,28 +1640,19 @@ export default function ImportPage() {
                           {/* LEFT: source */}
                           <div>
                             {aerial ? (
-                              // Aerial is the FULL PDF page (~portrait letter
-                              // ratio with the aerial at the top, data tables
-                              // below). Default `object-cover` centered would
-                              // show the data tables; anchor to top + scale up
-                              // via CSS background so the thumbnail crops to
-                              // just the aerial portion. 240% zoom is tuned to
-                              // Stouffer-format pages where the aerial occupies
-                              // roughly the top 20-30% — most appraisal pages
-                              // have generous margins above the aerial so we
-                              // need more zoom than first guess. Adjust here
-                              // if other appraisal formats have different
-                              // layouts.
-                              <div
-                                role="img"
-                                aria-label="From source"
-                                className="w-full h-32 rounded border border-border bg-night"
-                                style={{
-                                  backgroundImage: `url("${aerial}")`,
-                                  backgroundSize: '240% auto',
-                                  backgroundPosition: 'center top',
-                                  backgroundRepeat: 'no-repeat',
-                                }}
+                              // Aerial is the actual aerial photo extracted
+                              // from the PDF's embedded image XObjects (via
+                              // pdfExtractAerial), NOT a rendered page
+                              // screenshot. Use plain object-cover — no CSS
+                              // zoom hack needed because the image is already
+                              // just the photo. Aspect ratio varies by source
+                              // (landscape, square, occasionally portrait),
+                              // and object-cover handles all of them.
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={aerial}
+                                alt="From source"
+                                className="w-full h-32 object-cover rounded border border-border bg-night"
                               />
                             ) : sourceMapUrl ? (
                               // eslint-disable-next-line @next/next/no-img-element
