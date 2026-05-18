@@ -33,7 +33,7 @@ import mapboxgl from 'mapbox-gl';
 // quirk).
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -83,6 +83,21 @@ export default function ReviewPage() {
   // to make the page usable on narrow viewports / mobile. Default open
   // on first render; toggled via the button on the panel edge.
   const [panelOpen, setPanelOpen] = useState(true);
+
+  // Editing mode for the workspace. 'view' = read-only (Stage A behavior).
+  // 'reselect' = parcel-selection mode (Stage B): broker clicks parcels on
+  // the map to add/remove them from the cluster; save merges and writes
+  // the new boundary back to the comp.
+  const [mode, setMode] = useState<'view' | 'reselect'>('view');
+  // Parcels currently selected for the cluster (in reselect mode).
+  // Stored as a Set of prop_id strings for O(1) toggle lookup.
+  const [selectedPropIds, setSelectedPropIds] = useState<Set<string>>(new Set());
+  // Cached feature collection of nearby parcels (loaded once when entering
+  // reselect mode for the current viewport, then reused for hit-testing
+  // and rendering until mode exits). null = not loaded yet.
+  const [nearbyParcels, setNearbyParcels] = useState<any[] | null>(null);
+  const [loadingParcels, setLoadingParcels] = useState(false);
+  const [reselectSaving, setReselectSaving] = useState(false);
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -309,6 +324,124 @@ export default function ReviewPage() {
     // panel will surface this state with the red MapPinOff badge.
   }, [mapLoaded, comp]);
 
+  // ── Reselect mode: render nearby parcels as a clickable layer ────────
+  // Two layers:
+  //   nearby-parcels-line   — thin gray outline on every parcel in bbox
+  //                            (the click target). Excludes parcels that
+  //                            are currently selected to avoid double-
+  //                            painting and z-fighting with the gold fill.
+  //   selected-parcels-fill — gold filled polygon for selected parcels,
+  //                            including parcels not in the nearby set
+  //                            (e.g. the originally-selected ones that
+  //                            might extend past the bbox)
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const m = map.current;
+
+    // Helper to remove a layer/source pair if present
+    const removeLayerAndSource = (id: string) => {
+      if (m.getLayer(id)) m.removeLayer(id);
+      if (m.getSource(id)) m.removeSource(id);
+    };
+
+    // Always start clean — remove prior reselect layers
+    removeLayerAndSource('nearby-parcels-line');
+    removeLayerAndSource('selected-parcels-fill');
+    removeLayerAndSource('selected-parcels-line');
+
+    if (mode !== 'reselect' || !nearbyParcels) return;
+
+    // Render ALL nearby parcels as a thin gray outline so broker can
+    // see what's clickable. Selected parcels get their own gold layer
+    // on top, so we include all parcels here (overlap is fine — the
+    // selected layer paints over).
+    m.addSource('nearby-parcels-line', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: nearbyParcels,
+      } as any,
+    });
+    m.addLayer({
+      id: 'nearby-parcels-line',
+      type: 'line',
+      source: 'nearby-parcels-line',
+      paint: {
+        'line-color': '#94a3b8',
+        'line-width': 1,
+        'line-opacity': 0.55,
+      },
+    });
+
+    // Render selected parcels as gold fill + thicker outline
+    const selectedFeatures = nearbyParcels.filter((f: any) =>
+      selectedPropIds.has(String(f.properties?.prop_id))
+    );
+    m.addSource('selected-parcels-fill', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: selectedFeatures,
+      } as any,
+    });
+    m.addLayer({
+      id: 'selected-parcels-fill',
+      type: 'fill',
+      source: 'selected-parcels-fill',
+      paint: {
+        'fill-color': '#facc15',
+        'fill-opacity': 0.35,
+      },
+    });
+    m.addLayer({
+      id: 'selected-parcels-line',
+      type: 'line',
+      source: 'selected-parcels-fill',
+      paint: {
+        'line-color': '#facc15',
+        'line-width': 2.5,
+      },
+    });
+
+    // Click handler: toggle the parcel under cursor in the selection set.
+    // Inlined here (vs calling toggleParcel) to avoid a useEffect-ordering
+    // dependency — this effect runs before toggleParcel is declared lower
+    // in the file.
+    const handleClick = (e: any) => {
+      const features = m.queryRenderedFeatures(e.point, {
+        layers: ['nearby-parcels-line'],
+      });
+      if (features.length === 0) return;
+      const propId = features[0].properties?.prop_id;
+      if (!propId) return;
+      const id = String(propId);
+      setSelectedPropIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    };
+    m.on('click', 'nearby-parcels-line', handleClick);
+
+    // Crosshair cursor when over a clickable parcel
+    const handleEnter = () => {
+      if (m.getCanvas()) m.getCanvas().style.cursor = 'crosshair';
+    };
+    const handleLeave = () => {
+      if (m.getCanvas()) m.getCanvas().style.cursor = '';
+    };
+    m.on('mouseenter', 'nearby-parcels-line', handleEnter);
+    m.on('mouseleave', 'nearby-parcels-line', handleLeave);
+
+    return () => {
+      m.off('click', 'nearby-parcels-line', handleClick);
+      m.off('mouseenter', 'nearby-parcels-line', handleEnter);
+      m.off('mouseleave', 'nearby-parcels-line', handleLeave);
+      if (m.getCanvas()) m.getCanvas().style.cursor = '';
+    };
+  }, [mapLoaded, mode, nearbyParcels, selectedPropIds]);
+
   // ── Mark verified handler ───────────────────────────────────────────
   // Clears needs_location_review = false. The gray clock badge in the
   // vault clears as a side effect (the badge is driven by that column).
@@ -331,6 +464,179 @@ export default function ReviewPage() {
       setSaving(false);
     }
   }, [comp, saving, supabase]);
+
+  // ── Stage B: Reselect parcels mode ──────────────────────────────────
+  // Broker enters this mode to fix a wrong cluster — click parcels on
+  // the map to add/remove them from the selection. Save merges selected
+  // polygons via turf.union and writes the new boundary + parcel_id +
+  // pin coordinates back to the comp. Cancel exits without DB changes.
+  //
+  // Initial selection seeds from comp.parcel_id (the comma-separated
+  // list of prop_ids stored at save time). If absent, the broker starts
+  // with an empty selection and builds it from scratch.
+
+  const enterReselectMode = useCallback(async () => {
+    if (!comp || !map.current) return;
+    setMode('reselect');
+
+    // Seed selection from existing parcel_id list
+    const existingIds = (comp.parcel_id || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setSelectedPropIds(new Set(existingIds));
+
+    // Fetch nearby parcels for the current viewport. Use a slightly
+    // expanded bbox so broker has room to grab adjacent parcels they
+    // might want to add to the cluster.
+    setLoadingParcels(true);
+    try {
+      const bounds = map.current.getBounds();
+      if (!bounds) throw new Error('map has no bounds');
+      const sw = bounds.getSouthWest();
+      const ne = bounds.getNorthEast();
+      // Expand 20% in each direction for breathing room
+      const dLng = (ne.lng - sw.lng) * 0.2;
+      const dLat = (ne.lat - sw.lat) * 0.2;
+      const bbox = [
+        sw.lng - dLng,
+        sw.lat - dLat,
+        ne.lng + dLng,
+        ne.lat + dLat,
+      ].map((v) => v.toFixed(6)).join(',');
+      const res = await fetch(`/api/parcels-bbox?bbox=${bbox}`);
+      if (!res.ok) throw new Error(`parcels-bbox ${res.status}`);
+      const data = await res.json();
+      const features = Array.isArray(data?.features) ? data.features : [];
+      setNearbyParcels(features);
+    } catch (e: any) {
+      console.error('[review] failed to load nearby parcels:', e);
+      toast.error(`Couldn't load nearby parcels: ${e?.message || 'unknown'}`);
+      setMode('view');
+    } finally {
+      setLoadingParcels(false);
+    }
+  }, [comp]);
+
+  const cancelReselect = useCallback(() => {
+    setMode('view');
+    setSelectedPropIds(new Set());
+    setNearbyParcels(null);
+  }, []);
+
+  const toggleParcel = useCallback((propId: string) => {
+    setSelectedPropIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(propId)) {
+        next.delete(propId);
+      } else {
+        next.add(propId);
+      }
+      return next;
+    });
+  }, []);
+
+  const saveReselect = useCallback(async () => {
+    if (!comp || !nearbyParcels || reselectSaving) return;
+    if (selectedPropIds.size === 0) {
+      toast.error('Select at least one parcel before saving');
+      return;
+    }
+    setReselectSaving(true);
+    try {
+      // Find selected features
+      const selected = nearbyParcels.filter((f: any) =>
+        selectedPropIds.has(String(f.properties?.prop_id))
+      );
+      if (selected.length === 0) {
+        toast.error('Selected parcels not found in current viewport');
+        setReselectSaving(false);
+        return;
+      }
+
+      // Merge polygons via turf.union (handles 1 or many)
+      let merged: any = selected[0];
+      for (let i = 1; i < selected.length; i++) {
+        try {
+          const u = turf.union(merged, selected[i]);
+          if (u) merged = u;
+        } catch (e) {
+          console.warn('[review] turf.union failed on parcel', i, e);
+        }
+      }
+      const mergedGeometry = merged?.geometry || merged;
+
+      // Compute new pin = centroid of merged polygon
+      let pinLat: number | null = null;
+      let pinLng: number | null = null;
+      try {
+        const c = turf.centroid(merged);
+        const coords = c?.geometry?.coordinates;
+        if (Array.isArray(coords) && coords.length >= 2) {
+          pinLng = coords[0];
+          pinLat = coords[1];
+        }
+      } catch {}
+
+      // Comma-separated prop_id list (matches existing convention)
+      const newParcelIds = selected
+        .map((f: any) => f.properties?.prop_id)
+        .filter(Boolean)
+        .join(',');
+
+      const { error } = await supabase
+        .from('comps')
+        .update({
+          boundary_geojson: mergedGeometry,
+          parcel_id: newParcelIds,
+          latitude: pinLat,
+          longitude: pinLng,
+          // Clear the location-review flag since broker has actively
+          // re-picked the boundary — that IS the verification.
+          needs_location_review: false,
+        })
+        .eq('id', comp.id);
+
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+      } else {
+        toast.success(`Saved — ${selected.length} parcel${selected.length === 1 ? '' : 's'} merged`);
+        setComp({
+          ...comp,
+          boundary_geojson: mergedGeometry,
+          parcel_id: newParcelIds,
+          latitude: pinLat,
+          longitude: pinLng,
+          needs_location_review: false,
+        });
+        setMode('view');
+        setSelectedPropIds(new Set());
+        setNearbyParcels(null);
+      }
+    } finally {
+      setReselectSaving(false);
+    }
+  }, [comp, nearbyParcels, selectedPropIds, reselectSaving, supabase]);
+
+  // Compute running stats for the reselect side panel
+  const reselectStats = (() => {
+    if (mode !== 'reselect' || !nearbyParcels) return null;
+    const selected = nearbyParcels.filter((f: any) =>
+      selectedPropIds.has(String(f.properties?.prop_id))
+    );
+    const totalAcres = selected.reduce(
+      (s: number, f: any) => s + (Number(f.properties?.gis_area) || 0),
+      0
+    );
+    const target = Number(comp?.acres) || 0;
+    const delta = target > 0 ? Math.abs(totalAcres - target) / target : null;
+    return {
+      count: selected.length,
+      totalAcres,
+      target,
+      delta,
+    };
+  })();
 
   // ── Loading / error states ──────────────────────────────────────────
   if (loadError) {
@@ -496,6 +802,78 @@ export default function ReviewPage() {
             </p>
           </div>
 
+          {/* RESELECT MODE BANNER — replaces normal action flow with the
+              selection controls when broker is actively re-picking parcels.
+              Shows running stats so broker can see how acreage compares
+              to the appraisal target as they click. */}
+          {mode === 'reselect' && (
+            <div className="bg-sage/10 border border-sage/40 rounded-lg p-3 space-y-3">
+              <div className="flex items-center gap-1.5 text-sage font-bold text-xs uppercase tracking-wide">
+                <Edit3 size={12} />
+                Reselect mode
+              </div>
+              {loadingParcels ? (
+                <div className="flex items-center gap-2 text-xs text-slate-300">
+                  <Loader2 size={12} className="animate-spin" />
+                  Loading nearby parcels…
+                </div>
+              ) : (
+                <>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Click parcels on the map to add/remove them from the
+                    cluster. Selected parcels are gold; unselected are
+                    thin gray outlines.
+                  </p>
+                  {reselectStats && (
+                    <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+                      <div>
+                        <span className="text-slate-500">Selected:</span>{' '}
+                        <span className="text-white font-bold font-mono">{reselectStats.count}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Total:</span>{' '}
+                        <span className="text-white font-bold font-mono">{reselectStats.totalAcres.toFixed(1)}ac</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Target:</span>{' '}
+                        <span className="text-slate-300 font-mono">{reselectStats.target.toFixed(1)}ac</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Δ:</span>{' '}
+                        <span className={`font-mono font-bold ${
+                          reselectStats.delta == null ? 'text-slate-400' :
+                          reselectStats.delta < 0.05 ? 'text-emerald-400' :
+                          reselectStats.delta < 0.15 ? 'text-amber-400' :
+                          'text-red-400'
+                        }`}>
+                          {reselectStats.delta != null ? `${(reselectStats.delta * 100).toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <button
+                      onClick={cancelReselect}
+                      disabled={reselectSaving}
+                      className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                    >
+                      <X size={12} />
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveReselect}
+                      disabled={reselectSaving || selectedPropIds.size === 0}
+                      className="py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {reselectSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                      {reselectSaving ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Status badges — same set as the vault list uses */}
           <div className="flex flex-wrap gap-1.5">
             {!hasPin && (
@@ -588,9 +966,19 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* Action row. Stages B and C will add Reselect / Draw buttons
-              alongside Mark verified. For Stage A, just the verify button. */}
+          {/* Action row. Hidden in reselect mode (the reselect banner
+              above has its own Save/Cancel controls). */}
+          {mode === 'view' && (
           <div className="border-t border-border pt-3 space-y-2">
+            <button
+              onClick={enterReselectMode}
+              disabled={!map.current}
+              title="Re-pick the parcels that make up this comp — click parcels on the map to add/remove"
+              className="w-full py-2 bg-sage/10 hover:bg-sage/20 border border-sage/30 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Edit3 size={12} />
+              Reselect parcels
+            </button>
             <button
               onClick={handleMarkVerified}
               disabled={saving || !comp.needs_location_review}
@@ -605,10 +993,10 @@ export default function ReviewPage() {
               {comp.needs_location_review ? 'Mark verified' : 'Verified'}
             </button>
             <p className="text-[10px] text-slate-500 leading-relaxed">
-              Editing tools (reselect parcels, draw boundary) are
-              coming in the next builds.
+              Drawing a new boundary from scratch comes in the next build.
             </p>
           </div>
+          )}
         </div>
       </aside>
       )}
