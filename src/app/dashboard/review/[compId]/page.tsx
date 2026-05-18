@@ -33,7 +33,7 @@ import mapboxgl from 'mapbox-gl';
 // quirk).
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -79,6 +79,10 @@ export default function ReviewPage() {
   // Aerial panel collapses to a small toggle button after verification —
   // see DESIGN_DECISIONS §5 (aerial as verification tool, not permanent UI).
   const [aerialCollapsed, setAerialCollapsed] = useState(false);
+  // Side panel collapsible — broker can hide to maximize map area, or
+  // to make the page usable on narrow viewports / mobile. Default open
+  // on first render; toggled via the button on the panel edge.
+  const [panelOpen, setPanelOpen] = useState(true);
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -236,6 +240,17 @@ export default function ReviewPage() {
     };
   }, [comp]);
 
+  // Resize the map canvas whenever the side panel toggles — flex
+  // reflow changes the map column width, but Mapbox can't detect that
+  // by itself and renders to the old canvas size, leaving black space
+  // on one edge. resize() takes a frame to settle so we use a short
+  // delay; matches the CSS transition I'm not using yet but might add.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const t = setTimeout(() => map.current?.resize(), 50);
+    return () => clearTimeout(t);
+  }, [panelOpen, mapLoaded]);
+
   // ── Render the boundary + auto-fit when both map and comp are ready ─
   useEffect(() => {
     if (!mapLoaded || !comp || !map.current) return;
@@ -348,13 +363,13 @@ export default function ReviewPage() {
   const ppa = comp.ppa_land_only ?? comp.price_per_acre;
 
   return (
-    // Flex root with explicit viewport height. The map needs its
-    // container to have measurable dimensions at the moment Mapbox
-    // initializes — the previous fixed+absolute structure measured
-    // 0×0 in some cases and Mapbox refused to render. The flex+
-    // flex-1+relative+w/h-full pattern below is the same one the
-    // main /dashboard/map page uses successfully.
-    <div className="flex h-screen w-screen bg-night overflow-hidden">
+    // Flex root sized to fill the dashboard layout's <main> slot.
+    // Use h-full / w-full (NOT h-screen / w-screen) because the
+    // dashboard layout already wraps every page in a flex row with
+    // the AppNav sidebar — vw/vh would extend past <main>'s edge and
+    // clip the right side off-screen. The flex+flex-1+relative+
+    // w/h-full pattern is the same one /dashboard/map uses.
+    <div className="flex h-full w-full bg-night overflow-hidden">
       {/* MAP COLUMN — relative so absolute overlays (top bar, aerial)
           position against the map area, not the whole viewport. */}
       <div className="flex-1 relative">
@@ -398,6 +413,20 @@ export default function ReviewPage() {
             </span>
           )}
         </div>
+
+        {/* Reopen-panel button (only shown when side panel is hidden).
+            Top-right of map column so broker can bring details back. */}
+        {!panelOpen && (
+          <button
+            onClick={() => setPanelOpen(true)}
+            className="absolute top-3 right-3 z-10 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs text-slate-300 hover:text-white flex items-center gap-1.5 shadow-xl"
+            title="Show details panel"
+            aria-label="Show details panel"
+          >
+            <PanelRightOpen size={14} />
+            Details
+          </button>
+        )}
 
         {/* FLOATING AERIAL PANEL — bottom-left corner of map area.
             Source aerial extracted at import time. Collapses to a
@@ -444,8 +473,21 @@ export default function ReviewPage() {
         )}
       </div>
 
-      {/* SIDE PANEL (fixed-width flex sibling — gets predictable space) */}
-      <aside className="w-[320px] flex-shrink-0 bg-night/95 backdrop-blur border-l border-border overflow-y-auto">
+      {/* SIDE PANEL — collapsible. Responsive width: 288px on mobile/small,
+          320px on md and up. When closed, hides entirely and the map column
+          takes full width (map.resize() runs on toggle to update the canvas).
+          A floating reopen button appears in the map column when closed. */}
+      {panelOpen && (
+      <aside className="w-72 md:w-80 flex-shrink-0 bg-night/95 backdrop-blur border-l border-border overflow-y-auto relative">
+        {/* Collapse button (top-right of panel itself) */}
+        <button
+          onClick={() => setPanelOpen(false)}
+          className="absolute top-2 right-2 z-10 p-1 text-slate-500 hover:text-white"
+          title="Hide panel"
+          aria-label="Hide details panel"
+        >
+          <PanelRightClose size={16} />
+        </button>
         <div className="p-4 space-y-4">
           <div>
             <h1 className="text-base font-bold text-white">{label}</h1>
@@ -569,6 +611,7 @@ export default function ReviewPage() {
           </div>
         </div>
       </aside>
+      )}
     </div>
   );
 }
