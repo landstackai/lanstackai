@@ -87,16 +87,39 @@ export default function ReviewPage() {
     if (!compId) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase
+      // Select with source_type/source_url, retry without them if the
+      // production schema doesn't have migration 022 applied yet (those
+      // columns live on the url-upload-extraction branch which hasn't
+      // merged to main). insertCompResilient does the same dance for
+      // saveCompSilent — same principle, applied to reads.
+      const SELECT_WITH_SOURCE =
+        'id, property_name, county, state, acres, sale_price, sale_date, ' +
+        'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
+        'needs_extraction_review, needs_location_review, source_type, source_url, confidence';
+      const SELECT_WITHOUT_SOURCE =
+        'id, property_name, county, state, acres, sale_price, sale_date, ' +
+        'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
+        'needs_extraction_review, needs_location_review, confidence';
+
+      let { data, error } = await supabase
         .from('comps')
-        .select(
-          'id, property_name, county, state, acres, sale_price, sale_date, ' +
-          'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
-          'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
-          'needs_extraction_review, needs_location_review, source_type, source_url, confidence'
-        )
+        .select(SELECT_WITH_SOURCE)
         .eq('id', compId)
         .maybeSingle();
+
+      // If the source columns don't exist on this Supabase project,
+      // retry without them so the page still loads.
+      if (error && /source_(type|url)/i.test(error.message)) {
+        const retry = await supabase
+          .from('comps')
+          .select(SELECT_WITHOUT_SOURCE)
+          .eq('id', compId)
+          .maybeSingle();
+        data = retry.data;
+        error = retry.error;
+      }
       if (cancelled) return;
       if (error) {
         setLoadError(error.message);
