@@ -1377,15 +1377,15 @@ export default function ImportPage() {
   const saveComp = async (
     comp: ExtractedComp,
     opts?: { needsReview?: boolean; silent?: boolean }
-  ) => {
+  ): Promise<{ id: string } | null> => {
     const needsReview = opts?.needsReview ?? false;
     const silent = opts?.silent ?? false;
     const hasPin = comp.latitude != null && comp.longitude != null;
 
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) return null;
 
-    const { error } = await supabase.from('comps').insert({
+    const { data: inserted, error } = await supabase.from('comps').insert({
       created_by: user.id,
       property_name: comp.property_name,
       county: comp.county || '',
@@ -1428,10 +1428,11 @@ export default function ImportPage() {
       // multi-comp PDFs, text-only appraisals, or extraction failures.
       // See docs/DESIGN_DECISIONS.md §5 (review page architecture).
       aerial_image: (comp as any).aerialImage || null,
-    });
+    }).select('id').single();
 
-    if (error) {
+    if (error || !inserted) {
       if (!silent) toast.error('Failed to save comp');
+      return null;
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
 
@@ -1476,6 +1477,7 @@ export default function ImportPage() {
       }
 
       setPendingComps(prev => prev.filter(c => c !== comp));
+      return inserted;
     }
   };
 
@@ -1749,26 +1751,23 @@ export default function ImportPage() {
                               // Option B (per docs/DESIGN_DECISIONS.md §4):
                               // Save THIS comp + all OTHER pending comps as
                               // needs_location_review=true in parallel, then
-                              // same-tab navigate to the map. Preserves the
-                              // broker's work on multi-comp PDFs — the other
-                              // cards appear in the vault with gray clock
-                              // badges instead of disappearing entirely.
+                              // same-tab navigate to the review workspace
+                              // for the current comp. Other comps land in
+                              // the vault with gray clock badges so nothing
+                              // is silently lost on multi-comp imports.
                               //
                               // Same-tab nav avoids Safari popup blocker
-                              // entirely. The cost (you lose import-page
-                              // state) is mitigated by saving everything
-                              // first so nothing's truly lost.
-                              const mapUrl = (sysLat != null && sysLng != null)
-                                ? `/dashboard/map?focus=${sysLat},${sysLng},14`
-                                : `/dashboard/vault`;
+                              // entirely. The bulk-save preserves work.
                               const others = pendingComps.filter((c) => c !== comp);
+                              let currentId: string | null = null;
                               try {
-                                await Promise.all([
+                                const [currentResult] = await Promise.all([
                                   saveComp(comp, { needsReview: true, silent: false }),
                                   ...others.map((c) =>
                                     saveComp(c, { needsReview: true, silent: true })
                                   ),
                                 ]);
+                                currentId = currentResult?.id ?? null;
                                 if (others.length > 0) {
                                   toast.success(
                                     `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
@@ -1779,9 +1778,17 @@ export default function ImportPage() {
                                 console.error('[needs-review] parallel save failed:', e);
                                 toast.error('Some comps may not have saved — check the vault');
                               }
-                              router.push(mapUrl);
+                              // Navigate to the dedicated review workspace
+                              // when the save succeeded; fall back to the
+                              // vault when the save failed (so broker can
+                              // still see what landed).
+                              if (currentId) {
+                                router.push(`/dashboard/review/${currentId}`);
+                              } else {
+                                router.push('/dashboard/vault');
+                              }
                             }}
-                            title="Save this and any other pending comps for review, then open the map"
+                            title="Save this and any other pending comps for review, then open the review workspace"
                             className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
                           >
                             <Clock size={12} />
