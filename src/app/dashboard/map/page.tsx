@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Layers, Waves } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -53,12 +53,28 @@ export default function MapPage() {
   // Pin DOM elements keyed by comp id — used by the hover-highlight effect to
   // update styling imperatively without rebuilding markers.
   const markerElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  // Comp marker popups keyed by comp id — boundary hover looks the popup
+  // up here so hovering a red comp polygon triggers the same rich
+  // .comp-hover-popup card that hovering the pin shows. One canonical
+  // comp preview, two ways to trigger it; matches the broker's mental
+  // model that the boundary IS the comp.
+  const compPopupsRef = useRef<Map<string, mapboxgl.Popup>>(new Map());
   const drawRef = useRef<MapboxDraw | null>(null);
 
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
   const [mapStyle, setMapStyle] = useState<'satellite' | 'streets' | 'terrain'>('satellite');
+  // Toggleable raster overlays. Counties default ON (structural
+  // reference — brokers think in counties first when scoping comps).
+  // Floodplain defaults OFF — it's busy at low zoom and most workflows
+  // don't need it until the broker focuses on a specific property.
+  // Both layers are added to the map at load time with visibility set
+  // from this state; the sync effect below flips visibility on change.
+  const [overlays, setOverlays] = useState<{ counties: boolean; floodplain: boolean }>({
+    counties: true,
+    floodplain: false,
+  });
   const [mapLoaded, setMapLoaded] = useState(false);
 
   const [mapMode, setMapMode] = useState<MapMode>('view');
@@ -417,6 +433,12 @@ export default function MapPage() {
           'raster-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.75, 15, 0.9, 18, 1],
         },
       });
+
+      // ── County + floodplain overlays added LATER via the
+      // ensureOverlayLayers effect (not in the 'load' handler) so they
+      // survive basemap switches — setStyle() wipes all custom layers,
+      // and the effect re-adds them whenever mapLoaded flips to true
+      // (initial load + after every style.load). See effect below.
 
       // CMA subject boundary (only populated in workspace view)
       map.current!.addSource('cma-subject', {
@@ -1418,6 +1440,10 @@ export default function MapPage() {
           'text-halo-blur': 0.4,
         },
       });
+
+      // (TxGIO parcel hover tooltip removed per broker feedback.
+      // Click still surfaces full parcel info via the existing
+      // map-click → bottom sheet flow.)
     }
 
     let timer: any = null;
@@ -2328,12 +2354,179 @@ export default function MapPage() {
       .filter((c: any) => c.boundary_geojson && c.id !== editingBoundaryComp?.id)
       .map((c: any) => ({
         type: 'Feature' as const,
-        properties: { id: c.id, owner_name: c.owner_name },
+        // Carry enough fields on each feature for the hover tooltip to
+        // surface a useful label without a separate lookup. property_name
+        // is the broker's primary identifier, acres is the headline
+        // number, county/state ground it on the satellite view.
+        properties: {
+          id: c.id,
+          owner_name: c.owner_name,
+          property_name: c.property_name,
+          acres: c.acres,
+          county: c.county,
+          state: c.state,
+        },
         geometry: c.boundary_geojson,
       }));
     const src = map.current.getSource('comp-boundaries') as mapboxgl.GeoJSONSource | undefined;
     if (src) src.setData({ type: 'FeatureCollection', features });
   }, [displayComps, mapLoaded, editingBoundaryComp]);
+
+  // Ensure overlay layers exist + reflect current toggle state.
+  //
+  // Lives in an effect (not the 'load' handler) because changeStyle()
+  // calls setStyle() which wipes every custom source/layer — and after
+  // style.load fires, mapLoaded flips false→true, re-running this
+  // effect to re-add the layers idempotently. Setup + visibility-sync
+  // in one place so they can't drift out of order.
+  //
+  // Both layers are added as RASTER overlays via the ArcGIS export
+  // pattern (same as the existing txgio-parcels-layer). No client-side
+  // feature data means no hover / click for these — they're visual
+  // reference layers only. Hover wiring on the vector parcel layer
+  // above still works for the parcel-owner tooltip; flood zone info,
+  // if we ever want it, would need a separate /api/floodzone?lat=&lng=
+  // round-trip on click.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const m = map.current;
+    try {
+      // TX County boundaries — TxGIO Boundaries/Counties MapServer.
+      // Visible at all zoom levels. Important when a property straddles
+      // a county line (different tax + appraisal districts on each side).
+      if (!m.getSource('tx-counties')) {
+        m.addSource('tx-counties', {
+          type: 'raster',
+          tiles: [
+            'https://feature.geographic.texas.gov/arcgis/rest/services/Boundaries/Counties/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+          ],
+          tileSize: 512,
+          attribution: 'Counties © TxGIO',
+        });
+      }
+      if (!m.getLayer('tx-counties-layer')) {
+        m.addLayer({
+          id: 'tx-counties-layer',
+          type: 'raster',
+          source: 'tx-counties',
+          layout: { visibility: overlays.counties ? 'visible' : 'none' },
+          paint: {
+            // Subtler at low zoom (don't dominate the wide TX view),
+            // more visible mid-zoom for county comparison.
+            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 4, 0.45, 8, 0.65, 12, 0.7],
+          },
+        });
+      }
+
+      // FEMA National Flood Hazard Layer. Layer 28 = "Flood Hazard Zones"
+      // (Zone A, AE, X, etc) — the canonical colored polygons brokers
+      // and underwriters care about. Material to land valuation: parts
+      // in Zone AE carry build restrictions + mandatory insurance.
+      if (!m.getSource('fema-floodplain')) {
+        m.addSource('fema-floodplain', {
+          type: 'raster',
+          tiles: [
+            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:28&f=image',
+          ],
+          tileSize: 512,
+          attribution: 'Floodplain © FEMA NFHL',
+        });
+      }
+      if (!m.getLayer('fema-floodplain-layer')) {
+        m.addLayer({
+          id: 'fema-floodplain-layer',
+          type: 'raster',
+          source: 'fema-floodplain',
+          layout: { visibility: overlays.floodplain ? 'visible' : 'none' },
+          paint: { 'raster-opacity': 0.65 },
+        });
+      }
+
+      // Sync visibility on every run — covers the case where the layer
+      // already existed but the toggle state has since changed.
+      m.setLayoutProperty('tx-counties-layer', 'visibility', overlays.counties ? 'visible' : 'none');
+      m.setLayoutProperty('fema-floodplain-layer', 'visibility', overlays.floodplain ? 'visible' : 'none');
+    } catch (e) {
+      console.warn('[overlays] failed to add/toggle overlay layers:', e);
+    }
+  }, [overlays, mapLoaded]);
+
+  // ── Comp boundary hover tooltip ──────────────────────────────────────
+  // Parcel hover tooltips (owner + acres on TxGIO / Blanco CAD / owner-
+  // search / selected / tapped / CMA subject / merged) were removed per
+  // broker feedback — they cluttered the map without adding signal
+  // brokers needed in flow. Owner lookups stay available via the owner-
+  // search input + the per-comp parcel list in the side panel.
+  //
+  // The COMP boundary hover stays because it surfaces the rich price /
+  // acres / $/ac card that the comp marker hover already shows — same
+  // popup, two ways to trigger it. Worth the on-hover cost because the
+  // info isn't visible anywhere else on the map by default.
+  useEffect(() => {
+    if (!mapLoaded || !map.current) return;
+    const m = map.current;
+
+    // ─── Comp boundary hover: reuse the marker's rich .comp-hover-popup
+    //
+    // Look up the comp's existing popup in compPopupsRef (populated by
+    // the markers effect) and addTo(map) on mouseenter. Same popup the
+    // pin hover shows — anchored at the comp's centroid, sized to its
+    // 4-col price grid. Also sets hoveredCompId so the marker border
+    // glows in sync, matching the visual feedback the pin-hover path
+    // already provides.
+    //
+    // No `displayComps` dep on this effect — the popup map is a ref,
+    // so reads stay current as the markers effect rebuilds it. If we
+    // depended on displayComps, the entire hover-wiring effect would
+    // tear down + rebuild on every comp filter change. Wasteful and
+    // (more importantly) creates a window where no boundary hover
+    // works at all.
+    let activeBoundaryCompId: string | null = null;
+    const boundaryHoverEnter = (e: any) => {
+      const f = e.features?.[0];
+      const compId: string | undefined = f?.properties?.id;
+      if (!compId) return;
+      const popup = compPopupsRef.current.get(compId);
+      if (!popup) return;
+      // Avoid re-adding the same popup on every mousemove inside the
+      // boundary (mousemove fires constantly). Track which comp is
+      // active; only swap when the cursor crosses into a different
+      // boundary.
+      if (activeBoundaryCompId === compId) return;
+      // Cursor left one boundary and entered another in the same tick —
+      // remove the previous popup before showing the next.
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+      }
+      activeBoundaryCompId = compId;
+      try {
+        popup.addTo(m);
+        if (m.getCanvas()) m.getCanvas().style.cursor = 'pointer';
+        setHoveredCompId(compId);
+      } catch {}
+    };
+    const boundaryHoverLeave = () => {
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+        const leaving = activeBoundaryCompId;
+        activeBoundaryCompId = null;
+        try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
+        setHoveredCompId((prev) => (prev === leaving ? null : prev));
+      }
+    };
+    if (m.getLayer('comp-boundary-fill')) {
+      m.on('mousemove', 'comp-boundary-fill', boundaryHoverEnter);
+      m.on('mouseleave', 'comp-boundary-fill', boundaryHoverLeave);
+    }
+
+    return () => {
+      try { m.off('mousemove', 'comp-boundary-fill', boundaryHoverEnter); } catch {}
+      try { m.off('mouseleave', 'comp-boundary-fill', boundaryHoverLeave); } catch {}
+      if (activeBoundaryCompId) {
+        try { compPopupsRef.current.get(activeBoundaryCompId)?.remove(); } catch {}
+      }
+    };
+  }, [mapLoaded]);
 
   // Comp markers
   useEffect(() => {
@@ -2342,6 +2535,10 @@ export default function MapPage() {
     markersRef.current = [];
     popupsRef.current.forEach(p => p.remove());
     popupsRef.current = [];
+    // Boundary-hover popup map gets rebuilt below; clear stale entries so
+    // a comp that just left displayComps (filter change, CMA exit) can't
+    // still pop a popup from a hover on its boundary.
+    compPopupsRef.current.clear();
 
     displayComps.forEach(comp => {
       if (!comp.latitude || !comp.longitude) return;
@@ -2461,6 +2658,7 @@ export default function MapPage() {
       markersRef.current.push(marker);
       popupsRef.current.push(popup);
       markerElsRef.current.set(comp.id, el);
+      compPopupsRef.current.set(comp.id, popup);
     });
   }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode]);
 
@@ -2861,6 +3059,37 @@ export default function MapPage() {
               title="Show total sale price on pins"
             >
               Total
+            </button>
+          </div>
+
+          {/* Overlay toggles — county lines + FEMA floodplain. Independent
+              toggles in a single pill so they share the visual rhythm of
+              the basemap/scope/pin-label controls above. Active = sage
+              for counties (structural reference data), sky for floodplain
+              (hazard data — distinct so brokers reading the map can tell
+              which is which from peripheral vision). */}
+          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[14rem]">
+            <button
+              onClick={() => setOverlays((o) => ({ ...o, counties: !o.counties }))}
+              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.counties ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
+              }`}
+              title={overlays.counties ? 'Hide county lines' : 'Show county lines'}
+              aria-pressed={overlays.counties}
+            >
+              <Layers size={12} />
+              Counties
+            </button>
+            <button
+              onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
+              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-slate-400 hover:text-white'
+              }`}
+              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
+              aria-pressed={overlays.floodplain}
+            >
+              <Waves size={12} />
+              Flood
             </button>
           </div>
 
