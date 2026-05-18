@@ -119,6 +119,12 @@ export default function MapPage() {
   // Scope filter for the map: All (everything visible) / Company (only
   // is_company_transaction comps) / Mine (only comps created by current user).
   const [mapScope, setMapScope] = useState<'all' | 'company' | 'mine'>('all');
+  // County filter — set of county names (case-insensitive match against
+  // comp.county). Empty Set = no filter, show all counties. Populated
+  // via the Filters popover. The set of selectable counties is derived
+  // from comps actually present in the user's data (typically 5-30 for
+  // a working broker), keeping the picker short.
+  const [countyFilter, setCountyFilter] = useState<Set<string>>(new Set());
 
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [detectingBoundary, setDetectingBoundary] = useState(false);
@@ -2345,18 +2351,52 @@ export default function MapPage() {
     }
   }, [searchQuery, comps, clearAiSearch, flyToPlace]);
 
-  // When viewing a CMA, restrict everything to its selected comps. Otherwise
-  // apply the map-level scope filter: All / Company / Mine.
+  // Normalize a county string for comparison — strips "County" suffix,
+  // collapses whitespace, lowercases. So "Frio County" / "frio" / "FRIO"
+  // all match the same bucket. Used both for the unique-counties list
+  // (deduping) and for filter matching against comp.county.
+  const normalizeCounty = (raw: any): string => {
+    return String(raw ?? '')
+      .toLowerCase()
+      .replace(/\bcounty\b/g, '')
+      .trim();
+  };
+
+  // When viewing a CMA, restrict everything to its selected comps.
+  // Otherwise apply the map-level scope + county filters.
   const displayComps = viewingCMA?.selected_comp_ids?.length
     ? comps.filter((c) => viewingCMA.selected_comp_ids.includes(c.id))
     : comps.filter((c) => {
-        if (mapScope === 'company') return Boolean((c as any).is_company_transaction);
+        if (mapScope === 'company' && !(c as any).is_company_transaction) return false;
         // "My Sales" reads transaction_agent_id (who closed the deal), NOT
         // created_by (who typed it in). Research comps you entered but didn't
         // sell stay out of this view.
-        if (mapScope === 'mine') return currentUserId != null && (c as any).transaction_agent_id === currentUserId;
+        if (mapScope === 'mine' && !(currentUserId != null && (c as any).transaction_agent_id === currentUserId)) return false;
+        if (countyFilter.size > 0 && !countyFilter.has(normalizeCounty(c.county))) return false;
         return true;
       });
+
+  // Distinct counties present in the user's comps — drives the county
+  // multi-select in the Filters popover. Sorted alphabetically for a
+  // predictable list. Computed from the unfiltered `comps` pool so the
+  // picker doesn't shrink as filters tighten (which would trap brokers
+  // in narrowing dead-ends).
+  const availableCounties = (() => {
+    const seen = new Map<string, string>(); // normalized -> display
+    for (const c of comps) {
+      const norm = normalizeCounty(c.county);
+      if (!norm) continue;
+      // Preserve the first nice-looking version we see for display
+      // (e.g. "Frio" not "FRIO"), but key on normalized for dedupe.
+      if (!seen.has(norm)) {
+        const display = String(c.county || '').replace(/\bcounty\b/gi, '').trim();
+        seen.set(norm, display);
+      }
+    }
+    return Array.from(seen.entries())
+      .map(([norm, display]) => ({ norm, display }))
+      .sort((a, b) => a.display.localeCompare(b.display));
+  })();
 
   // Comp boundaries (saved polygons from boundary_geojson). Hides the comp
   // currently being edited so we don't render its boundary twice (the draw
@@ -3029,7 +3069,7 @@ export default function MapPage() {
               title="Advanced filters"
               aria-expanded={filtersOpen}
               className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-lg text-[11px] font-bold transition-colors flex items-center gap-1 ${
-                ownerSearchCount !== null || mapScope !== 'all'
+                ownerSearchCount !== null || mapScope !== 'all' || countyFilter.size > 0
                   ? 'bg-sage/20 hover:bg-sage/30 border-sage/40 text-sage'
                   : 'bg-slate-500/10 hover:bg-slate-500/20 border-border text-slate-300 hover:text-white'
               }`}
@@ -3149,6 +3189,65 @@ export default function MapPage() {
                   </button>
                 </div>
               </div>
+
+              {/* County filter — multi-select of counties that appear in
+                  the user's comps. Empty selection = show all counties.
+                  Sourced from comps (not the full 254 TX list) so the
+                  picker stays short and matches the broker's actual
+                  working set. Checkboxes for now since the list is
+                  typically 5-30 items; switch to a searchable dropdown
+                  later if a user accumulates >50 counties. */}
+              {availableCounties.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] uppercase tracking-wide text-slate-500">
+                      County
+                    </label>
+                    {countyFilter.size > 0 && (
+                      <button
+                        onClick={() => setCountyFilter(new Set())}
+                        className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                        title="Show comps in all counties"
+                      >
+                        clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="bg-night/60 border border-border rounded-lg max-h-40 overflow-y-auto p-1.5 space-y-0.5">
+                    {availableCounties.map((c) => {
+                      const checked = countyFilter.has(c.norm);
+                      return (
+                        <label
+                          key={c.norm}
+                          className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-slate-500/10 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setCountyFilter((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(c.norm)) next.delete(c.norm);
+                                else next.add(c.norm);
+                                return next;
+                              });
+                            }}
+                            className="w-3 h-3 accent-emerald-400"
+                          />
+                          <span className={`text-[11px] ${checked ? 'text-emerald-300 font-bold' : 'text-slate-300'}`}>
+                            {c.display}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {countyFilter.size > 0 && (
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      {countyFilter.size} of {availableCounties.length} selected
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Scope filter — moved out of the standalone pill row.
                   Hidden in CMA workspace (which filters to its own comps).
