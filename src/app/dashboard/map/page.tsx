@@ -2283,23 +2283,33 @@ export default function MapPage() {
         return true;
       };
 
-      // County matcher — strips " County" suffix and lowercases on
-      // BOTH sides before comparison. Otherwise the AI's preferred
-      // output ("Frio") never matches the comp's stored value
-      // ("Frio County"), and every county-scoped search silently
-      // returns zero matches. This was the
-      // "show me 500+ acre comps frio county returned nothing" bug.
+      // County matcher — normalizes BOTH sides + splits compound county
+      // strings (e.g. "Frio and Medina", "Atascosa & Frio") into the
+      // individual counties before matching. Without the split, a comp
+      // tagged "Frio and Medina" would silently fail to match a query
+      // for "Frio" — same family of bug as the "Frio" vs "Frio County"
+      // case, just one layer deeper.
+      //
+      // Splits on ' and ', '&', ',' (case-insensitive). Each piece is
+      // then normalized (lowercased + " County" suffix stripped).
       // Inlined (not using the component-level normalizeCounty) so
       // there's no source-order dependency for this critical matcher.
       const normCounty = (v: any) => String(v ?? '')
         .toLowerCase()
         .replace(/\bcounty\b/g, '')
         .trim();
+      const splitCounties = (v: any): string[] => String(v ?? '')
+        .split(/\s+and\s+|\s*&\s*|\s*,\s*/i)
+        .map(normCounty)
+        .filter(Boolean);
       const matchesCounty = (val: any, allowed: string[] | null | undefined) => {
         if (!allowed || allowed.length === 0) return true;
         if (val == null) return false;
-        const normalized = normCounty(val);
-        return allowed.some((a) => normCounty(a) === normalized);
+        const compCounties = splitCounties(val);
+        return allowed.some((a) => {
+          const norm = normCounty(a);
+          return compCounties.includes(norm);
+        });
       };
       const matchingIds = new Set<string>();
       for (const comp of comps) {
