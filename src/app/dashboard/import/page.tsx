@@ -1374,10 +1374,36 @@ export default function ImportPage() {
   // When called without the second arg, defaults to false to preserve
   // existing behavior for any non-verification-flow callers.
   const saveComp = async (comp: ExtractedComp, opts?: { needsReview?: boolean }) => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
     const needsReview = opts?.needsReview ?? false;
+    const hasPin = comp.latitude != null && comp.longitude != null;
+
+    // CRITICAL: open the new tab SYNCHRONOUSLY (before any await) so the
+    // browser still considers it inside the user-gesture context that
+    // authorizes popups. Safari (and to a lesser extent Chrome) blocks
+    // window.open() calls made after an `await` resolves because the call
+    // stack is no longer tied to the original click event.
+    //
+    // We compute the URL from the in-memory comp object, which has the
+    // autoLocate-derived lat/lng already populated. The new tab opens
+    // immediately; the save runs in parallel; if save fails we close the
+    // tab as cleanup.
+    let needsReviewTab: Window | null = null;
+    if (needsReview) {
+      const mapUrl = hasPin
+        ? `/dashboard/map?focus=${comp.latitude},${comp.longitude},14`
+        : `/dashboard/vault`;
+      try {
+        needsReviewTab = window.open(mapUrl, '_blank', 'noopener,noreferrer');
+      } catch {
+        needsReviewTab = null;
+      }
+    }
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      if (needsReviewTab) needsReviewTab.close();
+      return;
+    }
 
     const { error } = await supabase.from('comps').insert({
       created_by: user.id,
@@ -1426,28 +1452,32 @@ export default function ImportPage() {
 
     if (error) {
       toast.error('Failed to save comp');
+      // Save failed — close the orphan tab we optimistically opened so the
+      // broker doesn't see a stale view of a comp that never made it into
+      // the vault.
+      if (needsReviewTab) needsReviewTab.close();
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
-      const hasPin = comp.latitude != null && comp.longitude != null;
 
       if (needsReview) {
-        // "Needs review" intent — broker wants to look at this comp on the
-        // map (or fix its location) right now. Open the map in a NEW TAB so
-        // the import session stays intact with its remaining pending comps
-        // — same-tab navigation would unmount this page and lose them.
-        const mapUrl = hasPin
-          ? `/dashboard/map?focus=${comp.latitude},${comp.longitude},14`
-          : `/dashboard/vault`;
-        toast.success(
-          hasPin
-            ? `${label} flagged — opening map in new tab`
-            : `${label} added — open in vault to place a pin`,
-          { duration: 3000 }
-        );
-        try {
-          window.open(mapUrl, '_blank', 'noopener,noreferrer');
-        } catch {
-          // popup blocker — fall back to same-tab navigation
+        // Tab was opened SYNCHRONOUSLY at the top of this function (see
+        // the user-gesture comment). If the open succeeded the broker is
+        // already looking at the map; just confirm via toast in the
+        // origin tab. If popup blocker prevented the open (needsReviewTab
+        // is null), fall back to same-tab navigation — broker still gets
+        // to the map, just loses the import session.
+        if (needsReviewTab) {
+          toast.success(
+            hasPin
+              ? `${label} flagged — map opened in new tab`
+              : `${label} added — open in vault to place a pin (tab opened)`,
+            { duration: 3000 }
+          );
+        } else {
+          const mapUrl = hasPin
+            ? `/dashboard/map?focus=${comp.latitude},${comp.longitude},14`
+            : `/dashboard/vault`;
+          toast.success(`${label} flagged — popup blocked, navigating`, { duration: 2000 });
           router.push(mapUrl);
         }
       } else if (hasPin) {
