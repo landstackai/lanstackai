@@ -94,6 +94,21 @@ export default function ReviewPage() {
   // to a 1-line preview; broker clicks to read in full.
   const [descriptionOpen, setDescriptionOpen] = useState(false);
 
+  // Per-parcel owner + acreage lookup. Fired whenever comp.parcel_id
+  // changes (initial load, after a reselect save). One TxGIO/Regrid hit
+  // per parcel — typical comps have 1-5 parcels so the fan-out is
+  // bounded. Shown in the side panel as a dedicated "Parcels" section
+  // so brokers see WHO owns each piece of the cluster without having
+  // to enter reselect mode.
+  type ParcelDetail = {
+    parcel_id: string;
+    owner_name: string | null;
+    acres: number | null;
+    error: boolean;
+  };
+  const [parcelDetails, setParcelDetails] = useState<ParcelDetail[] | null>(null);
+  const [loadingParcelDetails, setLoadingParcelDetails] = useState(false);
+
   // Editing mode for the workspace.
   //   'view'     — read-only (Stage A behavior)
   //   'reselect' — parcel-selection mode (Stage B): broker clicks TxGIO
@@ -198,6 +213,49 @@ export default function ReviewPage() {
     })();
     return () => { cancelled = true; };
   }, [params?.compId, supabase]);
+
+  // ── Fetch owner names for each parcel in the comp's parcel_id list ──
+  // Runs whenever comp.parcel_id changes (initial load + after a
+  // reselect save). One /api/parcel?parcel_id=X hit per ID, parallelized.
+  // Failures are tolerated — we show "Unknown owner" for any parcel
+  // the lookup couldn't resolve, rather than failing the whole panel.
+  useEffect(() => {
+    const raw = comp?.parcel_id || '';
+    const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      setParcelDetails(null);
+      return;
+    }
+    let cancelled = false;
+    setLoadingParcelDetails(true);
+    (async () => {
+      try {
+        const results = await Promise.all(
+          ids.map(async (id): Promise<ParcelDetail> => {
+            try {
+              const r = await fetch(`/api/parcel?parcel_id=${encodeURIComponent(id)}`);
+              if (!r.ok) {
+                return { parcel_id: id, owner_name: null, acres: null, error: true };
+              }
+              const data = await r.json();
+              return {
+                parcel_id: id,
+                owner_name: data?.owner_name ?? null,
+                acres: typeof data?.acres === 'number' ? data.acres : null,
+                error: false,
+              };
+            } catch {
+              return { parcel_id: id, owner_name: null, acres: null, error: true };
+            }
+          })
+        );
+        if (!cancelled) setParcelDetails(results);
+      } finally {
+        if (!cancelled) setLoadingParcelDetails(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [comp?.parcel_id]);
 
   // ── Initialize the Mapbox map once the container mounts ─────────────
   // CRITICAL: gated on `comp` being loaded. Previous version ran once on
@@ -1560,6 +1618,46 @@ export default function ReviewPage() {
             </div>
           )}
 
+          {/* Parcel owners — fetched live from TxGIO/Regrid for each
+              prop_id in comp.parcel_id. Shown in view mode AND during
+              reselect/draw so the broker can see who owns each piece
+              of the cluster without leaving the review page. When
+              comp.parcel_id is empty (drawn boundaries), this section
+              hides — there's nothing to look up. */}
+          {parcelDetails && parcelDetails.length > 0 && (
+            <div className="border-t border-border pt-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                  {parcelDetails.length === 1 ? 'Parcel owner' : `${parcelDetails.length} parcels`}
+                </div>
+                {loadingParcelDetails && (
+                  <Loader2 size={10} className="text-slate-500 animate-spin" />
+                )}
+              </div>
+              <ul className="space-y-1.5">
+                {parcelDetails.map((p) => (
+                  <li key={p.parcel_id} className="text-xs">
+                    <div className="text-slate-200 truncate" title={p.owner_name || 'Unknown owner'}>
+                      {p.owner_name || (p.error ? 'Lookup failed' : 'Unknown owner')}
+                    </div>
+                    <div className="text-[10px] text-slate-500 font-mono flex items-center gap-2">
+                      <span>{p.parcel_id}</span>
+                      {p.acres != null && (
+                        <span>· {p.acres.toFixed(1)}ac</span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {loadingParcelDetails && !parcelDetails && (
+            <div className="border-t border-border pt-3 text-[11px] text-slate-500 flex items-center gap-1.5">
+              <Loader2 size={11} className="animate-spin" />
+              Loading parcel owners…
+            </div>
+          )}
+
           {/* Pin coordinates (debug useful) */}
           {hasPin && (
             <div className="border-t border-border pt-3 text-xs">
@@ -1567,11 +1665,6 @@ export default function ReviewPage() {
               <div className="font-mono text-slate-300 text-[11px]">
                 {comp.latitude?.toFixed(5)}, {comp.longitude?.toFixed(5)}
               </div>
-              {comp.parcel_id && (
-                <div className="text-[10px] text-slate-500 mt-0.5">
-                  Parcel id(s): {comp.parcel_id}
-                </div>
-              )}
             </div>
           )}
 
