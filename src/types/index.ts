@@ -256,6 +256,10 @@ export interface ExtractedComp {
   document_type: string;
   is_subject_property: boolean;
   is_comparable: boolean;
+  // Set true by the math identity gate when acres × ppa disagrees with
+  // sale_price by more than 1%. Persists to comps.needs_extraction_review
+  // and surfaces as a warning badge in the vault list.
+  needs_extraction_review?: boolean;
 }
 
 export interface CompFilters {

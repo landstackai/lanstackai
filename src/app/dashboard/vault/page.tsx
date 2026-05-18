@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2 } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle } from 'lucide-react';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
@@ -464,9 +464,24 @@ export default function VaultPage() {
                             }}
                             className="border-b border-border last:border-b-0 hover:bg-sage/5 cursor-pointer group transition-colors"
                           >
-                            {/* County (with property name as subtext if set) */}
+                            {/* County (with property name as subtext if set).
+                                Renders a warning badge when the math identity
+                                gate flagged this comp at extraction time —
+                                acres × ppa didn't match sale_price within 1%
+                                and at least one of those three fields needs
+                                broker review. */}
                             <td className="py-2.5 px-3">
-                              <div className="text-sm font-bold text-white">{comp.county || '—'}</div>
+                              <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                                {(comp as any).needs_extraction_review && (
+                                  <span
+                                    title="Extracted acres × $/acre doesn't match the sale price. At least one of these values is likely wrong — verify before using this comp in a CMA."
+                                    className="inline-flex items-center"
+                                  >
+                                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                                  </span>
+                                )}
+                                <span>{comp.county || '—'}</span>
+                              </div>
                               {comp.property_name && (
                                 <div className="text-[10px] text-slate-500 truncate max-w-[180px]">
                                   {comp.property_name}

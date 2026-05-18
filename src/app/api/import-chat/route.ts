@@ -268,24 +268,29 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // $/ac sanity gate: when sale_price AND price_per_acre are both extracted,
-    // their ratio implies an acreage. If the extracted `acres` value disagrees
-    // with that implied acreage by more than 10%, prefer the implied value —
-    // it's anchored to two labeled fields (Sale Price and Sale Price Per Acre)
-    // instead of one possibly-ambiguous "Property Size" reading.
+    // Math identity gate: when sale_price AND price_per_acre AND acres are
+    // ALL extracted, the identity   acres × ppa = sale_price   must hold
+    // within 1% (tight enough to catch hallucinations, loose enough to
+    // tolerate the rounding inherent in a stated $/ac like "$4,750/ac"
+    // versus the unrounded price/acres = $4,749.84). When the identity
+    // fails, AT LEAST ONE of the three values is wrong — but the gate
+    // cannot tell which, and silently auto-correcting acres (the prior
+    // design) risks overwriting a correct field with bad math-derived
+    // values.
     //
-    // Catches AI hallucinations where the model fabricates an acres value
-    // (observed: 8,820 returned for a 1,179.115-ac comp where price=$5.60M
-    // and ppa=$4,750 were both extracted correctly — $5.60M / $4,750 =
-    // 1,179.11, gate would correct).
+    // Instead: flag the row with needs_extraction_review=true. The vault
+    // UI renders a warning badge. Broker investigates and decides which
+    // field to fix, then clears the flag manually via vault edit. When
+    // the thumbnail verification UI ships, flagged rows will route into
+    // a required-review queue.
+    //
+    // Catches AI hallucinations like L&D Farm and Ranch (8,820 extracted
+    // for a 1,179-ac comp where price=$5.60M and ppa=$4,750 were both
+    // correct — Δ86.6% from the math, gate fires).
     //
     // Runs AFTER the description-override above. If description prose
     // already corrected `acres` to the prose-stated value, this check
     // usually finds delta near zero and doesn't fire.
-    //
-    // Threshold = 10%: catches obvious hallucinations while tolerating
-    // rounding when ppa is a rounded $/ac (e.g. "$4,750" stated, actual
-    // price/acres = $4,749.84).
     if (Array.isArray(comps)) {
       for (const c of comps) {
         const price = Number(c?.sale_price);
@@ -294,23 +299,20 @@ export async function POST(request: NextRequest) {
         if (price > 0 && ppa > 0 && acres > 0) {
           const impliedAcres = price / ppa;
           const delta = Math.abs(impliedAcres - acres) / acres;
-          if (delta > 0.10) {
+          if (delta > 0.01) {
             console.warn(
-              `[sanity-gate] ${c.property_name || 'unnamed'}: ` +
-              `acres=${acres} disagrees with sale_price/ppa=${impliedAcres.toFixed(3)} ` +
-              `(Δ${(delta * 100).toFixed(1)}%). Overriding to implied acres.`
+              `[math-gate] ${c.property_name || 'unnamed'}: ` +
+              `acres=${acres} × ppa=${ppa} = ${(acres * ppa).toFixed(0)}, ` +
+              `but sale_price=${price} (Δ${(delta * 100).toFixed(1)}%). ` +
+              `Flagging needs_extraction_review=true; broker must verify.`
             );
-            c.acres = Math.round(impliedAcres * 1000) / 1000;
-            // Mark the correction so downstream code (and brokers reviewing
-            // the comp) can see this was a sanity correction, not raw AI output.
-            c._acres_sanity_corrected = true;
-            // Reduce per-field confidence — the model's first guess was wrong,
-            // so we have less confidence in this comp overall.
+            c.needs_extraction_review = true;
+            // Lower the overall extraction confidence — math says at least
+            // one of three fields is wrong, even if we don't know which.
             if (c.confidence && typeof c.confidence === 'object') {
-              c.confidence.per_field = c.confidence.per_field || {};
-              c.confidence.per_field.acres = Math.min(
-                Number(c.confidence.per_field.acres) || 60,
-                60
+              c.confidence.overall = Math.min(
+                Number(c.confidence.overall) || 50,
+                50
               );
             }
           }

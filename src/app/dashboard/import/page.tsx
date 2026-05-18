@@ -678,6 +678,8 @@ export default function ImportPage() {
       visibility: 'team',
       confidence: conf,
       boundary_geojson: (comp as any).geometry ?? null,
+      // Math identity gate flag from extraction (see /api/import-chat).
+      needs_extraction_review: comp.needs_extraction_review || false,
     });
 
     if (error || !inserted) return false;
@@ -1079,6 +1081,10 @@ export default function ImportPage() {
       visibility: 'team',
       confidence: comp.confidence.overall > 80 ? 'Verified' : comp.confidence.overall > 50 ? 'Estimated' : 'Unverified',
       boundary_geojson: (comp as any).geometry ?? null,
+      // Carry the math-identity-gate flag through to the row so the vault
+      // UI can show its warning badge. False (default) if the gate passed
+      // or couldn't run (one of price/ppa/acres was missing).
+      needs_extraction_review: comp.needs_extraction_review || false,
     });
 
     if (error) {
