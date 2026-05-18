@@ -56,6 +56,243 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
   // would otherwise match everything in a query).
   const CLIENT_STOP_WORDS = new Set(['THE', 'OF', 'AND', 'ET', 'AL']);
 
+  const tokensFor = (s: string): string[] =>
+    normalize(s).split(/\s+/)
+      .filter((t) => (t.length >= 3 || /\d/.test(t)) && !CLIENT_STOP_WORDS.has(t));
+
+  // ─────────────────────────────────────────────────────────────────────
+  // LAT/LNG-FIRST SEED PATH (new, additive)
+  // ─────────────────────────────────────────────────────────────────────
+  // When the appraisal printed explicit Geographic Location coordinates
+  // (Stouffer-format reports sometimes do), use them as a deterministic
+  // seed BEFORE running owner search. Lat/lng is the only direct location
+  // signal — every other signal is an inference.
+  //
+  // Flow:
+  //   1. Point-in-polygon TxGIO query at (lat, lng) → seed parcel
+  //   2. Use seed's owner_name as the tokens to query the county
+  //   3. Apply same tight-filter + adjacency-cluster as the owner-search path
+  //   4. Find the cluster CONTAINING the seed parcel
+  //   5. CORROBORATE: either the seed's owner_name matches one of the
+  //      appraisal owner signals (grantee/grantor/property_name) OR the
+  //      cluster total acres matches the appraisal acres within 15%.
+  //   6. If corroborated → return early with HIGH (both) or MEDIUM (one).
+  //   7. If neither → DROP the seed, fall through to existing owner search.
+  //
+  // Safety: this path runs ONLY when lat/lng is present. The corroboration
+  // guard means a typo'd lat/lng (lands in wrong parcel) gets dropped
+  // cleanly and the existing pipeline runs — same as if lat/lng were absent.
+  const lat = Number(comp?.latitude);
+  const lng = Number(comp?.longitude);
+  const hasLatLng = Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
+
+  if (hasLatLng) {
+    // Local mutable record we fill in as the lat/lng path runs. Mirrored to
+    // _diag.lat_lng_data at the end so TypeScript can narrow the optional
+    // _diag without lots of `if (_diag)` guards.
+    const lld: NonNullable<AutoLocateDiagCollector['lat_lng_data']> = { tried: true };
+    try {
+      // Step 1: point-in-polygon via /api/parcel (existing endpoint, cached)
+      const seedRes = await fetch(`/api/parcel?lat=${lat}&lng=${lng}`);
+      const seedJson = seedRes.ok ? await seedRes.json() : null;
+      const seedOwner: string | null = seedJson?.parcel?.owner_name || null;
+      const seedParcelId: string | null = seedJson?.parcel?.parcel_id || null;
+      lld.seed_found = Boolean(seedOwner && seedParcelId);
+      lld.seed_owner = seedOwner;
+      lld.seed_parcel_id = seedParcelId;
+
+      if (seedOwner && seedParcelId) {
+        // Step 2: use seed's owner tokens to query the full county set
+        const seedTokens = tokensFor(seedOwner);
+        if (seedTokens.length > 0) {
+          const longestSeedToken = [...seedTokens].sort((a, b) => b.length - a.length)[0];
+          const url = `/api/parcels-by-owner?q=${encodeURIComponent(longestSeedToken)}&county=${encodeURIComponent(county)}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const data = await res.json();
+            const features: any[] = Array.isArray(data?.features) ? data.features : [];
+            // Tight filter on ALL seed-owner tokens
+            const tight = features.filter((f: any) => {
+              const own = (f.properties?.owner_name || '').toString().toUpperCase();
+              return seedTokens.every((t) => own.includes(t));
+            });
+
+            if (tight.length > 0) {
+              // Step 3: cluster (adjacency or centroid, same as owner path)
+              const items = tight.map((f: any) => {
+                let centroid: [number, number] | null = null;
+                try {
+                  const c = turf.centroid(f);
+                  const coords = c?.geometry?.coordinates;
+                  if (Array.isArray(coords) && coords.length >= 2) centroid = [coords[0], coords[1]];
+                } catch {}
+                return {
+                  feature: f,
+                  centroid,
+                  acres: Number(f.properties?.gis_area) || 0,
+                };
+              }).filter((i: any) => i.centroid) as Array<{ feature: any; centroid: [number, number]; acres: number }>;
+
+              const useAdjacency = process.env.NEXT_PUBLIC_ADJACENCY_CLUSTERING === '1';
+              let clusters: Array<{ parcels: any[]; centroid: [number, number]; totalAcres: number }> = [];
+              if (useAdjacency) {
+                const buffered: any[] = items.map((it: any) => {
+                  try { return turf.buffer(it.feature, 2, { units: 'meters' }); } catch { return null; }
+                });
+                const parent: number[] = items.map((_: any, i: number) => i);
+                const find = (i: number): number => parent[i] === i ? i : (parent[i] = find(parent[i]));
+                const union = (i: number, j: number) => {
+                  const ri = find(i), rj = find(j);
+                  if (ri !== rj) parent[ri] = rj;
+                };
+                for (let i = 0; i < items.length; i++) {
+                  if (!buffered[i]) continue;
+                  for (let j = i + 1; j < items.length; j++) {
+                    if (!buffered[j]) continue;
+                    try { if (turf.booleanIntersects(buffered[i], buffered[j])) union(i, j); } catch {}
+                  }
+                }
+                const groups = new Map<number, any[]>();
+                for (let i = 0; i < items.length; i++) {
+                  const r = find(i);
+                  if (!groups.has(r)) groups.set(r, []);
+                  groups.get(r)!.push(items[i]);
+                }
+                clusters = Array.from(groups.values()).map((groupItems: any[]) => {
+                  let sx = 0, sy = 0;
+                  for (const it of groupItems) { sx += it.centroid[0]; sy += it.centroid[1]; }
+                  return {
+                    parcels: groupItems.map((it) => it.feature),
+                    centroid: [sx / groupItems.length, sy / groupItems.length] as [number, number],
+                    totalAcres: groupItems.reduce((s: number, it: any) => s + it.acres, 0),
+                  };
+                });
+              } else {
+                const GRID_DEG = 0.015;
+                for (const it of items) {
+                  let best: typeof clusters[number] | null = null;
+                  let bestDist = Infinity;
+                  for (const c of clusters) {
+                    const d = Math.hypot(it.centroid[0] - c.centroid[0], it.centroid[1] - c.centroid[1]);
+                    if (d < bestDist && d <= GRID_DEG) { bestDist = d; best = c; }
+                  }
+                  if (best) {
+                    best.parcels.push(it.feature);
+                    best.totalAcres += it.acres;
+                    const n = best.parcels.length;
+                    best.centroid = [
+                      (best.centroid[0] * (n - 1) + it.centroid[0]) / n,
+                      (best.centroid[1] * (n - 1) + it.centroid[1]) / n,
+                    ];
+                  } else {
+                    clusters.push({ parcels: [it.feature], centroid: it.centroid, totalAcres: it.acres });
+                  }
+                }
+              }
+
+              // Recompute cluster acreage from unioned area (handles TxGIO duplicates)
+              for (const c of clusters) {
+                if (c.parcels.length > 1) {
+                  try {
+                    let u = c.parcels[0];
+                    for (let i = 1; i < c.parcels.length; i++) {
+                      try { const next = turf.union(u, c.parcels[i]); if (next) u = next; } catch {}
+                    }
+                    if (u?.geometry) {
+                      const a = turf.area(u) / 4046.8564224;
+                      if (Number.isFinite(a) && a > 0) c.totalAcres = a;
+                    }
+                  } catch {}
+                }
+              }
+
+              // Step 4: find the cluster containing the seed parcel
+              const seedCluster = clusters.find((c) =>
+                c.parcels.some((p: any) => String(p.properties?.prop_id || '') === String(seedParcelId))
+              );
+
+              if (seedCluster) {
+                // Step 5: corroborate
+                const ownerCorroborated = ownerSignals.some((sig) => {
+                  const sigTokens = tokensFor(sig);
+                  if (sigTokens.length === 0) return false;
+                  const seedOwnerUpper = seedOwner.toUpperCase();
+                  return sigTokens.every((t) => seedOwnerUpper.includes(t));
+                });
+                const acreDelta = Math.abs(seedCluster.totalAcres - acres) / acres;
+                const acresCorroborated = acreDelta <= 0.15;
+
+                lld.cluster_count = clusters.length;
+                lld.cluster_acres = seedCluster.totalAcres;
+                lld.cluster_parcel_count = seedCluster.parcels.length;
+                lld.cluster_delta = acreDelta;
+                lld.owner_corroborated = ownerCorroborated;
+                lld.acres_corroborated = acresCorroborated;
+
+                if (ownerCorroborated || acresCorroborated) {
+                  // Build pin from the seed cluster
+                  let merged: any = seedCluster.parcels[0];
+                  for (let i = 1; i < seedCluster.parcels.length; i++) {
+                    try { const u = turf.union(merged, seedCluster.parcels[i]); if (u) merged = u; } catch {}
+                  }
+                  let pinCoords = seedCluster.centroid;
+                  try {
+                    const c = turf.centroid(merged);
+                    if (c?.geometry?.coordinates) pinCoords = c.geometry.coordinates;
+                  } catch {}
+
+                  const confidence: 'high' | 'medium' =
+                    (ownerCorroborated && acresCorroborated) ? 'high' : 'medium';
+                  const corrobNote =
+                    ownerCorroborated && acresCorroborated ? 'owner+acres corroborated'
+                    : ownerCorroborated ? 'owner corroborated, acres Δ' + (acreDelta * 100).toFixed(1) + '%'
+                    : 'acres corroborated (Δ' + (acreDelta * 100).toFixed(1) + '%), owner mismatch';
+
+                  if (_diag) {
+                    _diag.path_used = 'latlng';
+                    _diag.lat_lng_data = lld;
+                  }
+                  return {
+                    latitude: pinCoords[1],
+                    longitude: pinCoords[0],
+                    parcel_id: seedCluster.parcels.map((p: any) => p.properties?.prop_id).filter(Boolean).join(',') || null,
+                    geometry: merged.geometry || merged,
+                    match_reason: `Lat/lng seed → "${seedOwner}" cluster of ${seedCluster.parcels.length} parcels (${seedCluster.totalAcres.toFixed(1)}ac, target ${acres}; ${corrobNote}).`,
+                    match_confidence: confidence,
+                  };
+                }
+                // Corroboration failed — fall through to owner search
+                lld.dropped_reason = 'no_corroboration';
+              } else {
+                lld.dropped_reason = 'seed_not_in_any_cluster';
+              }
+            } else {
+              lld.dropped_reason = 'no_tight_matches_for_seed_owner';
+            }
+          } else {
+            lld.dropped_reason = 'parcels_by_owner_query_failed';
+          }
+        } else {
+          lld.dropped_reason = 'seed_owner_no_tokens';
+        }
+      } else {
+        lld.dropped_reason = 'no_seed_found_at_latlng';
+      }
+    } catch (e: any) {
+      // Any error → fall through to existing pipeline (no behavior change)
+      lld.dropped_reason = `error: ${e?.message || 'unknown'}`;
+      console.warn('[autoLocate] lat/lng-first path threw, falling through:', e?.message);
+    }
+    // Mirror collected lat/lng diagnostics back to the optional _diag so the
+    // wrapper sees them in the payload (whether the path succeeded or fell
+    // through). When path_used was set to 'latlng' above, this is redundant
+    // but harmless; in all other cases this is the only assignment.
+    if (_diag) _diag.lat_lng_data = lld;
+  }
+  // ─────────────────────────────────────────────────────────────────────
+  // END LAT/LNG-FIRST. Existing owner-search loop below runs unchanged.
+  // ─────────────────────────────────────────────────────────────────────
+
   for (const owner of ownerSignals) {
     const normalized = normalize(owner);
     // Keep tokens that are ≥3 chars OR contain a digit (so short LLC
@@ -229,6 +466,7 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
         winning_signal: owner,
         alternatives_within_tolerance: matched.length,
       };
+      _diag.path_used = 'owner';
     }
 
     return {
@@ -249,6 +487,24 @@ async function autoLocateInBrowser(comp: any, _diag?: AutoLocateDiagCollector): 
 // endpoint at the end of each call.
 type AutoLocateDiagCollector = {
   reject_reason?: string;
+  // Which path produced the returned result, if any. Set by the function
+  // when it commits to a pin. The wrapper uses this to compute exit_stage.
+  path_used?: 'latlng' | 'owner';
+  // Captures what happened in the lat/lng-first seed path (only set when
+  // the appraisal had explicit lat/lng coordinates and we attempted it).
+  lat_lng_data?: {
+    tried: boolean;
+    seed_found?: boolean;
+    seed_owner?: string | null;
+    seed_parcel_id?: string | null;
+    cluster_count?: number;
+    cluster_acres?: number;
+    cluster_parcel_count?: number;
+    cluster_delta?: number;
+    owner_corroborated?: boolean;
+    acres_corroborated?: boolean;
+    dropped_reason?: string;
+  };
   owner_search_data?: Array<{
     signal: string;
     tokens: string[];
@@ -289,16 +545,37 @@ async function autoLocateInBrowserLogged(comp: any) {
   );
 
   // Decide exit_stage. Order matters — error trumps everything else.
+  // path_used distinguishes lat/lng-first wins from owner-search wins
+  // so we can analyze "how often does lat/lng-first actually pay off?"
   let exit_stage: string;
   if (threw) {
     exit_stage = 'error';
   } else if (result) {
-    exit_stage = 'owner_search_cluster';
+    exit_stage = diag.path_used === 'latlng' ? 'latlng_seed_cluster' : 'owner_search_cluster';
   } else if (diag.reject_reason) {
     exit_stage = 'manual_placeholder';
+  } else if (diag.lat_lng_data?.tried) {
+    // Lat/lng path was attempted but didn't corroborate, and then owner
+    // search also failed. Distinct stage so analysis can show "how often
+    // did lat/lng get dropped AND owner-search also returned nothing?"
+    exit_stage = 'latlng_dropped_owner_null';
   } else {
     exit_stage = 'owner_search_null';
   }
+
+  // Pick final_cluster_acres from whichever path produced the result.
+  const finalClusterAcres =
+    diag.path_used === 'latlng'
+      ? (diag.lat_lng_data?.cluster_acres ?? null)
+      : (diag.cluster_data?.picked_acres ?? null);
+
+  // Stash lat_lng_data inside cluster_data (JSONB) under a nested key so we
+  // don't need a schema migration. Queries can extract via
+  //   cluster_data->'lat_lng_path'->>'owner_corroborated' etc.
+  const cluster_data_to_send: any = {
+    ...(diag.cluster_data || {}),
+    ...(diag.lat_lng_data ? { lat_lng_path: diag.lat_lng_data } : {}),
+  };
 
   const payload = {
     input_acres: Number(comp?.acres) || null,
@@ -315,14 +592,16 @@ async function autoLocateInBrowserLogged(comp: any) {
       typeof comp?.description === 'string' && comp.description.trim().length > 0
     ),
     exit_stage,
+    // owner_search_data is captured even when lat/lng path won (when lat/lng
+    // fell through and then owner search ran, both paths' data is useful).
     owner_search_data: diag.owner_search_data || null,
-    cluster_data: diag.cluster_data || null,
+    cluster_data: Object.keys(cluster_data_to_send).length > 0 ? cluster_data_to_send : null,
     final_pin_lat: result?.latitude ?? null,
     final_pin_lng: result?.longitude ?? null,
     final_parcel_ids: result?.parcel_id
       ? String(result.parcel_id).split(',').filter(Boolean)
       : null,
-    final_cluster_acres: diag.cluster_data?.picked_acres ?? null,
+    final_cluster_acres: finalClusterAcres,
     final_confidence: result?.match_confidence ?? null,
     final_match_reason: result?.match_reason ?? null,
     ms_total,
