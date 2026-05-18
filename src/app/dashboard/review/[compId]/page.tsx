@@ -156,9 +156,22 @@ export default function ReviewPage() {
     });
     map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
     map.current.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
-    map.current.once('load', () => setMapLoaded(true));
+    map.current.once('load', () => {
+      // Force a resize after load — defensive against the container
+      // having had stale dimensions when Mapbox first measured it.
+      // The flex layout should give correct dims now, but this is cheap
+      // insurance against a black-canvas render.
+      map.current?.resize();
+      setMapLoaded(true);
+    });
+
+    // Window resize handler — same instinct, keep the canvas matched
+    // to its container if the viewport changes.
+    const handleWindowResize = () => map.current?.resize();
+    window.addEventListener('resize', handleWindowResize);
 
     return () => {
+      window.removeEventListener('resize', handleWindowResize);
       map.current?.remove();
       map.current = null;
     };
@@ -276,34 +289,85 @@ export default function ReviewPage() {
   const ppa = comp.ppa_land_only ?? comp.price_per_acre;
 
   return (
-    <div className="fixed inset-0 bg-night flex">
-      {/* MAP (fills the screen behind the side panel + overlays) */}
-      <div ref={mapContainer} className="absolute inset-0" />
+    // Flex root with explicit viewport height. The map needs its
+    // container to have measurable dimensions at the moment Mapbox
+    // initializes — the previous fixed+absolute structure measured
+    // 0×0 in some cases and Mapbox refused to render. The flex+
+    // flex-1+relative+w/h-full pattern below is the same one the
+    // main /dashboard/map page uses successfully.
+    <div className="flex h-screen w-screen bg-night overflow-hidden">
+      {/* MAP COLUMN — relative so absolute overlays (top bar, aerial)
+          position against the map area, not the whole viewport. */}
+      <div className="flex-1 relative">
+        <div ref={mapContainer} className="w-full h-full" />
 
-      {/* Top bar: back link + comp label */}
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 max-w-[60%]">
-        <button
-          onClick={() => router.push('/dashboard/vault')}
-          className="text-slate-400 hover:text-white flex items-center gap-1 text-xs"
-          title="Back to vault"
-        >
-          <ArrowLeft size={14} />
-          Vault
-        </button>
-        <span className="text-slate-600">·</span>
-        <span className="text-sm font-bold text-white truncate">{label}</span>
-        {comp.needs_location_review && (
-          <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-500/20 border border-slate-500/30 rounded px-1.5 py-0.5">
-            <Clock size={10} />
-            Needs review
-          </span>
+        {/* Top bar: back link + comp label (absolute over map) */}
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 max-w-[60%]">
+          <button
+            onClick={() => router.push('/dashboard/vault')}
+            className="text-slate-400 hover:text-white flex items-center gap-1 text-xs"
+            title="Back to vault"
+          >
+            <ArrowLeft size={14} />
+            Vault
+          </button>
+          <span className="text-slate-600">·</span>
+          <span className="text-sm font-bold text-white truncate">{label}</span>
+          {comp.needs_location_review && (
+            <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-500/20 border border-slate-500/30 rounded px-1.5 py-0.5">
+              <Clock size={10} />
+              Needs review
+            </span>
+          )}
+        </div>
+
+        {/* FLOATING AERIAL PANEL — bottom-left corner of map area.
+            Source aerial extracted at import time. Collapses to a
+            toggle button once the comp is verified. */}
+        {comp.aerial_image ? (
+          <div className="absolute bottom-3 left-3 z-10">
+            {aerialCollapsed ? (
+              <button
+                onClick={() => setAerialCollapsed(false)}
+                className="bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs text-slate-300 hover:text-white flex items-center gap-1.5"
+                title="Show source aerial"
+              >
+                <span>📸</span>
+                Show aerial
+              </button>
+            ) : (
+              <div className="bg-night/95 backdrop-blur border border-border rounded-lg p-2 shadow-xl">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                    Source aerial
+                  </span>
+                  <button
+                    onClick={() => setAerialCollapsed(true)}
+                    className="text-slate-500 hover:text-white text-[10px]"
+                    title="Hide"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={comp.aerial_image}
+                  alt="Source aerial"
+                  className="w-[220px] h-[160px] object-cover rounded border border-border bg-night"
+                />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="absolute bottom-3 left-3 z-10 bg-night/80 backdrop-blur border border-border rounded-lg px-3 py-2 text-[10px] text-slate-500 flex items-center gap-1.5">
+            <ImageOff size={11} />
+            No source aerial available
+          </div>
         )}
       </div>
 
-      {/* SIDE PANEL (right-side, fixed width). Holds comp metadata,
-          status badges, and the Mark verified action. Editing tools
-          (Reselect / Draw) go here in Stages B and C. */}
-      <aside className="absolute top-0 right-0 bottom-0 w-[320px] bg-night/95 backdrop-blur border-l border-border z-10 overflow-y-auto">
+      {/* SIDE PANEL (fixed-width flex sibling — gets predictable space) */}
+      <aside className="w-[320px] flex-shrink-0 bg-night/95 backdrop-blur border-l border-border overflow-y-auto">
         <div className="p-4 space-y-4">
           <div>
             <h1 className="text-base font-bold text-white">{label}</h1>
@@ -427,56 +491,6 @@ export default function ReviewPage() {
           </div>
         </div>
       </aside>
-
-      {/* FLOATING AERIAL PANEL — bottom-left corner, shows the source
-          aerial extracted at import time. Collapses to a toggle button
-          once the comp is verified (the panel is a verification tool;
-          once verification is done it's reference-only). */}
-      {comp.aerial_image ? (
-        <div className="absolute bottom-3 left-3 z-10">
-          {aerialCollapsed ? (
-            <button
-              onClick={() => setAerialCollapsed(false)}
-              className="bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs text-slate-300 hover:text-white flex items-center gap-1.5"
-              title="Show source aerial"
-            >
-              <span>📸</span>
-              Show aerial
-            </button>
-          ) : (
-            <div className="bg-night/95 backdrop-blur border border-border rounded-lg p-2 shadow-xl">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                  Source aerial
-                </span>
-                <button
-                  onClick={() => setAerialCollapsed(true)}
-                  className="text-slate-500 hover:text-white text-[10px]"
-                  title="Hide"
-                >
-                  ✕
-                </button>
-              </div>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={comp.aerial_image}
-                alt="Source aerial"
-                className="w-[220px] h-[160px] object-cover rounded border border-border bg-night"
-              />
-            </div>
-          )}
-        </div>
-      ) : (
-        // No saved aerial — show a compact informational chip so the
-        // broker knows why the panel isn't here. Common for legacy
-        // comps imported before aerial persistence shipped, and for
-        // multi-comp PDFs / listing-sourced comps where we don't
-        // attribute an aerial.
-        <div className="absolute bottom-3 left-3 z-10 bg-night/80 backdrop-blur border border-border rounded-lg px-3 py-2 text-[10px] text-slate-500 flex items-center gap-1.5">
-          <ImageOff size={11} />
-          No source aerial available
-        </div>
-      )}
     </div>
   );
 }
