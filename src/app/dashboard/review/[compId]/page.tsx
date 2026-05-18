@@ -253,7 +253,13 @@ export default function ReviewPage() {
       map.current?.remove();
       map.current = null;
     };
-  }, [comp]);
+    // Depend on comp.id (not full comp object) so the map is only
+    // re-initialized when navigating to a DIFFERENT comp. The previous
+    // [comp] dep caused a full map teardown+rebuild every time any comp
+    // field updated (e.g. on saveReselect, handleMarkVerified), and the
+    // reselect-layers cleanup then ran against a destroyed map instance
+    // — crashing the page right after Save.
+  }, [comp?.id]);
 
   // Resize the map canvas whenever the side panel toggles — flex
   // reflow changes the map column width, but Mapbox can't detect that
@@ -439,12 +445,14 @@ export default function ReviewPage() {
     m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
 
     return () => {
-      m.off('click', 'nearby-parcels-fill', handleClick);
-      m.off('mouseenter', 'nearby-parcels-fill', handleEnter);
-      m.off('mouseleave', 'nearby-parcels-fill', handleLeave);
-      if (m.getCanvas()) m.getCanvas().style.cursor = '';
-      // Tear down ALL layers first, THEN sources. Try/catch each so a
-      // single failed removal can't crash the React tree.
+      // The captured `m` reference may point to a destroyed map by the
+      // time cleanup runs (e.g. saveReselect updates comp, which used
+      // to re-init the map). Wrap EVERY mapbox call in try/catch so a
+      // destroyed-map state can't propagate as a React error.
+      try { m.off('click', 'nearby-parcels-fill', handleClick); } catch {}
+      try { m.off('mouseenter', 'nearby-parcels-fill', handleEnter); } catch {}
+      try { m.off('mouseleave', 'nearby-parcels-fill', handleLeave); } catch {}
+      try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
       for (const id of sourceIds) tryRemove('source', id);
     };
