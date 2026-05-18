@@ -2404,17 +2404,23 @@ export default function MapPage() {
     if (!mapLoaded || !map.current) return;
     const m = map.current;
     try {
-      // TX County boundaries — TxGIO Boundaries/Counties MapServer.
-      // Visible at all zoom levels. Important when a property straddles
-      // a county line (different tax + appraisal districts on each side).
+      // TX County boundaries — Census TIGER generalized State_County service.
+      // Switched from TxGIO Boundaries because TxGIO has server-side scale-
+      // dependent rendering: it returns blank tiles at zoom < ~7, so the
+      // county grid disappeared on the wide TX view. Census TIGER's
+      // generalized service is designed for low-zoom rendering and shows
+      // boundaries at every scale.
+      // Layer 86 = Counties (boundaries + labels). Filter to TX (state
+      // FIPS 48) at the service level to avoid drawing the entire US grid
+      // when looking at TX.
       if (!m.getSource('tx-counties')) {
         m.addSource('tx-counties', {
           type: 'raster',
           tiles: [
-            'https://feature.geographic.texas.gov/arcgis/rest/services/Boundaries/Counties/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+            'https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2023/State_County/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:86&f=image',
           ],
           tileSize: 512,
-          attribution: 'Counties © TxGIO',
+          attribution: 'Counties © U.S. Census Bureau (TIGER/Line)',
         });
       }
       if (!m.getLayer('tx-counties-layer')) {
@@ -2425,24 +2431,33 @@ export default function MapPage() {
           // Always visible — counties are structural reference data, not
           // a togglable overlay. No layout.visibility needed.
           paint: {
-            // Subtler at low zoom (don't dominate the wide TX view),
-            // more visible mid-zoom for county comparison.
-            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 4, 0.45, 8, 0.65, 12, 0.7],
+            // Bumped opacity at low zoom (broker wants to SEE the county
+            // grid at the state-wide view) and capped at 0.85 so the
+            // satellite imagery still reads through at high zoom.
+            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.7, 6, 0.8, 10, 0.75, 14, 0.7],
           },
         });
       }
 
-      // FEMA National Flood Hazard Layer. Layer 28 = "Flood Hazard Zones"
-      // (Zone A, AE, X, etc) — the canonical colored polygons brokers
-      // and underwriters care about. Material to land valuation: parts
-      // in Zone AE carry build restrictions + mandatory insurance.
+      // FEMA National Flood Hazard Layer. Removed the layers=show:28
+      // filter — that layer number ("Flood Hazard Boundaries") only
+      // returned thin lines, not the colored Zone A/AE/X polygons
+      // brokers actually want. Letting the service return its default
+      // visible layer stack gives both the boundary lines AND the zone
+      // fill polygons. FEMA's service is famously slow (often 5-15s for
+      // the first tile in a viewport), so be patient when toggling on.
       if (!m.getSource('fema-floodplain')) {
         m.addSource('fema-floodplain', {
           type: 'raster',
           tiles: [
-            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:28&f=image',
+            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
           ],
           tileSize: 512,
+          // Minzoom: don't try to render flood polygons at state-wide
+          // view — the FEMA service times out at very low scales and
+          // the result is too small to read anyway. Brokers care about
+          // floodplain on a property-by-property basis (zoom 11+).
+          minzoom: 8,
           attribution: 'Floodplain © FEMA NFHL',
         });
       }
@@ -2452,57 +2467,42 @@ export default function MapPage() {
           type: 'raster',
           source: 'fema-floodplain',
           layout: { visibility: overlays.floodplain ? 'visible' : 'none' },
-          paint: { 'raster-opacity': 0.65 },
+          // Bumped opacity to 0.75 so the flood zones are clearly
+          // visible — they're the whole point of toggling this layer.
+          paint: { 'raster-opacity': 0.75 },
         });
       }
 
       // ── Contour lines (Mapbox terrain-v2 vector tileset) ──────────
-      // Powers the "Terrain" style toggle — when active, brown USGS-
-      // style contour lines render on top of the satellite imagery.
-      // Vector source so we can style line color/width per-zoom and
-      // distinguish major (every 100m) vs minor (every 20m) contours.
-      // Free with any Mapbox token; same tileset that powers the
-      // outdoors-v12 style topography.
+      // Powers the "Terrain" style toggle — amber USGS-style contour
+      // lines render on top of satellite imagery. Free with any Mapbox
+      // token; same source that backs Mapbox's outdoors-v12 style.
+      //
+      // Previous version split into major (index==5) + minor (index!=5)
+      // layers, but Mapbox terrain-v2's `index` only takes values 1, 5,
+      // 10 — and at zoom <11 only index=10 features exist. So the
+      // "major" filter with index==5 rendered nothing at the zooms it
+      // claimed to. Simplified to ONE layer that draws every contour,
+      // with zoom-interpolated width/opacity carrying the visual
+      // hierarchy: thinner at low zoom, thicker at high.
       if (!m.getSource('mapbox-terrain-v2')) {
         m.addSource('mapbox-terrain-v2', {
           type: 'vector',
           url: 'mapbox://mapbox.mapbox-terrain-v2',
         });
       }
-      // Minor contours (every 20m) — thinner, more transparent, only at
-      // higher zoom levels where you'd actually read them.
-      if (!m.getLayer('contour-lines-minor')) {
+      if (!m.getLayer('contour-lines')) {
         m.addLayer({
-          id: 'contour-lines-minor',
-          type: 'line',
-          source: 'mapbox-terrain-v2',
-          'source-layer': 'contour',
-          minzoom: 12,
-          filter: ['!=', ['get', 'index'], 5], // exclude major contours (drawn separately)
-          layout: { visibility: mapStyle === 'terrain' ? 'visible' : 'none' },
-          paint: {
-            'line-color': '#b45309', // amber-700 — readable on most TX terrain colors
-            'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.4, 16, 0.8],
-            'line-opacity': ['interpolate', ['linear'], ['zoom'], 12, 0.45, 16, 0.65],
-          },
-        });
-      }
-      // Major contours (every 100m / every 5th line) — bolder, visible
-      // at lower zoom too so the broker gets terrain context even on a
-      // wide view.
-      if (!m.getLayer('contour-lines-major')) {
-        m.addLayer({
-          id: 'contour-lines-major',
+          id: 'contour-lines',
           type: 'line',
           source: 'mapbox-terrain-v2',
           'source-layer': 'contour',
           minzoom: 9,
-          filter: ['==', ['get', 'index'], 5],
           layout: { visibility: mapStyle === 'terrain' ? 'visible' : 'none' },
           paint: {
-            'line-color': '#92400e', // amber-800 — slightly darker than minor
-            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.6, 14, 1.2, 18, 1.6],
-            'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.5, 14, 0.75],
+            'line-color': '#92400e', // amber-800 — readable on TX terrain colors
+            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.5, 13, 0.9, 17, 1.4],
+            'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.55, 13, 0.7, 17, 0.85],
           },
         });
       }
@@ -2511,8 +2511,7 @@ export default function MapPage() {
       // already existed but the toggle state has since changed. Counties
       // intentionally not synced here — always visible.
       m.setLayoutProperty('fema-floodplain-layer', 'visibility', overlays.floodplain ? 'visible' : 'none');
-      m.setLayoutProperty('contour-lines-minor', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
-      m.setLayoutProperty('contour-lines-major', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
+      m.setLayoutProperty('contour-lines', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
     } catch (e) {
       console.warn('[overlays] failed to add/toggle overlay layers:', e);
     }
