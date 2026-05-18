@@ -1418,7 +1418,31 @@ export default function ImportPage() {
       toast.error('Failed to save comp');
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
-      if (comp.latitude != null && comp.longitude != null) {
+      const hasPin = comp.latitude != null && comp.longitude != null;
+
+      if (needsReview) {
+        // "Needs review" intent — broker wants to look at this comp on the
+        // map (or fix its location) right now. Open the map in a NEW TAB so
+        // the import session stays intact with its remaining pending comps
+        // — same-tab navigation would unmount this page and lose them.
+        const mapUrl = hasPin
+          ? `/dashboard/map?focus=${comp.latitude},${comp.longitude},14`
+          : `/dashboard/vault`;
+        toast.success(
+          hasPin
+            ? `${label} flagged — opening map in new tab`
+            : `${label} added — open in vault to place a pin`,
+          { duration: 3000 }
+        );
+        try {
+          window.open(mapUrl, '_blank', 'noopener,noreferrer');
+        } catch {
+          // popup blocker — fall back to same-tab navigation
+          router.push(mapUrl);
+        }
+      } else if (hasPin) {
+        // "Looks right" path with a pin — keep the existing toast-with-link
+        // pattern (low-friction confirmation; broker can ignore or click).
         toast.success(
           (t) => (
             <span>
@@ -1426,7 +1450,14 @@ export default function ImportPage() {
               <button
                 onClick={() => {
                   toast.dismiss(t.id);
-                  router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`);
+                  // Open in new tab same as "Needs review" — keeps the
+                  // import session intact so the broker can keep working
+                  // through any remaining pending comps.
+                  try {
+                    window.open(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`, '_blank', 'noopener,noreferrer');
+                  } catch {
+                    router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14`);
+                  }
                 }}
                 className="underline font-bold text-sage"
               >
