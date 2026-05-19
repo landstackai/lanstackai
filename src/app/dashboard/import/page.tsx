@@ -1243,13 +1243,13 @@ export default function ImportPage() {
         (t) => (
           <span>
             Imported <b>{savedCount}</b> comp{savedCount === 1 ? '' : 's'}
-            {failedCount > 0 && <span className="text-amber-300"> ({failedCount} issue{failedCount === 1 ? '' : 's'} — see chat log)</span>}.{' '}
+            {failedCount > 0 && <span className="text-amber-600"> ({failedCount} issue{failedCount === 1 ? '' : 's'} — see chat log)</span>}.{' '}
             <button
               onClick={() => {
                 toast.dismiss(t.id);
                 router.push('/dashboard/vault');
               }}
-              className="underline font-bold text-sage"
+              className="underline font-semibold text-olive-2"
             >
               View in Vault →
             </button>
@@ -1642,7 +1642,7 @@ export default function ImportPage() {
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={() => toast.dismiss(t.id)}
-                  className="underline font-bold text-sage cursor-pointer"
+                  className="underline font-semibold text-olive-2 cursor-pointer"
                 >
                   View on map →
                 </a>
@@ -1709,7 +1709,7 @@ export default function ImportPage() {
   };
 
   return (
-    <div className="flex h-full bg-night">
+    <div className="flex h-full bg-cream">
       {/* Chat area — drag-and-drop is wired here so PDFs can be dropped
           anywhere in this column. Drop overlay sits on top when dragging. */}
       <div
@@ -1723,28 +1723,28 @@ export default function ImportPage() {
             border + drop affordance. Pointer-events-none so the drop event
             still hits the wrapper underneath. */}
         {isDraggingOver && (
-          <div className="absolute inset-0 z-50 bg-sage/10 backdrop-blur-sm border-4 border-dashed border-sage rounded-lg flex items-center justify-center pointer-events-none">
+          <div className="absolute inset-0 z-50 bg-olive-tint backdrop-blur-sm border-4 border-dashed border-olive rounded-lg flex items-center justify-center pointer-events-none">
             <div className="text-center px-6">
-              <Upload size={56} className="text-sage mx-auto mb-3" />
-              <p className="text-xl font-bold text-sage">Drop PDFs to import</p>
-              <p className="text-sm text-slate-300 mt-2">Multiple files supported · PDF or image</p>
+              <Upload size={56} className="text-olive-2 mx-auto mb-3" />
+              <p className="text-xl font-semibold text-olive-2">Drop PDFs to import</p>
+              <p className="text-sm text-ink-2 mt-2">Multiple files supported · PDF or image</p>
             </div>
           </div>
         )}
 
         {/* Header */}
-        <div className="flex-shrink-0 bg-panel border-b border-border px-4 py-3 flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-sage/10 border border-sage/20 flex items-center justify-center">
-            <FileText size={15} className="text-sage" />
+        <div className="flex-shrink-0 bg-white border-b border-beige px-4 py-3 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-olive-tint border border-olive-border flex items-center justify-center">
+            <FileText size={15} className="text-olive-2" />
           </div>
           <div>
-            <h1 className="font-bold text-sm">Import Comps</h1>
-            <p className="text-xs text-slate-500">Upload PDF, paste text, or describe a property</p>
+            <h1 className="font-semibold text-sm">Import Comps</h1>
+            <p className="text-xs text-ink-3">Upload PDF, paste text, or describe a property</p>
           </div>
           <div className="ml-auto flex gap-2">
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-card border border-border rounded-lg text-xs font-bold text-slate-300 hover:text-white hover:border-sage transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cream border border-beige rounded-lg text-xs font-semibold text-ink-2 hover:text-ink hover:border-olive transition-colors"
             >
               <Upload size={12} />
               Upload PDFs
@@ -1771,15 +1771,15 @@ export default function ImportPage() {
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${
                 msg.role === 'user'
-                  ? 'bg-sage/10 border border-sage/20 text-white'
-                  : 'bg-card border border-border text-slate-200'
+                  ? 'bg-olive-tint border border-olive-border text-ink'
+                  : 'bg-cream border border-beige text-ink'
               }`}>
                 {msg.role === 'assistant' && (
                   <div className="flex items-center gap-1.5 mb-2">
-                    <div className="w-4 h-4 rounded bg-sage/20 flex items-center justify-center">
-                      <span className="text-sage text-[8px] font-bold">AI</span>
+                    <div className="w-4 h-4 rounded bg-olive-tint flex items-center justify-center">
+                      <span className="text-olive-2 text-[8px] font-bold">AI</span>
                     </div>
-                    <span className="text-xs font-bold text-sage">Landstack AI</span>
+                    <span className="text-xs font-semibold text-olive-2">Landstack AI</span>
                   </div>
                 )}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
@@ -1825,15 +1825,15 @@ export default function ImportPage() {
                       const duplicates = (comp as any)._duplicates as DuplicateMatch[] | undefined;
                       const hasDuplicates = duplicates && duplicates.length > 0;
                       return (
-                      <div key={ci} className="bg-night border border-border rounded-xl p-3">
+                      <div key={ci} className="bg-cream border border-beige rounded-xl p-3">
                         {/* Duplicate-match warning — surfaces BEFORE the
                             comp details so the broker knows what they're
                             about to save is already in the vault. Lists
                             the existing match(es) and gives a one-click
                             Skip to drop this comp from the import batch. */}
                         {hasDuplicates && (
-                          <div className="mb-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-2.5">
-                            <div className="flex items-center gap-1.5 text-amber-300 text-xs font-bold mb-1.5">
+                          <div className="mb-3 bg-amber-50 border border-amber-500/60 rounded-lg p-2.5">
+                            <div className="flex items-center gap-1.5 text-amber-600 text-xs font-bold mb-1.5">
                               <AlertTriangle size={12} />
                               {duplicates!.length === 1
                                 ? 'Possible duplicate of:'
@@ -1845,13 +1845,13 @@ export default function ImportPage() {
                                   ? new Date(m.comp.created_at).toLocaleDateString()
                                   : '?';
                                 return (
-                                  <li key={di} className="text-[11px] text-amber-200">
+                                  <li key={di} className="text-[11px] text-amber-700">
                                     <span className="font-bold">
                                       {m.comp.property_name || `${m.comp.county || 'Comp'} ${m.comp.sale_date}`}
                                     </span>
-                                    <span className="text-amber-200/70"> · saved {savedDate}</span>
+                                    <span className="text-amber-700/70"> · saved {savedDate}</span>
                                     {m.confidence === 'exact' && (
-                                      <span className="ml-1.5 text-[9px] uppercase tracking-wide text-amber-300/80 bg-amber-500/15 px-1 py-0.5 rounded">exact</span>
+                                      <span className="ml-1.5 text-[9px] uppercase tracking-wide text-amber-700/80 bg-amber-500/15 px-1 py-0.5 rounded">exact</span>
                                     )}
                                   </li>
                                 );
@@ -1894,7 +1894,7 @@ export default function ImportPage() {
                                     prev.filter((p) => p !== comp)
                                   );
                                 }}
-                                className="px-2.5 py-1 bg-sage/20 hover:bg-sage/30 border border-sage/40 rounded text-[10px] font-bold text-sage transition-colors"
+                                className="px-2.5 py-1 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border rounded text-[10px] font-bold text-olive-2 transition-colors"
                                 title="Update the existing comp with any new info from this extraction (aerial, parcels, description) — only fills in missing fields, never overwrites"
                               >
                                 Merge into existing
@@ -1912,17 +1912,17 @@ export default function ImportPage() {
                                   );
                                   toast.success('Skipped duplicate');
                                 }}
-                                className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded text-[10px] font-bold text-amber-200 transition-colors"
+                                className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded text-[10px] font-bold text-amber-700 transition-colors"
                               >
                                 Skip this
                               </button>
                               <button
                                 onClick={() => router.push(`/dashboard/review/${duplicates![0].comp.id}`)}
-                                className="px-2 py-1 border border-amber-500/30 hover:border-amber-500/60 rounded text-[10px] font-bold text-amber-200/80 hover:text-amber-200 transition-colors"
+                                className="px-2 py-1 border border-amber-500/30 hover:border-amber-500/60 rounded text-[10px] font-bold text-amber-700/80 hover:text-amber-700 transition-colors"
                               >
                                 View existing
                               </button>
-                              <span className="ml-auto text-[10px] text-amber-200/60">
+                              <span className="ml-auto text-[10px] text-amber-700/60">
                                 or save anyway below ↓
                               </span>
                             </div>
@@ -1930,10 +1930,10 @@ export default function ImportPage() {
                         )}
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
-                            <p className="text-sm font-bold text-white">
+                            <p className="text-sm font-bold text-ink">
                               {comp.property_name || `${comp.county} County — ${comp.acres} ac`}
                             </p>
-                            <p className="text-xs text-slate-400 mt-0.5">
+                            <p className="text-xs text-ink-2 mt-0.5">
                               {comp.county}, {comp.state} · {comp.acres} acres
                             </p>
                             {/* Source citations — show where the AI pulled each
@@ -1944,33 +1944,33 @@ export default function ImportPage() {
                                 Description table). One line per field that
                                 has a citation. */}
                             {((comp as any).acres_source || (comp as any).sale_price_source || (comp as any).price_per_acre_source) && (
-                              <div className="mt-1.5 space-y-0.5 text-[10px] text-slate-500 leading-relaxed">
+                              <div className="mt-1.5 space-y-0.5 text-[10px] text-ink-3 leading-relaxed">
                                 {(comp as any).acres_source && (
                                   <div className="flex gap-1">
-                                    <span className="text-slate-600 flex-shrink-0">↳ {comp.acres} ac:</span>
+                                    <span className="text-ink-3 flex-shrink-0">↳ {comp.acres} ac:</span>
                                     <span className="italic">{(comp as any).acres_source}</span>
                                   </div>
                                 )}
                                 {(comp as any).sale_price_source && (
                                   <div className="flex gap-1">
-                                    <span className="text-slate-600 flex-shrink-0">↳ ${comp.sale_price?.toLocaleString()}:</span>
+                                    <span className="text-ink-3 flex-shrink-0">↳ ${comp.sale_price?.toLocaleString()}:</span>
                                     <span className="italic">{(comp as any).sale_price_source}</span>
                                   </div>
                                 )}
                                 {(comp as any).price_per_acre_source && (comp as any).price_per_acre && (
                                   <div className="flex gap-1">
-                                    <span className="text-slate-600 flex-shrink-0">↳ ${Math.round((comp as any).price_per_acre).toLocaleString()}/ac:</span>
+                                    <span className="text-ink-3 flex-shrink-0">↳ ${Math.round((comp as any).price_per_acre).toLocaleString()}/ac:</span>
                                     <span className="italic">{(comp as any).price_per_acre_source}</span>
                                   </div>
                                 )}
                               </div>
                             )}
                             <div className="flex items-center gap-3 mt-1.5">
-                              <span className="text-emerald-400 font-mono text-xs font-bold">
+                              <span className="text-olive font-mono text-xs font-bold">
                                 ${comp.sale_price?.toLocaleString()}
                               </span>
                               {comp.ppa_land_only && (
-                                <span className="text-emerald-400 font-mono text-xs">
+                                <span className="text-olive font-mono text-xs">
                                   ${Math.round(comp.ppa_land_only).toLocaleString()}/ac (land)
                                 </span>
                               )}
@@ -1978,10 +1978,10 @@ export default function ImportPage() {
                           </div>
                           <div className="flex items-center gap-1">
                             <div className={`w-2 h-2 rounded-full ${
-                              comp.confidence.overall >= 80 ? 'bg-emerald-400' :
-                              comp.confidence.overall >= 50 ? 'bg-amber-400' : 'bg-red-400'
+                              comp.confidence.overall >= 80 ? 'bg-olive' :
+                              comp.confidence.overall >= 50 ? 'bg-amber-600' : 'bg-red-500'
                             }`} />
-                            <span className="text-xs text-slate-500">{comp.confidence.overall}%</span>
+                            <span className="text-xs text-ink-3">{comp.confidence.overall}%</span>
                           </div>
                         </div>
 
@@ -2002,29 +2002,29 @@ export default function ImportPage() {
                               <img
                                 src={aerial}
                                 alt="From source"
-                                className="w-full h-32 object-cover rounded border border-border bg-night"
+                                className="w-full h-32 object-cover rounded border border-beige bg-cream"
                               />
                             ) : sourceMapUrl ? (
                               // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 src={sourceMapUrl}
                                 alt="Source coords"
-                                className="w-full h-32 object-cover rounded border border-border"
+                                className="w-full h-32 object-cover rounded border border-beige"
                               />
                             ) : (
-                              <div className="w-full h-32 bg-card border border-border rounded p-2 text-[10px] text-slate-400 flex flex-col gap-0.5 overflow-hidden">
-                                <div className="text-slate-500 uppercase tracking-wide">Source data</div>
-                                {comp.grantee && <div className="text-white truncate">→ {comp.grantee}</div>}
-                                {comp.grantor && <div className="text-slate-400 truncate">from {comp.grantor}</div>}
-                                {comp.address && <div className="text-slate-400 truncate">{comp.address}</div>}
+                              <div className="w-full h-32 bg-cream border border-beige rounded p-2 text-[10px] text-ink-2 flex flex-col gap-0.5 overflow-hidden">
+                                <div className="text-ink-3 uppercase tracking-wide">Source data</div>
+                                {comp.grantee && <div className="text-ink truncate">→ {comp.grantee}</div>}
+                                {comp.grantor && <div className="text-ink-2 truncate">from {comp.grantor}</div>}
+                                {comp.address && <div className="text-ink-2 truncate">{comp.address}</div>}
                                 {comp.description && (
-                                  <div className="text-slate-500 line-clamp-3 mt-0.5">
+                                  <div className="text-ink-3 line-clamp-3 mt-0.5">
                                     {comp.description.slice(0, 120)}{comp.description.length > 120 ? '…' : ''}
                                   </div>
                                 )}
                               </div>
                             )}
-                            <div className="text-[10px] text-slate-500 text-center mt-1">From source</div>
+                            <div className="text-[10px] text-ink-3 text-center mt-1">From source</div>
                           </div>
 
                           {/* RIGHT: system match */}
@@ -2034,16 +2034,16 @@ export default function ImportPage() {
                               <img
                                 src={sysPinUrl}
                                 alt="System pin"
-                                className="w-full h-32 object-cover rounded border border-border"
+                                className="w-full h-32 object-cover rounded border border-beige"
                               />
                             ) : (
-                              <div className="w-full h-32 bg-amber-900/20 border border-amber-700/40 rounded p-2 text-[10px] flex flex-col items-center justify-center text-center gap-1">
-                                <AlertTriangle className="text-amber-400" size={20} />
-                                <div className="text-amber-300 font-bold">Could not locate</div>
-                                <div className="text-amber-200/70 text-[9px]">Place manually in vault</div>
+                              <div className="w-full h-32 bg-amber-50 border border-amber-500/60 rounded p-2 text-[10px] flex flex-col items-center justify-center text-center gap-1">
+                                <AlertTriangle className="text-amber-600" size={20} />
+                                <div className="text-amber-700 font-bold">Could not locate</div>
+                                <div className="text-amber-700/70 text-[9px]">Place manually in vault</div>
                               </div>
                             )}
-                            <div className="text-[10px] text-slate-500 text-center mt-1">System pinned</div>
+                            <div className="text-[10px] text-ink-3 text-center mt-1">System pinned</div>
                           </div>
                         </div>
 
@@ -2053,7 +2053,7 @@ export default function ImportPage() {
                             onClick={() => saveComp(comp, { needsReview: false })}
                             disabled={sysLat == null || sysLng == null}
                             title={sysLat == null ? 'No pin to confirm — use Needs review and fix manually' : 'Mark this comp as verified and save to vault'}
-                            className="py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="py-2 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border text-olive-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             <Check size={12} />
                             Looks right
@@ -2101,7 +2101,7 @@ export default function ImportPage() {
                               }
                             }}
                             title="Save this and any other pending comps for review, then open the review workspace"
-                            className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                            className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
                           >
                             <Clock size={12} />
                             Needs review
@@ -2114,7 +2114,7 @@ export default function ImportPage() {
                     {msg.comps.length > 1 && (
                       <button
                         onClick={saveAllComps}
-                        className="w-full py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                        className="w-full py-2 bg-cream-2 hover:bg-cream-2 border border-beige text-ink-2 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1"
                       >
                         <Clock size={12} />
                         Save all {msg.comps.length} for review later
@@ -2128,10 +2128,10 @@ export default function ImportPage() {
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-card border border-border rounded-2xl px-4 py-3 max-w-[80%]">
+              <div className="bg-cream border border-beige rounded-2xl px-4 py-3 max-w-[80%]">
                 <div className="flex items-start gap-3">
-                  <div className="w-5 h-5 rounded bg-sage/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <span className="text-sage text-[8px] font-bold">AI</span>
+                  <div className="w-5 h-5 rounded bg-olive-tint flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <span className="text-olive-2 text-[8px] font-bold">AI</span>
                   </div>
                   <TieredLoadingMessage status={loadingStatus} />
                 </div>
@@ -2142,11 +2142,11 @@ export default function ImportPage() {
         </div>
 
         {/* Input */}
-        <div className="flex-shrink-0 bg-panel border-t border-border p-3">
+        <div className="flex-shrink-0 bg-white border-t border-beige p-3">
           <div className="flex gap-2">
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="p-2.5 bg-card border border-border rounded-xl text-slate-400 hover:text-sage hover:border-sage transition-colors flex-shrink-0"
+              className="p-2.5 bg-cream border border-beige rounded-xl text-ink-2 hover:text-olive-2 hover:border-olive transition-colors flex-shrink-0"
             >
               <Upload size={16} />
             </button>
@@ -2162,7 +2162,7 @@ export default function ImportPage() {
                 }}
                 placeholder="Paste appraisal text, describe a sale, or ask a question..."
                 rows={1}
-                className="w-full bg-card border border-border rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors resize-none"
+                className="w-full bg-cream border border-beige rounded-xl px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors resize-none"
                 style={{ minHeight: '42px', maxHeight: '120px' }}
                 onInput={(e) => {
                   const target = e.target as HTMLTextAreaElement;
@@ -2174,12 +2174,12 @@ export default function ImportPage() {
             <button
               onClick={handleSubmit}
               disabled={loading || !input.trim()}
-              className="p-2.5 bg-sage hover:bg-sage2 text-black rounded-xl transition-colors flex-shrink-0 disabled:opacity-50"
+              className="p-2.5 bg-olive hover:bg-olive-2 text-white rounded-xl transition-colors flex-shrink-0 disabled:opacity-50"
             >
               <Send size={16} />
             </button>
           </div>
-          <p className="text-[10px] text-slate-600 mt-1.5 text-center">
+          <p className="text-[10px] text-ink-3 mt-1.5 text-center">
             Paste from email, upload PDF, or take a photo · Press Enter to send
           </p>
         </div>

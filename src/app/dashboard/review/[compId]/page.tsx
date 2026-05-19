@@ -1240,13 +1240,13 @@ export default function ReviewPage() {
   // ── Loading / error states ──────────────────────────────────────────
   if (loadError) {
     return (
-      <div className="min-h-screen bg-night flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-card border border-border rounded-xl p-6 text-center">
-          <p className="text-red-400 font-bold mb-2">Couldn't load this comp</p>
-          <p className="text-sm text-slate-400 mb-4">{loadError}</p>
+      <div className="min-h-screen bg-cream flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-cream border border-beige rounded-xl p-6 text-center">
+          <p className="text-red-500 font-bold mb-2">Couldn't load this comp</p>
+          <p className="text-sm text-ink-2 mb-4">{loadError}</p>
           <button
             onClick={() => router.push('/dashboard/vault')}
-            className="px-4 py-2 bg-sage text-black rounded-lg text-sm font-bold"
+            className="px-4 py-2 bg-olive text-white rounded-lg text-sm font-bold"
           >
             Back to vault
           </button>
@@ -1256,8 +1256,8 @@ export default function ReviewPage() {
   }
   if (!comp) {
     return (
-      <div className="min-h-screen bg-night flex items-center justify-center">
-        <div className="text-slate-400 text-sm">Loading comp…</div>
+      <div className="min-h-screen bg-cream flex items-center justify-center">
+        <div className="text-ink-2 text-sm">Loading comp…</div>
       </div>
     );
   }
@@ -1274,11 +1274,11 @@ export default function ReviewPage() {
     // the AppNav sidebar — vw/vh would extend past <main>'s edge and
     // clip the right side off-screen. The flex+flex-1+relative+
     // w/h-full pattern is the same one /dashboard/map uses.
-    <div className="flex h-full w-full bg-night overflow-hidden">
+    <div className="flex h-full w-full bg-cream overflow-hidden">
       {/* MAP COLUMN — relative so absolute overlays (top bar, aerial)
           position against the map area, not the whole viewport. */}
       <div className="flex-1 relative">
-        <div ref={mapContainer} className="w-full h-full bg-slate-900" />
+        <div ref={mapContainer} className="w-full h-full bg-cream-2" />
 
         {/* Visible error banner if Mapbox failed to initialize. Without
             this the broker just sees a black map and has no signal as
@@ -1287,12 +1287,12 @@ export default function ReviewPage() {
         {mapError && (
           <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 mx-auto max-w-md z-20 px-4">
             <div className="bg-red-500/15 border border-red-500/40 rounded-xl p-4 backdrop-blur">
-              <div className="text-red-300 font-bold mb-1 flex items-center gap-2">
+              <div className="text-red-700 font-bold mb-1 flex items-center gap-2">
                 <AlertTriangle size={16} />
                 Map failed to load
               </div>
-              <div className="text-red-200/80 text-xs leading-relaxed">{mapError}</div>
-              <div className="text-red-200/60 text-[11px] mt-2 leading-relaxed">
+              <div className="text-red-700/80 text-xs leading-relaxed">{mapError}</div>
+              <div className="text-red-700/60 text-[11px] mt-2 leading-relaxed">
                 Check the browser console for more detail. Refresh to retry.
               </div>
             </div>
@@ -1300,19 +1300,19 @@ export default function ReviewPage() {
         )}
 
         {/* Top bar: back link + comp label (absolute over map) */}
-        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 max-w-[60%]">
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 max-w-[60%]">
           <button
             onClick={() => router.push('/dashboard/vault')}
-            className="text-slate-400 hover:text-white flex items-center gap-1 text-xs"
+            className="text-ink-2 hover:text-ink flex items-center gap-1 text-xs"
             title="Back to vault"
           >
             <ArrowLeft size={14} />
             Vault
           </button>
-          <span className="text-slate-600">·</span>
-          <span className="text-sm font-bold text-white truncate">{label}</span>
+          <span className="text-ink-3">·</span>
+          <span className="text-sm font-semibold text-ink truncate">{label}</span>
           {comp.needs_location_review && (
-            <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-slate-400 bg-slate-500/20 border border-slate-500/30 rounded px-1.5 py-0.5">
+            <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-ink-2 bg-cream-2 border border-beige-2 rounded px-1.5 py-0.5">
               <Clock size={10} />
               Needs review
             </span>
@@ -1324,7 +1324,7 @@ export default function ReviewPage() {
         {!panelOpen && (
           <button
             onClick={() => setPanelOpen(true)}
-            className="absolute top-3 right-3 z-10 bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs text-slate-300 hover:text-white flex items-center gap-1.5 shadow-xl"
+            className="absolute top-3 right-3 z-10 bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 text-xs text-ink-2 hover:text-ink flex items-center gap-1.5 shadow-xl"
             title="Show details panel"
             aria-label="Show details panel"
           >
@@ -1342,22 +1342,22 @@ export default function ReviewPage() {
             {aerialCollapsed ? (
               <button
                 onClick={() => setAerialCollapsed(false)}
-                className="bg-night/90 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs text-slate-300 hover:text-white flex items-center gap-1.5"
+                className="bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 text-xs text-ink-2 hover:text-ink flex items-center gap-1.5"
                 title="Show source aerial"
               >
                 <span>📸</span>
                 Show aerial
               </button>
             ) : (
-              <div className="bg-night/95 backdrop-blur border border-border rounded-lg p-2 shadow-xl">
+              <div className="bg-cream/95 backdrop-blur border border-beige rounded-lg p-2 shadow-xl">
                 <div className="flex items-center justify-between mb-1.5 gap-3">
-                  <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                  <span className="text-[10px] uppercase tracking-wide text-ink-3">
                     Source aerial
                   </span>
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setAerialExpanded(true)}
-                      className="text-slate-500 hover:text-white p-0.5"
+                      className="text-ink-3 hover:text-ink p-0.5"
                       title="Expand to full size"
                       aria-label="Expand aerial"
                     >
@@ -1365,7 +1365,7 @@ export default function ReviewPage() {
                     </button>
                     <button
                       onClick={() => setAerialCollapsed(true)}
-                      className="text-slate-500 hover:text-white text-[10px] p-0.5"
+                      className="text-ink-3 hover:text-ink text-[10px] p-0.5"
                       title="Hide"
                     >
                       ✕
@@ -1385,14 +1385,14 @@ export default function ReviewPage() {
                   <img
                     src={comp.aerial_image}
                     alt="Source aerial"
-                    className="w-[220px] h-[160px] object-cover rounded border border-border bg-night"
+                    className="w-[220px] h-[160px] object-cover rounded border border-beige bg-cream"
                   />
                 </button>
               </div>
             )}
           </div>
         ) : (
-          <div className="absolute bottom-3 left-3 z-10 bg-night/80 backdrop-blur border border-border rounded-lg px-3 py-2 text-[10px] text-slate-500 flex items-center gap-1.5">
+          <div className="absolute bottom-3 left-3 z-10 bg-cream/80 backdrop-blur border border-beige rounded-lg px-3 py-2 text-[10px] text-ink-3 flex items-center gap-1.5">
             <ImageOff size={11} />
             No source aerial available
           </div>
@@ -1413,13 +1413,13 @@ export default function ReviewPage() {
         >
           <button
             onClick={(e) => { e.stopPropagation(); setAerialExpanded(false); }}
-            className="absolute top-4 right-4 bg-night/80 hover:bg-night border border-border rounded-lg p-2 text-slate-300 hover:text-white"
+            className="absolute top-4 right-4 bg-cream/80 hover:bg-cream-2 border border-beige rounded-lg p-2 text-ink-2 hover:text-ink"
             title="Close (Esc)"
             aria-label="Close aerial"
           >
             <X size={16} />
           </button>
-          <div className="absolute top-4 left-4 bg-night/80 border border-border rounded-lg px-3 py-2 text-xs text-slate-300">
+          <div className="absolute top-4 left-4 bg-cream/80 border border-beige rounded-lg px-3 py-2 text-xs text-ink-2">
             Source aerial — {label}
           </div>
           {/* Stop propagation on the image itself so clicking it doesn't
@@ -1429,7 +1429,7 @@ export default function ReviewPage() {
             src={comp.aerial_image}
             alt="Source aerial (expanded)"
             onClick={(e) => e.stopPropagation()}
-            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border border-border"
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border border-beige"
           />
         </div>
       )}
@@ -1439,11 +1439,11 @@ export default function ReviewPage() {
           takes full width (map.resize() runs on toggle to update the canvas).
           A floating reopen button appears in the map column when closed. */}
       {panelOpen && (
-      <aside className="w-72 md:w-80 flex-shrink-0 bg-night/95 backdrop-blur border-l border-border overflow-y-auto relative">
+      <aside className="w-72 md:w-80 flex-shrink-0 bg-cream/95 backdrop-blur border-l border-beige overflow-y-auto relative">
         {/* Collapse button (top-right of panel itself) */}
         <button
           onClick={() => setPanelOpen(false)}
-          className="absolute top-2 right-2 z-10 p-1 text-slate-500 hover:text-white"
+          className="absolute top-2 right-2 z-10 p-1 text-ink-3 hover:text-ink"
           title="Hide panel"
           aria-label="Hide details panel"
         >
@@ -1451,8 +1451,8 @@ export default function ReviewPage() {
         </button>
         <div className="p-4 space-y-4">
           <div>
-            <h1 className="text-base font-bold text-white">{label}</h1>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <h1 className="text-base font-semibold text-ink">{label}</h1>
+            <p className="text-xs text-ink-2 mt-0.5">
               {comp.county}{comp.state ? `, ${comp.state}` : ''}
             </p>
           </div>
@@ -1462,19 +1462,19 @@ export default function ReviewPage() {
               Shows running stats so broker can see how acreage compares
               to the appraisal target as they click. */}
           {mode === 'reselect' && (
-            <div className="bg-sage/10 border border-sage/40 rounded-lg p-3 space-y-3">
-              <div className="flex items-center gap-1.5 text-sage font-bold text-xs uppercase tracking-wide">
+            <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
+              <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
                 <Edit3 size={12} />
                 Reselect mode
               </div>
               {loadingParcels ? (
-                <div className="flex items-center gap-2 text-xs text-slate-300">
+                <div className="flex items-center gap-2 text-xs text-ink-2">
                   <Loader2 size={12} className="animate-spin" />
                   Loading nearby parcels…
                 </div>
               ) : (
                 <>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                  <p className="text-[11px] text-ink-2 leading-relaxed">
                     Click parcels on the map to add/remove them from the
                     cluster. Selected parcels are gold; unselected are
                     thin gray outlines.
@@ -1487,12 +1487,12 @@ export default function ReviewPage() {
                       Useful when the bbox fetch misses parcels — pin
                       was wrong, or the cluster spans further than the
                       initial viewport. */}
-                  <div className="border-t border-sage/20 pt-2 space-y-2">
-                    <label className="text-[10px] uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                  <div className="border-t border-olive-border pt-2 space-y-2">
+                    <label className="text-[10px] uppercase tracking-wide text-ink-3 flex items-center gap-1.5">
                       <Search size={10} />
                       Search by owner name
                       {comp?.county && (
-                        <span className="text-slate-600 normal-case tracking-normal">
+                        <span className="text-ink-3 normal-case tracking-normal">
                           · {comp.county} only
                         </span>
                       )}
@@ -1510,28 +1510,28 @@ export default function ReviewPage() {
                         }}
                         placeholder="e.g. Grundhoefer Farms"
                         disabled={ownerSearching}
-                        className="flex-1 bg-night/60 border border-border rounded px-2 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sage/60 disabled:opacity-50"
+                        className="flex-1 bg-cream/60 border border-beige rounded px-2 py-1 text-xs text-ink placeholder-ink-3 focus:outline-none focus:border-olive disabled:opacity-50"
                       />
                       <button
                         onClick={runOwnerSearch}
                         disabled={ownerSearching || ownerQuery.trim().length < 3}
-                        className="px-2.5 bg-sage/20 hover:bg-sage/30 border border-sage/40 text-sage rounded text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
+                        className="px-2.5 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
                         title="Search TxGIO by owner"
                       >
                         {ownerSearching ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
                       </button>
                     </div>
                     {ownerSearchError && (
-                      <div className="text-[10px] text-red-300 leading-relaxed">{ownerSearchError}</div>
+                      <div className="text-[10px] text-red-700 leading-relaxed">{ownerSearchError}</div>
                     )}
                     {ownerMatches && ownerMatches.length > 0 && (
                       <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-sky-300">
+                        <span className="text-sky-700">
                           {ownerMatches.length} match{ownerMatches.length === 1 ? '' : 'es'} (sky blue) — click to add
                         </span>
                         <button
                           onClick={clearOwnerSearch}
-                          className="text-slate-500 hover:text-slate-300 underline"
+                          className="text-ink-3 hover:text-ink-2 underline"
                           title="Clear owner matches"
                         >
                           clear
@@ -1543,24 +1543,24 @@ export default function ReviewPage() {
                   {reselectStats && (
                     <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
                       <div>
-                        <span className="text-slate-500">Selected:</span>{' '}
-                        <span className="text-white font-bold font-mono">{reselectStats.count}</span>
+                        <span className="text-ink-3">Selected:</span>{' '}
+                        <span className="text-ink font-bold font-mono">{reselectStats.count}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Total:</span>{' '}
-                        <span className="text-white font-bold font-mono">{reselectStats.totalAcres.toFixed(1)}ac</span>
+                        <span className="text-ink-3">Total:</span>{' '}
+                        <span className="text-ink font-bold font-mono">{reselectStats.totalAcres.toFixed(1)}ac</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Target:</span>{' '}
-                        <span className="text-slate-300 font-mono">{reselectStats.target.toFixed(1)}ac</span>
+                        <span className="text-ink-3">Target:</span>{' '}
+                        <span className="text-ink-2 font-mono">{reselectStats.target.toFixed(1)}ac</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Δ:</span>{' '}
+                        <span className="text-ink-3">Δ:</span>{' '}
                         <span className={`font-mono font-bold ${
-                          reselectStats.delta == null ? 'text-slate-400' :
-                          reselectStats.delta < 0.05 ? 'text-emerald-400' :
-                          reselectStats.delta < 0.15 ? 'text-amber-400' :
-                          'text-red-400'
+                          reselectStats.delta == null ? 'text-ink-2' :
+                          reselectStats.delta < 0.05 ? 'text-olive' :
+                          reselectStats.delta < 0.15 ? 'text-amber-600' :
+                          'text-red-500'
                         }`}>
                           {reselectStats.delta != null ? `${(reselectStats.delta * 100).toFixed(1)}%` : '—'}
                         </span>
@@ -1571,7 +1571,7 @@ export default function ReviewPage() {
                     <button
                       onClick={cancelReselect}
                       disabled={reselectSaving}
-                      className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                      className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
                     >
                       <X size={12} />
                       Cancel
@@ -1579,7 +1579,7 @@ export default function ReviewPage() {
                     <button
                       onClick={saveReselect}
                       disabled={reselectSaving || selectedPropIds.size === 0}
-                      className="py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {reselectSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
                       {reselectSaving ? 'Saving…' : 'Save'}
@@ -1597,44 +1597,44 @@ export default function ReviewPage() {
               parcel_id because drawn polygons don't correspond to
               TxGIO parcels). */}
           {mode === 'draw' && (
-            <div className="bg-sage/10 border border-sage/40 rounded-lg p-3 space-y-3">
-              <div className="flex items-center gap-1.5 text-sage font-bold text-xs uppercase tracking-wide">
+            <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
+              <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
                 <Pencil size={12} />
                 Draw mode
               </div>
               {!drawnFeature ? (
-                <p className="text-[11px] text-slate-300 leading-relaxed">
+                <p className="text-[11px] text-ink-2 leading-relaxed">
                   Click points on the map to draw the boundary. Double-
                   click to close the polygon. Cancel exits without
                   saving.
                 </p>
               ) : (
                 <>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                  <p className="text-[11px] text-ink-2 leading-relaxed">
                     Boundary drawn. Drag vertices to adjust, or save to
                     commit as the new comp boundary.
                   </p>
                   {drawStats && (
                     <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
                       <div>
-                        <span className="text-slate-500">Vertices:</span>{' '}
-                        <span className="text-white font-bold font-mono">{drawStats.vertexCount}</span>
+                        <span className="text-ink-3">Vertices:</span>{' '}
+                        <span className="text-ink font-bold font-mono">{drawStats.vertexCount}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Area:</span>{' '}
-                        <span className="text-white font-bold font-mono">{drawStats.acres.toFixed(1)}ac</span>
+                        <span className="text-ink-3">Area:</span>{' '}
+                        <span className="text-ink font-bold font-mono">{drawStats.acres.toFixed(1)}ac</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Target:</span>{' '}
-                        <span className="text-slate-300 font-mono">{drawStats.target.toFixed(1)}ac</span>
+                        <span className="text-ink-3">Target:</span>{' '}
+                        <span className="text-ink-2 font-mono">{drawStats.target.toFixed(1)}ac</span>
                       </div>
                       <div>
-                        <span className="text-slate-500">Δ:</span>{' '}
+                        <span className="text-ink-3">Δ:</span>{' '}
                         <span className={`font-mono font-bold ${
-                          drawStats.delta == null ? 'text-slate-400' :
-                          drawStats.delta < 0.05 ? 'text-emerald-400' :
-                          drawStats.delta < 0.15 ? 'text-amber-400' :
-                          'text-red-400'
+                          drawStats.delta == null ? 'text-ink-2' :
+                          drawStats.delta < 0.05 ? 'text-olive' :
+                          drawStats.delta < 0.15 ? 'text-amber-600' :
+                          'text-red-500'
                         }`}>
                           {drawStats.delta != null ? `${(drawStats.delta * 100).toFixed(1)}%` : '—'}
                         </span>
@@ -1647,7 +1647,7 @@ export default function ReviewPage() {
                 <button
                   onClick={cancelDraw}
                   disabled={drawSaving}
-                  className="py-2 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                  className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
                 >
                   <X size={12} />
                   Cancel
@@ -1655,7 +1655,7 @@ export default function ReviewPage() {
                 <button
                   onClick={saveDraw}
                   disabled={drawSaving || !drawnFeature}
-                  className="py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {drawSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
                   {drawSaving ? 'Saving…' : 'Save'}
@@ -1667,38 +1667,38 @@ export default function ReviewPage() {
           {/* Status badges — same set as the vault list uses */}
           <div className="flex flex-wrap gap-1.5">
             {!hasPin && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
                 <MapPinOff size={11} />
                 No location
               </span>
             )}
             {comp.needs_extraction_review && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1">
                 <AlertTriangle size={11} />
                 Math issue
               </span>
             )}
             {comp.needs_location_review && hasPin && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-300 bg-slate-500/10 border border-slate-500/30 rounded px-2 py-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-ink-2 bg-cream-2 border border-beige-2 rounded px-2 py-1">
                 <Clock size={11} />
                 Needs review
               </span>
             )}
             {!comp.needs_location_review && !comp.needs_extraction_review && hasPin && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-olive-2 bg-olive-tint border border-olive-border rounded px-2 py-1">
                 <Check size={11} />
                 Verified
               </span>
             )}
             {comp.source_type === 'listing_url' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-300 bg-sky-500/10 border border-sky-500/30 rounded px-2 py-1">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-700 bg-sky-500/10 border border-sky-500/30 rounded px-2 py-1">
                 From listing
               </span>
             )}
           </div>
 
           {/* Headline metrics */}
-          <div className="border-t border-border pt-3 space-y-2 text-xs">
+          <div className="border-t border-beige pt-3 space-y-2 text-xs">
             <div className="grid grid-cols-2 gap-2">
               <Stat label="Acres" value={comp.acres != null ? formatAcres(comp.acres) : '—'} />
               <Stat label="Sale price" value={comp.sale_price != null ? formatCurrency(comp.sale_price) : '—'} />
@@ -1715,30 +1715,30 @@ export default function ReviewPage() {
               system (migration 027). Helps brokers spot when the AI
               pulled a value from the wrong table or improvement list. */}
           {(comp.acres_source || comp.sale_price_source || comp.price_per_acre_source || comp.ppa_land_only_source) && (
-            <div className="border-t border-border pt-3 text-xs space-y-1.5">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500">Extraction sources</div>
+            <div className="border-t border-beige pt-3 text-xs space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-ink-3">Extraction sources</div>
               {comp.acres_source && (
                 <div className="text-[10px] leading-relaxed">
-                  <span className="text-slate-500">Acres:</span>{' '}
-                  <span className="text-slate-300 italic">{comp.acres_source}</span>
+                  <span className="text-ink-3">Acres:</span>{' '}
+                  <span className="text-ink-2 italic">{comp.acres_source}</span>
                 </div>
               )}
               {comp.sale_price_source && (
                 <div className="text-[10px] leading-relaxed">
-                  <span className="text-slate-500">Sale price:</span>{' '}
-                  <span className="text-slate-300 italic">{comp.sale_price_source}</span>
+                  <span className="text-ink-3">Sale price:</span>{' '}
+                  <span className="text-ink-2 italic">{comp.sale_price_source}</span>
                 </div>
               )}
               {comp.price_per_acre_source && (
                 <div className="text-[10px] leading-relaxed">
-                  <span className="text-slate-500">$/acre:</span>{' '}
-                  <span className="text-slate-300 italic">{comp.price_per_acre_source}</span>
+                  <span className="text-ink-3">$/acre:</span>{' '}
+                  <span className="text-ink-2 italic">{comp.price_per_acre_source}</span>
                 </div>
               )}
               {comp.ppa_land_only_source && comp.ppa_land_only_source !== comp.price_per_acre_source && (
                 <div className="text-[10px] leading-relaxed">
-                  <span className="text-slate-500">$/ac (land):</span>{' '}
-                  <span className="text-slate-300 italic">{comp.ppa_land_only_source}</span>
+                  <span className="text-ink-3">$/ac (land):</span>{' '}
+                  <span className="text-ink-2 italic">{comp.ppa_land_only_source}</span>
                 </div>
               )}
             </div>
@@ -1750,10 +1750,10 @@ export default function ReviewPage() {
               the action buttons below the fold. Click the header to
               toggle. Whitespace preserved so paragraph breaks survive. */}
           {comp.description && comp.description.trim().length > 0 && (
-            <div className="border-t border-border pt-3">
+            <div className="border-t border-beige pt-3">
               <button
                 onClick={() => setDescriptionOpen((v) => !v)}
-                className="w-full flex items-center justify-between text-[10px] uppercase tracking-wide text-slate-500 hover:text-slate-300 mb-1.5"
+                className="w-full flex items-center justify-between text-[10px] uppercase tracking-wide text-ink-3 hover:text-ink-2 mb-1.5"
                 aria-expanded={descriptionOpen}
                 title={descriptionOpen ? 'Collapse description' : 'Expand description'}
               >
@@ -1763,12 +1763,12 @@ export default function ReviewPage() {
                   : <ChevronRight size={12} />}
               </button>
               {descriptionOpen ? (
-                <div className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto pr-1">
+                <div className="text-xs text-ink-2 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto pr-1">
                   {comp.description}
                 </div>
               ) : (
                 <div
-                  className="text-xs text-slate-400 leading-relaxed line-clamp-2 cursor-pointer hover:text-slate-300"
+                  className="text-xs text-ink-2 leading-relaxed line-clamp-2 cursor-pointer hover:text-ink-2"
                   onClick={() => setDescriptionOpen(true)}
                   title="Click to expand"
                 >
@@ -1780,7 +1780,7 @@ export default function ReviewPage() {
 
           {/* Transaction parties */}
           {(comp.grantor || comp.grantee) && (
-            <div className="border-t border-border pt-3 space-y-1.5 text-xs">
+            <div className="border-t border-beige pt-3 space-y-1.5 text-xs">
               {comp.grantee && (
                 <KeyValue k="Grantee" v={comp.grantee} />
               )}
@@ -1804,11 +1804,11 @@ export default function ReviewPage() {
                    + "Paste URL manually" link (secondary)
               Manual paste always available; broker can override AI
               find at any time. */}
-          <div className="border-t border-border pt-3 text-xs space-y-2">
+          <div className="border-t border-beige pt-3 text-xs space-y-2">
             <div className="flex items-center justify-between">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500">Source</div>
+              <div className="text-[10px] uppercase tracking-wide text-ink-3">Source</div>
               {comp.source_type && (
-                <div className="text-[10px] text-slate-400">
+                <div className="text-[10px] text-ink-2">
                   {comp.source_type === 'listing_url' ? 'Listing URL' : 'PDF appraisal'}
                 </div>
               )}
@@ -1816,12 +1816,12 @@ export default function ReviewPage() {
 
             {/* SAVED state — listing URL already on the comp */}
             {comp.source_url && !listingCandidate && !pasteUrlMode && (
-              <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+              <div className="bg-cream/40 border border-beige rounded-lg p-2 space-y-1.5">
                 <a
                   href={comp.source_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  className="text-olive-2 hover:underline break-all text-[11px] flex items-start gap-1.5"
                 >
                   <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
                   <span>{comp.source_url}</span>
@@ -1830,7 +1830,7 @@ export default function ReviewPage() {
                   <button
                     onClick={handleFindListing}
                     disabled={findingListing}
-                    className="text-[10px] text-slate-500 hover:text-sage underline disabled:opacity-50"
+                    className="text-[10px] text-ink-3 hover:text-olive-2 underline disabled:opacity-50"
                     title="Re-run AI find to look for a better match"
                   >
                     {findingListing ? 'Searching…' : 'Find a better match'}
@@ -1838,7 +1838,7 @@ export default function ReviewPage() {
                   <button
                     onClick={handleRemoveListingUrl}
                     disabled={savingListing}
-                    className="text-[10px] text-slate-500 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                    className="text-[10px] text-ink-3 hover:text-red-700 underline disabled:opacity-50 ml-auto"
                     title="Remove the saved listing URL"
                   >
                     Remove
@@ -1849,8 +1849,8 @@ export default function ReviewPage() {
 
             {/* AI FOUND state — candidate returned, broker reviews */}
             {listingCandidate && listingCandidate.url && (
-              <div className="bg-sage/10 border border-sage/40 rounded-lg p-2.5 space-y-2">
-                <div className="flex items-center gap-1.5 text-sage text-[10px] font-bold uppercase tracking-wide">
+              <div className="bg-olive-tint border border-olive-border rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center gap-1.5 text-olive-2 text-[10px] font-bold uppercase tracking-wide">
                   <Sparkles size={11} />
                   AI found a match
                 </div>
@@ -1858,13 +1858,13 @@ export default function ReviewPage() {
                   href={listingCandidate.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  className="text-olive-2 hover:underline break-all text-[11px] flex items-start gap-1.5"
                 >
                   <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
                   <span>{listingCandidate.url}</span>
                 </a>
                 {listingCandidate.reason && (
-                  <p className="text-[10px] text-slate-300 leading-relaxed">
+                  <p className="text-[10px] text-ink-2 leading-relaxed">
                     {listingCandidate.reason}
                   </p>
                 )}
@@ -1872,7 +1872,7 @@ export default function ReviewPage() {
                   <button
                     onClick={() => setListingCandidate(null)}
                     disabled={savingListing}
-                    className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    className="py-1.5 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
                   >
                     <X size={10} />
                     Not a match
@@ -1880,7 +1880,7 @@ export default function ReviewPage() {
                   <button
                     onClick={() => handleSaveListingUrl(listingCandidate.url!)}
                     disabled={savingListing}
-                    className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    className="py-1.5 bg-olive hover:bg-olive-2 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
                   >
                     {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
                     {savingListing ? 'Saving…' : 'Save as listing'}
@@ -1891,21 +1891,21 @@ export default function ReviewPage() {
 
             {/* AI EMPTY state — searched, no confident match */}
             {listingCandidate && !listingCandidate.url && (
-              <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-2.5 space-y-1.5">
-                <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wide">
+              <div className="bg-cream-2 border border-beige-2 rounded-lg p-2.5 space-y-1.5">
+                <div className="text-[10px] font-bold text-ink-2 uppercase tracking-wide">
                   No confident match
                 </div>
                 {listingCandidate.reason && (
-                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                  <p className="text-[10px] text-ink-2 leading-relaxed">
                     {listingCandidate.reason}
                   </p>
                 )}
-                <p className="text-[10px] text-slate-500">
+                <p className="text-[10px] text-ink-3">
                   Try again later or paste a URL manually below.
                 </p>
                 <button
                   onClick={() => setListingCandidate(null)}
-                  className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                  className="text-[10px] text-ink-3 hover:text-ink-2 underline"
                 >
                   Dismiss
                 </button>
@@ -1914,7 +1914,7 @@ export default function ReviewPage() {
 
             {/* MANUAL PASTE state — input visible */}
             {pasteUrlMode && (
-              <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+              <div className="bg-cream/40 border border-beige rounded-lg p-2 space-y-1.5">
                 <input
                   type="url"
                   value={pasteUrlInput}
@@ -1928,19 +1928,19 @@ export default function ReviewPage() {
                   }}
                   placeholder="https://landsofamerica.com/property/…"
                   autoFocus
-                  className="w-full bg-night/60 border border-border focus:border-sage rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 outline-none"
+                  className="w-full bg-cream/60 border border-beige focus:border-olive rounded px-2 py-1 text-[11px] text-ink placeholder-ink-3 outline-none"
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => { setPasteUrlMode(false); setPasteUrlInput(''); }}
-                    className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold"
+                    className="py-1.5 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded text-[10px] font-bold"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={() => handleSaveListingUrl(pasteUrlInput)}
                     disabled={savingListing || pasteUrlInput.trim().length < 5}
-                    className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="py-1.5 bg-olive hover:bg-olive-2 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
                     Save URL
@@ -1955,7 +1955,7 @@ export default function ReviewPage() {
                 <button
                   onClick={handleFindListing}
                   disabled={findingListing}
-                  className="w-full py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
                   title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
                 >
                   {findingListing ? (
@@ -1972,7 +1972,7 @@ export default function ReviewPage() {
                 </button>
                 <button
                   onClick={() => setPasteUrlMode(true)}
-                  className="w-full py-1 text-[10px] text-slate-500 hover:text-slate-300 underline flex items-center justify-center gap-1"
+                  className="w-full py-1 text-[10px] text-ink-3 hover:text-ink-2 underline flex items-center justify-center gap-1"
                 >
                   <LinkIcon size={10} />
                   or paste URL manually
@@ -1982,7 +1982,7 @@ export default function ReviewPage() {
 
             {/* Search loading message under "Find" button while in flight */}
             {findingListing && !listingCandidate && (
-              <p className="text-[10px] text-slate-500 leading-relaxed italic">
+              <p className="text-[10px] text-ink-3 leading-relaxed italic">
                 Landstack is searching Lands of America, LandWatch, Land.com, Realtor, and Zillow for a confident match. Conservative on purpose — a missing link is better than a wrong one.
               </p>
             )}
@@ -1995,22 +1995,22 @@ export default function ReviewPage() {
               comp.parcel_id is empty (drawn boundaries), this section
               hides — there's nothing to look up. */}
           {parcelDetails && parcelDetails.length > 0 && (
-            <div className="border-t border-border pt-3">
+            <div className="border-t border-beige pt-3">
               <div className="flex items-center justify-between mb-1.5">
-                <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                <div className="text-[10px] uppercase tracking-wide text-ink-3">
                   {parcelDetails.length === 1 ? 'Parcel owner' : `${parcelDetails.length} parcels`}
                 </div>
                 {loadingParcelDetails && (
-                  <Loader2 size={10} className="text-slate-500 animate-spin" />
+                  <Loader2 size={10} className="text-ink-3 animate-spin" />
                 )}
               </div>
               <ul className="space-y-1.5">
                 {parcelDetails.map((p) => (
                   <li key={p.parcel_id} className="text-xs">
-                    <div className="text-slate-200 truncate" title={p.owner_name || 'Unknown owner'}>
+                    <div className="text-ink truncate" title={p.owner_name || 'Unknown owner'}>
                       {p.owner_name || (p.error ? 'Lookup failed' : 'Unknown owner')}
                     </div>
-                    <div className="text-[10px] text-slate-500 font-mono flex items-center gap-2">
+                    <div className="text-[10px] text-ink-3 font-mono flex items-center gap-2">
                       <span>{p.parcel_id}</span>
                       {p.acres != null && (
                         <span>· {p.acres.toFixed(1)}ac</span>
@@ -2022,7 +2022,7 @@ export default function ReviewPage() {
             </div>
           )}
           {loadingParcelDetails && !parcelDetails && (
-            <div className="border-t border-border pt-3 text-[11px] text-slate-500 flex items-center gap-1.5">
+            <div className="border-t border-beige pt-3 text-[11px] text-ink-3 flex items-center gap-1.5">
               <Loader2 size={11} className="animate-spin" />
               Loading parcel owners…
             </div>
@@ -2030,9 +2030,9 @@ export default function ReviewPage() {
 
           {/* Pin coordinates (debug useful) */}
           {hasPin && (
-            <div className="border-t border-border pt-3 text-xs">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Pin</div>
-              <div className="font-mono text-slate-300 text-[11px]">
+            <div className="border-t border-beige pt-3 text-xs">
+              <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1">Pin</div>
+              <div className="font-mono text-ink-2 text-[11px]">
                 {comp.latitude?.toFixed(5)}, {comp.longitude?.toFixed(5)}
               </div>
             </div>
@@ -2041,12 +2041,12 @@ export default function ReviewPage() {
           {/* Action row. Hidden in reselect AND draw modes (those each
               have their own Save/Cancel controls in their banner above). */}
           {mode === 'view' && (
-          <div className="border-t border-border pt-3 space-y-2">
+          <div className="border-t border-beige pt-3 space-y-2">
             <button
               onClick={enterReselectMode}
               disabled={!map.current}
               title="Re-pick the parcels that make up this comp — click parcels on the map to add/remove"
-              className="w-full py-2 bg-sage/10 hover:bg-sage/20 border border-sage/30 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Edit3 size={12} />
               Reselect parcels
@@ -2055,7 +2055,7 @@ export default function ReviewPage() {
               onClick={enterDrawMode}
               disabled={!map.current}
               title="Draw a new boundary from scratch — for unrecorded subdivisions, carve-outs, or anything TxGIO doesn't have"
-              className="w-full py-2 bg-sage/10 hover:bg-sage/20 border border-sage/30 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Pencil size={12} />
               Draw new boundary
@@ -2068,7 +2068,7 @@ export default function ReviewPage() {
                   ? 'This comp is already verified'
                   : 'Mark this comp as visually verified — clears the gray clock badge'
               }
-              className="w-full py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Check size={12} />
               {comp.needs_location_review ? 'Mark verified' : 'Verified'}
@@ -2087,8 +2087,8 @@ export default function ReviewPage() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="text-sm font-bold text-white font-mono">{value}</div>
+      <div className="text-[10px] uppercase tracking-wide text-ink-3">{label}</div>
+      <div className="text-sm font-bold text-ink font-mono">{value}</div>
     </div>
   );
 }
@@ -2096,8 +2096,8 @@ function Stat({ label, value }: { label: string; value: string }) {
 function KeyValue({ k, v }: { k: string; v: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-slate-500">{k}</div>
-      <div className="text-sm text-slate-200">{v}</div>
+      <div className="text-[10px] uppercase tracking-wide text-ink-3">{k}</div>
+      <div className="text-sm text-ink">{v}</div>
     </div>
   );
 }

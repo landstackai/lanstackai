@@ -126,20 +126,20 @@ export default function CMALibraryPage() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-night overflow-y-auto">
-      <div className="flex-shrink-0 bg-panel border-b border-border px-5 py-4 flex items-center justify-between">
+    <div className="flex flex-col h-full bg-cream overflow-y-auto">
+      <div className="flex-shrink-0 bg-white border-b border-beige px-5 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-blue-400/10 border border-blue-400/20 flex items-center justify-center">
             <FileText size={16} className="text-blue-400" />
           </div>
           <div>
             <h1 className="font-bold text-base">My CMAs</h1>
-            <p className="text-xs text-slate-500">{cmas.length} saved report{cmas.length === 1 ? '' : 's'}</p>
+            <p className="text-xs text-ink-3">{cmas.length} saved report{cmas.length === 1 ? '' : 's'}</p>
           </div>
         </div>
         <Link
           href="/dashboard/map"
-          className="flex items-center gap-1.5 px-3 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors"
+          className="flex items-center gap-1.5 px-3 py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors"
         >
           <Plus size={13} />
           New CMA from Map
@@ -148,21 +148,21 @@ export default function CMALibraryPage() {
 
       <div className="p-5 space-y-3">
         {loading ? (
-          <p className="text-sm text-slate-500 text-center py-12">Loading…</p>
+          <p className="text-sm text-ink-3 text-center py-12">Loading…</p>
         ) : cmas.length === 0 ? (
           <div className="text-center py-16 space-y-3">
-            <div className="w-14 h-14 rounded-2xl bg-card border border-border flex items-center justify-center mx-auto">
-              <FileText size={20} className="text-slate-500" />
+            <div className="w-14 h-14 rounded-2xl bg-cream border border-beige flex items-center justify-center mx-auto">
+              <FileText size={20} className="text-ink-3" />
             </div>
             <div>
-              <p className="font-bold text-white">No CMAs yet</p>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="font-bold text-ink">No CMAs yet</p>
+              <p className="text-xs text-ink-3 mt-1">
                 Build your first one from the map: pick a subject parcel, then tap the comps.
               </p>
             </div>
             <Link
               href="/dashboard/map"
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors"
             >
               <Plus size={13} />
               Build CMA on Map
@@ -175,12 +175,12 @@ export default function CMALibraryPage() {
             return (
               <div
                 key={cma.id}
-                className="bg-panel border border-border hover:border-blue-400/40 rounded-xl p-4 transition-colors"
+                className="bg-white border border-beige hover:border-blue-400/40 rounded-xl p-4 transition-colors"
               >
                 <div className="flex items-start justify-between gap-3">
                   <Link href={`/dashboard/map?cma=${cma.id}`} className="flex-1 min-w-0 group">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="font-bold text-base text-white group-hover:text-blue-300 transition-colors truncate">
+                      <h2 className="font-bold text-base text-ink group-hover:text-blue-300 transition-colors truncate">
                         {cma.subject_name || 'Untitled CMA'}
                       </h2>
                       {isSharedWithMe && (
@@ -193,19 +193,19 @@ export default function CMALibraryPage() {
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-slate-400 mt-1">
-                      <span className="text-slate-300">{cma.subject_county}, {cma.subject_state}</span>
-                      <span className="text-slate-600 mx-1.5">·</span>
+                    <p className="text-xs text-ink-2 mt-1">
+                      <span className="text-ink-2">{cma.subject_county}, {cma.subject_state}</span>
+                      <span className="text-ink-3 mx-1.5">·</span>
                       {formatAcres(cma.subject_acres)}
-                      <span className="text-slate-600 mx-1.5">·</span>
+                      <span className="text-ink-3 mx-1.5">·</span>
                       {compCount} comp{compCount === 1 ? '' : 's'}
-                      <span className="text-slate-600 mx-1.5">·</span>
+                      <span className="text-ink-3 mx-1.5">·</span>
                       {new Date(cma.created_at).toLocaleDateString()}
                     </p>
                     {cma.value_mid != null && (
                       <p className="text-sm font-bold text-emerald-400 font-mono mt-2">
                         {formatCurrency(cma.value_low || 0)} – {formatCurrency(cma.value_high || 0)}
-                        <span className="text-slate-500 font-normal text-xs ml-2">
+                        <span className="text-ink-3 font-normal text-xs ml-2">
                           (mid {formatCurrency(cma.value_mid)})
                         </span>
                       </p>
@@ -215,7 +215,7 @@ export default function CMALibraryPage() {
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <Link
                       href={`/dashboard/map?cma=${cma.id}`}
-                      className="p-2 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+                      className="p-2 text-ink-2 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
                       title="Open on map"
                     >
                       <MapPin size={14} />
@@ -225,7 +225,7 @@ export default function CMALibraryPage() {
                         href={`/report/${cma.share_token}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="p-2 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+                        className="p-2 text-ink-2 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
                         title="Preview as client"
                       >
                         <Eye size={14} />
@@ -233,14 +233,14 @@ export default function CMALibraryPage() {
                     )}
                     <button
                       onClick={() => handleShareClick(cma)}
-                      className="p-2 text-slate-400 hover:text-sage hover:bg-sage/10 rounded-lg transition-colors"
+                      className="p-2 text-ink-2 hover:text-olive-2 hover:bg-olive-tint rounded-lg transition-colors"
                       title="Copy share link"
                     >
                       <Share2 size={14} />
                     </button>
                     <button
                       onClick={() => deleteCMA(cma.id, cma.subject_name)}
-                      className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+                      className="p-2 text-ink-2 hover:text-red-500 hover:bg-red-400/10 rounded-lg transition-colors"
                       title="Delete"
                     >
                       <Trash2 size={14} />
@@ -256,23 +256,23 @@ export default function CMALibraryPage() {
       {/* Broker-estimate disclosure modal */}
       {disclosureCMA && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-panel border border-border rounded-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-border flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center">
-                <AlertCircle size={16} className="text-amber-400" />
+          <div className="w-full max-w-md bg-white border border-beige rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-beige flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-50 border border-amber-500/60 flex items-center justify-center">
+                <AlertCircle size={16} className="text-amber-600" />
               </div>
               <div>
-                <p className="font-bold text-white">Confirm Broker-Estimated Values</p>
-                <p className="text-xs text-slate-500">Required before sharing this CMA</p>
+                <p className="font-bold text-ink">Confirm Broker-Estimated Values</p>
+                <p className="text-xs text-ink-3">Required before sharing this CMA</p>
               </div>
             </div>
             <div className="px-5 py-4 space-y-3">
-              <p className="text-sm text-slate-300 leading-relaxed">
+              <p className="text-sm text-ink-2 leading-relaxed">
                 This CMA includes one or more comps with broker-estimated improvement values.
                 These estimates have not been verified by a licensed appraiser, and the client
                 report will display them with a "Broker-estimated" badge plus a footer disclosure.
               </p>
-              <label className="flex items-start gap-2 text-sm text-slate-200 cursor-pointer pt-1">
+              <label className="flex items-start gap-2 text-sm text-ink cursor-pointer pt-1">
                 <input
                   type="checkbox"
                   checked={disclosureChecked}
@@ -285,10 +285,10 @@ export default function CMALibraryPage() {
                 </span>
               </label>
             </div>
-            <div className="px-5 py-3 border-t border-border flex items-center justify-end gap-2">
+            <div className="px-5 py-3 border-t border-beige flex items-center justify-end gap-2">
               <button
                 onClick={() => setDisclosureCMA(null)}
-                className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white transition-colors"
+                className="px-4 py-2 text-xs font-bold text-ink-2 hover:text-ink transition-colors"
               >
                 Cancel
               </button>

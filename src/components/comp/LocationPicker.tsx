@@ -152,11 +152,11 @@ export default function LocationPicker({
   return (
     <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex flex-col">
       {/* Top bar */}
-      <div className="bg-panel border-b border-border px-5 py-3 flex items-center justify-between gap-4 flex-shrink-0">
+      <div className="bg-white border-b border-beige px-5 py-3 flex items-center justify-between gap-4 flex-shrink-0">
         <div className="flex items-center gap-2">
-          <MapPin size={16} className="text-sage" />
-          <p className="font-bold text-white text-sm">Set Property Location</p>
-          <p className="text-[11px] text-slate-500 hidden md:inline">Click on the map where the property is.</p>
+          <MapPin size={16} className="text-olive-2" />
+          <p className="font-bold text-ink text-sm">Set Property Location</p>
+          <p className="text-[11px] text-ink-3 hidden md:inline">Click on the map where the property is.</p>
         </div>
         <div className="flex items-center gap-2 flex-1 max-w-md">
           <input
@@ -169,16 +169,16 @@ export default function LocationPicker({
               }
             }}
             placeholder="Search address or place to fly to…"
-            className="flex-1 bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+            className="flex-1 bg-cream border border-beige rounded-lg px-3 py-1.5 text-xs text-ink outline-none focus:border-olive"
           />
           <button
             onClick={searchAddress}
-            className="px-3 py-1.5 bg-card border border-border rounded-lg text-xs font-bold text-slate-300 hover:text-white hover:border-sage transition-colors"
+            className="px-3 py-1.5 bg-cream border border-beige rounded-lg text-xs font-bold text-ink-2 hover:text-ink hover:border-olive transition-colors"
           >
             Go
           </button>
         </div>
-        <button onClick={onClose} className="text-slate-500 hover:text-white">
+        <button onClick={onClose} className="text-ink-3 hover:text-ink">
           <X size={18} />
         </button>
       </div>
@@ -187,24 +187,24 @@ export default function LocationPicker({
       <div className="flex-1 flex overflow-hidden">
         {/* LEFT: appraiser context panel — description / address / AI hint */}
         {(description || address || propertyName) && (
-          <div className="hidden lg:block w-80 flex-shrink-0 bg-panel border-r border-border overflow-y-auto">
+          <div className="hidden lg:block w-80 flex-shrink-0 bg-white border-r border-beige overflow-y-auto">
             <div className="px-4 py-4 space-y-3">
               {propertyName && (
                 <div>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Property</p>
-                  <p className="text-sm font-bold text-white">{propertyName}</p>
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Property</p>
+                  <p className="text-sm font-bold text-ink">{propertyName}</p>
                 </div>
               )}
               {address && (
                 <div>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Address</p>
-                  <p className="text-xs text-slate-200 leading-relaxed">{address}</p>
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Address</p>
+                  <p className="text-xs text-ink leading-relaxed">{address}</p>
                 </div>
               )}
               {description && (
                 <div>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description from appraiser</p>
-                  <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{description}</p>
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description from appraiser</p>
+                  <p className="text-xs text-ink-2 leading-relaxed whitespace-pre-wrap">{description}</p>
                 </div>
               )}
             </div>
@@ -217,9 +217,9 @@ export default function LocationPicker({
 
           {/* Picked-coordinates badge */}
           {pickedLat != null && pickedLng != null && (
-            <div className="absolute top-4 left-4 bg-panel/95 backdrop-blur-sm border border-sage/40 rounded-xl px-4 py-3 shadow-2xl">
-              <p className="text-[10px] font-bold text-sage uppercase tracking-wider mb-1">Picked location</p>
-              <p className="text-sm font-mono text-white">
+            <div className="absolute top-4 left-4 bg-white/95 backdrop-blur-sm border border-olive-border rounded-xl px-4 py-3 shadow-2xl">
+              <p className="text-[10px] font-bold text-olive-2 uppercase tracking-wider mb-1">Picked location</p>
+              <p className="text-sm font-mono text-ink">
                 {pickedLat.toFixed(6)}, {pickedLng.toFixed(6)}
               </p>
             </div>
@@ -227,8 +227,8 @@ export default function LocationPicker({
 
           {/* Initial helper */}
           {pickedLat == null && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-panel/95 backdrop-blur-sm border border-border rounded-xl px-4 py-2 shadow-2xl">
-              <p className="text-xs text-slate-300">
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-sm border border-beige rounded-xl px-4 py-2 shadow-2xl">
+              <p className="text-xs text-ink-2">
                 Compare to the description on the left, then click the property on this map.
               </p>
             </div>
@@ -237,10 +237,10 @@ export default function LocationPicker({
       </div>
 
       {/* Bottom action bar */}
-      <div className="bg-panel border-t border-border px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
+      <div className="bg-white border-t border-beige px-5 py-3 flex items-center justify-end gap-2 flex-shrink-0">
         <button
           onClick={onClose}
-          className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white transition-colors"
+          className="px-4 py-2 text-xs font-bold text-ink-2 hover:text-ink transition-colors"
         >
           Cancel
         </button>
@@ -249,7 +249,7 @@ export default function LocationPicker({
           onClick={() => {
             if (pickedLat != null && pickedLng != null) onPick(pickedLat, pickedLng);
           }}
-          className="px-4 py-2 bg-sage hover:bg-sage2 disabled:opacity-40 disabled:cursor-not-allowed text-black rounded-lg text-xs font-bold transition-colors"
+          className="px-4 py-2 bg-olive hover:bg-olive-2 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold transition-colors"
         >
           Save Location
         </button>

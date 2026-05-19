@@ -67,16 +67,16 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-4">
-      <div className="w-full max-w-sm bg-panel border border-border rounded-2xl overflow-hidden animate-slide-up">
+      <div className="w-full max-w-sm bg-white border border-beige rounded-2xl overflow-hidden animate-slide-up">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-beige">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-lg bg-sage/10 flex items-center justify-center">
-              <Zap size={12} className="text-sage" />
+            <div className="w-6 h-6 rounded-lg bg-olive-tint flex items-center justify-center">
+              <Zap size={12} className="text-olive-2" />
             </div>
             <span className="font-bold text-sm">Quick Capture</span>
           </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+          <button onClick={onClose} className="text-ink-3 hover:text-ink transition-colors">
             <X size={16} />
           </button>
         </div>
@@ -84,7 +84,7 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
         <div className="p-4 space-y-3">
           {/* County */}
           <div>
-            <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-bold text-ink-2 uppercase tracking-wider mb-1.5">
               County *
             </label>
             <input
@@ -92,7 +92,7 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
               value={county}
               onChange={(e) => setCounty(e.target.value)}
               placeholder="Real"
-              className="w-full bg-card border border-border rounded-lg px-3 py-3 text-base text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+              className="w-full bg-cream border border-beige rounded-lg px-3 py-3 text-base text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
               autoFocus
             />
             <datalist id="counties">
@@ -102,7 +102,7 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
 
           {/* Acres */}
           <div>
-            <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-bold text-ink-2 uppercase tracking-wider mb-1.5">
               Acres *
             </label>
             <input
@@ -111,39 +111,39 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
               onChange={(e) => setAcres(e.target.value)}
               placeholder="455"
               inputMode="decimal"
-              className="w-full bg-card border border-border rounded-lg px-3 py-3 text-base text-white placeholder-slate-500 outline-none focus:border-sage transition-colors font-mono"
+              className="w-full bg-cream border border-beige rounded-lg px-3 py-3 text-base text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors font-mono"
             />
           </div>
 
           {/* Price */}
           <div>
-            <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+            <label className="block text-xs font-bold text-ink-2 uppercase tracking-wider mb-1.5">
               Sale Price *
             </label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
               <input
                 type="text"
                 value={price}
                 onChange={(e) => setPrice(formatPrice(e.target.value))}
                 placeholder="3,145,855"
                 inputMode="numeric"
-                className="w-full bg-card border border-border rounded-lg pl-7 pr-3 py-3 text-base text-white placeholder-slate-500 outline-none focus:border-sage transition-colors font-mono"
+                className="w-full bg-cream border border-beige rounded-lg pl-7 pr-3 py-3 text-base text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors font-mono"
               />
             </div>
           </div>
 
           {/* Live PPA */}
           {ppa && (
-            <div className="bg-sage/5 border border-sage/20 rounded-lg px-3 py-2 flex items-center justify-between">
-              <span className="text-xs text-slate-400">Price per acre</span>
-              <span className="text-sage font-bold font-mono text-sm">
+            <div className="bg-olive-tint border border-olive-border rounded-lg px-3 py-2 flex items-center justify-between">
+              <span className="text-xs text-ink-2">Price per acre</span>
+              <span className="text-olive-2 font-bold font-mono text-sm">
                 ${parseInt(ppa).toLocaleString()}/ac
               </span>
             </div>
           )}
 
-          <p className="text-xs text-slate-600">
+          <p className="text-xs text-ink-3">
             ⚡ Saved as draft — complete the details later
           </p>
 
@@ -151,14 +151,14 @@ export default function QuickCapture({ onClose, onSave }: QuickCaptureProps) {
           <div className="flex gap-2 pt-1">
             <button
               onClick={onClose}
-              className="flex-1 py-3 border border-border rounded-lg text-sm font-bold text-slate-400 hover:text-white transition-colors"
+              className="flex-1 py-3 border border-beige rounded-lg text-sm font-bold text-ink-2 hover:text-ink transition-colors"
             >
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={loading || !county || !acres || !price}
-              className="flex-1 py-3 bg-sage hover:bg-sage2 text-black rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+              className="flex-1 py-3 bg-olive hover:bg-olive-2 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
             >
               {loading ? 'Saving...' : 'Save Comp'}
             </button>

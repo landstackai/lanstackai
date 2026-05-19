@@ -44,29 +44,29 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="min-h-screen bg-night flex items-center justify-center p-4">
+    <div className="min-h-screen bg-cream flex items-center justify-center p-4">
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-sage/5 blur-3xl" />
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-olive-tint blur-3xl" />
       </div>
 
       <div className="w-full max-w-sm relative">
         <div className="text-center mb-8">
           <div className="inline-flex items-center gap-2 mb-6">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sage to-sage2 flex items-center justify-center">
-              <Layers size={16} className="text-black" />
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-olive to-olive-2 flex items-center justify-center">
+              <Layers size={16} className="text-white" />
             </div>
             <span className="font-bold text-lg tracking-tight">
-              landstack<span className="text-sage">.ai</span>
+              landstack<span className="text-olive-2">.ai</span>
             </span>
           </div>
-          <h1 className="text-2xl font-bold text-white mb-1">Create account</h1>
-          <p className="text-sm text-slate-400">Start your 14-day free trial</p>
+          <h1 className="text-2xl font-bold text-ink mb-1">Create account</h1>
+          <p className="text-sm text-ink-2">Start your 14-day free trial</p>
         </div>
 
-        <div className="bg-panel border border-border rounded-2xl p-6">
+        <div className="bg-white border border-beige rounded-2xl p-6">
           <form onSubmit={handleSignup} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
                 Full Name
               </label>
               <input
@@ -75,12 +75,12 @@ export default function SignupPage() {
                 onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
                 placeholder="Louie Swope"
                 required
-                className="w-full bg-card border border-border rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
                 Brokerage Name
               </label>
               <input
@@ -88,12 +88,12 @@ export default function SignupPage() {
                 value={formData.brokerage_name}
                 onChange={(e) => setFormData({ ...formData, brokerage_name: e.target.value })}
                 placeholder="Your Brokerage"
-                className="w-full bg-card border border-border rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
                 Email
               </label>
               <input
@@ -102,12 +102,12 @@ export default function SignupPage() {
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 placeholder="you@example.com"
                 required
-                className="w-full bg-card border border-border rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
                 Password
               </label>
               <input
@@ -117,30 +117,30 @@ export default function SignupPage() {
                 placeholder="Min 8 characters"
                 required
                 minLength={8}
-                className="w-full bg-card border border-border rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
               />
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-sage hover:bg-sage2 text-black font-bold py-2.5 rounded-lg text-sm transition-colors disabled:opacity-50"
+              className="w-full bg-olive hover:bg-olive-2 text-white font-bold py-2.5 rounded-lg text-sm transition-colors disabled:opacity-50"
             >
               {loading ? 'Creating account...' : 'Create Account — Free'}
             </button>
           </form>
 
           <div className="mt-4 text-center">
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-ink-3">
               Already have an account?{' '}
-              <Link href="/auth/login" className="text-sage hover:underline font-semibold">
+              <Link href="/auth/login" className="text-olive-2 hover:underline font-semibold">
                 Sign in
               </Link>
             </p>
           </div>
         </div>
 
-        <p className="text-center text-xs text-slate-600 mt-4">
+        <p className="text-center text-xs text-ink-3 mt-4">
           No credit card required · 14-day free trial
         </p>
       </div>

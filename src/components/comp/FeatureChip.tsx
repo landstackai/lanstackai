@@ -23,19 +23,19 @@ export function FeatureChip({ label, value, strong = false }: FeatureChipProps) 
   return (
     <div
       className={`rounded-lg p-2 border transition-colors ${
-        strong ? 'bg-emerald-400/10 border-emerald-400/30' : 'bg-card border-border'
+        strong ? 'bg-olive-tint border-olive-border' : 'bg-cream border-beige'
       }`}
     >
       <p
         className={`text-[9px] font-bold uppercase tracking-wider ${
-          strong ? 'text-emerald-300/80' : 'text-slate-500'
+          strong ? 'text-olive-2/80' : 'text-ink-3'
         }`}
       >
         {label}
       </p>
       <p
         className={`text-xs font-bold mt-0.5 ${
-          strong ? 'text-emerald-200' : isEmpty ? 'text-slate-500' : 'text-white'
+          strong ? 'text-olive-2' : isEmpty ? 'text-ink-3' : 'text-ink'
         }`}
       >
         {displayValue}
