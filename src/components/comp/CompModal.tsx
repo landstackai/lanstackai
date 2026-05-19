@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, BestUse, WaterQuality, RoadFrontage, DevPotential } from '@/types';
 import { TEXAS_COUNTIES } from '@/lib/utils';
+import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { X, ChevronRight, ChevronLeft, Sparkles, ChevronDown, ChevronUp, Globe, MapPin } from 'lucide-react';
 import LocationPicker from './LocationPicker';
 import toast from 'react-hot-toast';
@@ -265,7 +266,11 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       created_by: user.id,
       property_name: form.property_name || null,
       status: form.status,
-      county: form.county,
+      // Normalize to canonical storage form (titlecase, no "County"
+      // suffix, compounds comma-separated). Applies on every save —
+      // catches both manual edits ("frio county") and any non-canonical
+      // value that pre-dated the normalizer.
+      county: normalizeCountyForStorage(form.county) || form.county,
       state: form.state,
       acres: parseFloat(form.acres),
       sale_price: parseFloat(form.sale_price),

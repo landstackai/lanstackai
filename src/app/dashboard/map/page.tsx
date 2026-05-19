@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Layers, Waves } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -64,17 +64,39 @@ export default function MapPage() {
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
-  const [mapStyle, setMapStyle] = useState<'satellite' | 'streets' | 'terrain'>('satellite');
-  // Toggleable raster overlays. Counties default ON (structural
-  // reference — brokers think in counties first when scoping comps).
-  // Floodplain defaults OFF — it's busy at low zoom and most workflows
+
+  // ─── Listing URL state for Comp Detail panel ───────────────────────
+  // Same find/paste/save flow as the review page Source block, scoped
+  // to whichever comp is currently selected. Cleared when selectedComp
+  // changes (via effect below). Handlers live further down — supabase
+  // client is initialized later in the file so the handlers need to
+  // sit below that point.
+  const [findingListing, setFindingListing] = useState(false);
+  const [listingCandidate, setListingCandidate] = useState<{ url: string | null; reason: string | null } | null>(null);
+  const [pasteUrlMode, setPasteUrlMode] = useState(false);
+  const [pasteUrlInput, setPasteUrlInput] = useState('');
+  const [savingListing, setSavingListing] = useState(false);
+  // Map style options. Dark was removed per broker feedback (rarely used,
+  // wasted real estate). Both remaining options use the same satellite
+  // base imagery — "Terrain" is satellite WITH contour lines overlaid
+  // (USGS-style brown contours from Mapbox terrain-v2), which is what
+  // brokers actually want when they say "terrain view." The previous
+  // 'outdoors' style replaced the satellite imagery with topographic
+  // rendering, which loses the aerial context brokers rely on.
+  const [mapStyle, setMapStyle] = useState<'satellite' | 'terrain'>('satellite');
+  // Toggleable raster overlays. Counties always ON now (per broker
+  // feedback — they're structural reference data, same as state lines
+  // on a US map). Only floodplain has a user-facing toggle.
+  // Floodplain defaults OFF — busy at low zoom and most workflows
   // don't need it until the broker focuses on a specific property.
-  // Both layers are added to the map at load time with visibility set
-  // from this state; the sync effect below flips visibility on change.
-  const [overlays, setOverlays] = useState<{ counties: boolean; floodplain: boolean }>({
-    counties: true,
+  const [overlays, setOverlays] = useState<{ floodplain: boolean }>({
     floodplain: false,
   });
+  // Advanced-filters popover (opens from the sliders icon next to the
+  // search bar). Holds the owner-search input + scope filter so we can
+  // collapse the two top-of-map search bars into one without losing the
+  // owner-search and scope-toggle capabilities.
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [mapLoaded, setMapLoaded] = useState(false);
 
   const [mapMode, setMapMode] = useState<MapMode>('view');
@@ -109,6 +131,16 @@ export default function MapPage() {
   // Scope filter for the map: All (everything visible) / Company (only
   // is_company_transaction comps) / Mine (only comps created by current user).
   const [mapScope, setMapScope] = useState<'all' | 'company' | 'mine'>('all');
+  // County filter — set of normalized county names (e.g. "frio", "real")
+  // matched case-insensitively against comp.county. Empty Set = no
+  // filter. Populated via the Filters popover, which lists ALL 254 TX
+  // counties (not just ones present in the user's data) so brokers can
+  // pre-filter to a county before they have comps there — useful for
+  // scoping owner searches or planning ahead.
+  const [countyFilter, setCountyFilter] = useState<Set<string>>(new Set());
+  // Live text filter for the county picker (filters the visible list,
+  // not the comps). Typing "frio" reduces 254 to ~1.
+  const [countySearch, setCountySearch] = useState('');
 
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [detectingBoundary, setDetectingBoundary] = useState(false);
@@ -186,6 +218,16 @@ export default function MapPage() {
   // Reset expansion whenever a different comp is selected
   useEffect(() => { setDescriptionExpanded(false); }, [selectedComp?.id]);
 
+  // Reset Find Listing state whenever a different comp is selected.
+  // Otherwise a candidate found for comp A would appear when opening
+  // comp B, which is confusing and a possible save-to-wrong-comp bug.
+  useEffect(() => {
+    setListingCandidate(null);
+    setPasteUrlMode(false);
+    setPasteUrlInput('');
+    setFindingListing(false);
+  }, [selectedComp?.id]);
+
   // Rule: description's acreage is authoritative. When viewing a comp the
   // current user owns, if the description names a different acreage than
   // what's saved (beyond rounding), reconcile silently — write the
@@ -219,6 +261,88 @@ export default function MapPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
+  // ─── Find Listing handlers (defined after `supabase` is initialized) ──
+  // Trigger AI find-listing for the currently-selected comp. Returns one
+  // URL or null (the endpoint is conservative — a missing link is
+  // better than a wrong one).
+  const handleFindListing = useCallback(async () => {
+    if (!selectedComp || findingListing) return;
+    setFindingListing(true);
+    setListingCandidate(null);
+    try {
+      const res = await fetch(`/api/comp/${selectedComp.id}/find-listing`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data?.error || 'Find listing failed');
+        return;
+      }
+      setListingCandidate({ url: data?.url ?? null, reason: data?.reason ?? null });
+    } catch (e: any) {
+      toast.error(e?.message || 'Find listing failed');
+    } finally {
+      setFindingListing(false);
+    }
+  }, [selectedComp, findingListing]);
+
+  // Persist a URL (from AI find or manual paste) to comp.source_url.
+  const handleSaveListingUrl = useCallback(async (url: string) => {
+    if (!selectedComp || savingListing) return;
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    try {
+      const u = new URL(trimmed);
+      if (!u.protocol.startsWith('http')) throw new Error('not http');
+    } catch {
+      toast.error("That doesn't look like a valid URL");
+      return;
+    }
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: trimmed })
+        .eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL saved');
+      setSelectedComp({ ...selectedComp, source_url: trimmed } as Comp);
+      setComps((prev) =>
+        prev.map((c) => (c.id === selectedComp.id ? { ...c, source_url: trimmed } : c))
+      );
+      setListingCandidate(null);
+      setPasteUrlMode(false);
+      setPasteUrlInput('');
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
+
+  // Clear the saved listing URL (set to null on the comp).
+  const handleRemoveListingUrl = useCallback(async () => {
+    if (!selectedComp || savingListing) return;
+    if (!confirm('Remove the saved listing URL?')) return;
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: null })
+        .eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Remove failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL removed');
+      setSelectedComp({ ...selectedComp, source_url: null } as Comp);
+      setComps((prev) =>
+        prev.map((c) => (c.id === selectedComp.id ? { ...c, source_url: null } : c))
+      );
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
+
   useEffect(() => {
     let cancelled = false;
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -227,10 +351,13 @@ export default function MapPage() {
     return () => { cancelled = true; };
   }, [supabase]);
 
+  // Both options share the same satellite base — "Terrain" layers contour
+  // lines on top via the overlay-ensure effect below. No setStyle() needed
+  // when switching, which avoids the basemap-switch wipes-custom-layers
+  // problem the old multi-style switcher created.
   const STYLE_URLS = {
     satellite: 'mapbox://styles/mapbox/satellite-streets-v12',
-    streets: 'mapbox://styles/mapbox/dark-v11',
-    terrain: 'mapbox://styles/mapbox/outdoors-v12',
+    terrain: 'mapbox://styles/mapbox/satellite-streets-v12',
   };
 
   const resetParcelState = useCallback(() => {
@@ -2260,9 +2387,37 @@ export default function MapPage() {
         return true;
       };
 
+      // County matcher — normalizes BOTH sides + splits compound county
+      // strings (e.g. "Frio and Medina", "Atascosa & Frio") into the
+      // individual counties before matching. Without the split, a comp
+      // tagged "Frio and Medina" would silently fail to match a query
+      // for "Frio" — same family of bug as the "Frio" vs "Frio County"
+      // case, just one layer deeper.
+      //
+      // Splits on ' and ', '&', ',' (case-insensitive). Each piece is
+      // then normalized (lowercased + " County" suffix stripped).
+      // Inlined (not using the component-level normalizeCounty) so
+      // there's no source-order dependency for this critical matcher.
+      const normCounty = (v: any) => String(v ?? '')
+        .toLowerCase()
+        .replace(/\bcounty\b/g, '')
+        .trim();
+      const splitCounties = (v: any): string[] => String(v ?? '')
+        .split(/\s+and\s+|\s*&\s*|\s*,\s*/i)
+        .map(normCounty)
+        .filter(Boolean);
+      const matchesCounty = (val: any, allowed: string[] | null | undefined) => {
+        if (!allowed || allowed.length === 0) return true;
+        if (val == null) return false;
+        const compCounties = splitCounties(val);
+        return allowed.some((a) => {
+          const norm = normCounty(a);
+          return compCounties.includes(norm);
+        });
+      };
       const matchingIds = new Set<string>();
       for (const comp of comps) {
-        if (!matchesArr(comp.county, c.counties)) continue;
+        if (!matchesCounty(comp.county, c.counties)) continue;
         if (!matchesArr(comp.state, c.states)) continue;
         if (!matchesArr(comp.water, c.water)) continue;
         if (!matchesArr(comp.road_frontage, c.road_frontage)) continue;
@@ -2332,18 +2487,80 @@ export default function MapPage() {
     }
   }, [searchQuery, comps, clearAiSearch, flyToPlace]);
 
-  // When viewing a CMA, restrict everything to its selected comps. Otherwise
-  // apply the map-level scope filter: All / Company / Mine.
+  // Normalize a county string for comparison — strips "County" suffix,
+  // collapses whitespace, lowercases. So "Frio County" / "frio" / "FRIO"
+  // all match the same bucket.
+  const normalizeCounty = (raw: any): string => {
+    return String(raw ?? '')
+      .toLowerCase()
+      .replace(/\bcounty\b/g, '')
+      .trim();
+  };
+  // Split a compound county string into individual normalized counties.
+  // "Frio and Medina" / "Atascosa & Frio" / "Atascosa, Wilson" all become
+  // ['frio','medina'] / ['atascosa','frio'] / ['atascosa','wilson'].
+  // Used so a multi-county comp shows up under BOTH counties in the
+  // filter picker (once each) AND matches when EITHER county is filtered —
+  // while still being a single row, single pin on the map.
+  const splitCounties = (raw: any): string[] => String(raw ?? '')
+    .split(/\s+and\s+|\s*&\s*|\s*,\s*/i)
+    .map(normalizeCounty)
+    .filter(Boolean);
+
+  // When viewing a CMA, restrict everything to its selected comps.
+  // Otherwise apply the map-level scope + county filters.
   const displayComps = viewingCMA?.selected_comp_ids?.length
     ? comps.filter((c) => viewingCMA.selected_comp_ids.includes(c.id))
     : comps.filter((c) => {
-        if (mapScope === 'company') return Boolean((c as any).is_company_transaction);
+        if (mapScope === 'company' && !(c as any).is_company_transaction) return false;
         // "My Sales" reads transaction_agent_id (who closed the deal), NOT
         // created_by (who typed it in). Research comps you entered but didn't
         // sell stay out of this view.
-        if (mapScope === 'mine') return currentUserId != null && (c as any).transaction_agent_id === currentUserId;
+        if (mapScope === 'mine' && !(currentUserId != null && (c as any).transaction_agent_id === currentUserId)) return false;
+        // County filter: split compound county strings ("Frio and Medina")
+        // so the comp matches whenever ANY of its counties is in the
+        // filter set. One comp, one pin — but appears under multiple
+        // county filters (broker mental model: the property is in both).
+        if (countyFilter.size > 0) {
+          const compCounties = splitCounties(c.county);
+          const hit = compCounties.some((cc) => countyFilter.has(cc));
+          if (!hit) return false;
+        }
         return true;
       });
+
+  // Distinct counties present in the user's comps — drives the county
+  // multi-select in the Filters popover. Sorted alphabetically with a
+  // per-county comp count so brokers see at a glance where their data
+  // lives. Computed from the unfiltered `comps` pool so the picker
+  // doesn't shrink as filters tighten (which would trap brokers in
+  // narrowing dead-ends).
+  //
+  // Compound county strings ("Frio and Medina", "Atascosa & Frio") are
+  // SPLIT into individual counties — that comp contributes +1 to BOTH
+  // Frio and Medina in the picker. The comp itself is still one row /
+  // one pin on the map, but appears under either county's filter. This
+  // matches the broker's mental model: the property is in both
+  // counties, so it should be findable under either one.
+  const availableCounties = (() => {
+    const seen = new Map<string, { display: string; count: number }>();
+    const titleCase = (s: string) =>
+      s.split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
+    for (const c of comps) {
+      for (const norm of splitCounties(c.county)) {
+        if (!norm) continue;
+        const existing = seen.get(norm);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          seen.set(norm, { display: titleCase(norm), count: 1 });
+        }
+      }
+    }
+    return Array.from(seen.entries())
+      .map(([norm, { display, count }]) => ({ norm, display, count }))
+      .sort((a, b) => a.display.localeCompare(b.display));
+  })();
 
   // Comp boundaries (saved polygons from boundary_geojson). Hides the comp
   // currently being edited so we don't render its boundary twice (the draw
@@ -2391,17 +2608,23 @@ export default function MapPage() {
     if (!mapLoaded || !map.current) return;
     const m = map.current;
     try {
-      // TX County boundaries — TxGIO Boundaries/Counties MapServer.
-      // Visible at all zoom levels. Important when a property straddles
-      // a county line (different tax + appraisal districts on each side).
+      // TX County boundaries — Census TIGER generalized State_County service.
+      // Switched from TxGIO Boundaries because TxGIO has server-side scale-
+      // dependent rendering: it returns blank tiles at zoom < ~7, so the
+      // county grid disappeared on the wide TX view. Census TIGER's
+      // generalized service is designed for low-zoom rendering and shows
+      // boundaries at every scale.
+      // Layer 86 = Counties (boundaries + labels). Filter to TX (state
+      // FIPS 48) at the service level to avoid drawing the entire US grid
+      // when looking at TX.
       if (!m.getSource('tx-counties')) {
         m.addSource('tx-counties', {
           type: 'raster',
           tiles: [
-            'https://feature.geographic.texas.gov/arcgis/rest/services/Boundaries/Counties/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
+            'https://tigerweb.geo.census.gov/arcgis/rest/services/Generalized_ACS2023/State_County/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:86&f=image',
           ],
           tileSize: 512,
-          attribution: 'Counties © TxGIO',
+          attribution: 'Counties © U.S. Census Bureau (TIGER/Line)',
         });
       }
       if (!m.getLayer('tx-counties-layer')) {
@@ -2409,26 +2632,36 @@ export default function MapPage() {
           id: 'tx-counties-layer',
           type: 'raster',
           source: 'tx-counties',
-          layout: { visibility: overlays.counties ? 'visible' : 'none' },
+          // Always visible — counties are structural reference data, not
+          // a togglable overlay. No layout.visibility needed.
           paint: {
-            // Subtler at low zoom (don't dominate the wide TX view),
-            // more visible mid-zoom for county comparison.
-            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 4, 0.45, 8, 0.65, 12, 0.7],
+            // Bumped opacity at low zoom (broker wants to SEE the county
+            // grid at the state-wide view) and capped at 0.85 so the
+            // satellite imagery still reads through at high zoom.
+            'raster-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.7, 6, 0.8, 10, 0.75, 14, 0.7],
           },
         });
       }
 
-      // FEMA National Flood Hazard Layer. Layer 28 = "Flood Hazard Zones"
-      // (Zone A, AE, X, etc) — the canonical colored polygons brokers
-      // and underwriters care about. Material to land valuation: parts
-      // in Zone AE carry build restrictions + mandatory insurance.
+      // FEMA National Flood Hazard Layer. Removed the layers=show:28
+      // filter — that layer number ("Flood Hazard Boundaries") only
+      // returned thin lines, not the colored Zone A/AE/X polygons
+      // brokers actually want. Letting the service return its default
+      // visible layer stack gives both the boundary lines AND the zone
+      // fill polygons. FEMA's service is famously slow (often 5-15s for
+      // the first tile in a viewport), so be patient when toggling on.
       if (!m.getSource('fema-floodplain')) {
         m.addSource('fema-floodplain', {
           type: 'raster',
           tiles: [
-            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:28&f=image',
+            'https://hazards.fema.gov/gis/nfhl/rest/services/public/NFHL/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image',
           ],
           tileSize: 512,
+          // Minzoom: don't try to render flood polygons at state-wide
+          // view — the FEMA service times out at very low scales and
+          // the result is too small to read anyway. Brokers care about
+          // floodplain on a property-by-property basis (zoom 11+).
+          minzoom: 8,
           attribution: 'Floodplain © FEMA NFHL',
         });
       }
@@ -2438,18 +2671,55 @@ export default function MapPage() {
           type: 'raster',
           source: 'fema-floodplain',
           layout: { visibility: overlays.floodplain ? 'visible' : 'none' },
-          paint: { 'raster-opacity': 0.65 },
+          // Bumped opacity to 0.75 so the flood zones are clearly
+          // visible — they're the whole point of toggling this layer.
+          paint: { 'raster-opacity': 0.75 },
+        });
+      }
+
+      // ── Contour lines (Mapbox terrain-v2 vector tileset) ──────────
+      // Powers the "Terrain" style toggle — amber USGS-style contour
+      // lines render on top of satellite imagery. Free with any Mapbox
+      // token; same source that backs Mapbox's outdoors-v12 style.
+      //
+      // Previous version split into major (index==5) + minor (index!=5)
+      // layers, but Mapbox terrain-v2's `index` only takes values 1, 5,
+      // 10 — and at zoom <11 only index=10 features exist. So the
+      // "major" filter with index==5 rendered nothing at the zooms it
+      // claimed to. Simplified to ONE layer that draws every contour,
+      // with zoom-interpolated width/opacity carrying the visual
+      // hierarchy: thinner at low zoom, thicker at high.
+      if (!m.getSource('mapbox-terrain-v2')) {
+        m.addSource('mapbox-terrain-v2', {
+          type: 'vector',
+          url: 'mapbox://mapbox.mapbox-terrain-v2',
+        });
+      }
+      if (!m.getLayer('contour-lines')) {
+        m.addLayer({
+          id: 'contour-lines',
+          type: 'line',
+          source: 'mapbox-terrain-v2',
+          'source-layer': 'contour',
+          minzoom: 9,
+          layout: { visibility: mapStyle === 'terrain' ? 'visible' : 'none' },
+          paint: {
+            'line-color': '#92400e', // amber-800 — readable on TX terrain colors
+            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.5, 13, 0.9, 17, 1.4],
+            'line-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.55, 13, 0.7, 17, 0.85],
+          },
         });
       }
 
       // Sync visibility on every run — covers the case where the layer
-      // already existed but the toggle state has since changed.
-      m.setLayoutProperty('tx-counties-layer', 'visibility', overlays.counties ? 'visible' : 'none');
+      // already existed but the toggle state has since changed. Counties
+      // intentionally not synced here — always visible.
       m.setLayoutProperty('fema-floodplain-layer', 'visibility', overlays.floodplain ? 'visible' : 'none');
+      m.setLayoutProperty('contour-lines', 'visibility', mapStyle === 'terrain' ? 'visible' : 'none');
     } catch (e) {
       console.warn('[overlays] failed to add/toggle overlay layers:', e);
     }
-  }, [overlays, mapLoaded]);
+  }, [overlays, mapLoaded, mapStyle]);
 
   // ── Comp boundary hover tooltip ──────────────────────────────────────
   // Parcel hover tooltips (owner + acres on TxGIO / Blanco CAD / owner-
@@ -2876,12 +3146,13 @@ export default function MapPage() {
     resetParcelState();
   }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState]);
 
-  const changeStyle = (style: 'satellite' | 'streets' | 'terrain') => {
-    if (!map.current) return;
+  // Switch between Satellite and Terrain views. Both use the same base
+  // style URL — the only difference is whether the contour-line overlay
+  // is visible. So we just update state; the overlay-ensure effect
+  // (below) handles toggling the contour layer's visibility on the next
+  // render. No setStyle() means no layer wipe + no mapLoaded reset.
+  const changeStyle = (style: 'satellite' | 'terrain') => {
     setMapStyle(style);
-    setMapLoaded(false);
-    map.current.setStyle(STYLE_URLS[style]);
-    map.current.once('style.load', () => setMapLoaded(true));
   };
 
   const allParcels = selectedParcels.length > 0 ? selectedParcels : tappedParcel ? [tappedParcel] : [];
@@ -2921,7 +3192,11 @@ export default function MapPage() {
           </div>
         )}
 
-        {/* Chat bar — natural-language queries to filter comps or fly to places */}
+        {/* Search bar — single input that drives the AI search (filter +
+            location + place). Owner search and scope filter live in the
+            advanced-filters popover opened by the sliders button to the
+            right of the input. Consolidates what used to be two stacked
+            bars into one row of map chrome. */}
         <div className="absolute top-3 left-3 right-3 md:left-1/2 md:right-auto md:-translate-x-1/2 md:w-[36rem] z-20">
           <div className="relative">
             <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-300 pointer-events-none" />
@@ -2938,17 +3213,34 @@ export default function MapPage() {
                 }
               }}
               placeholder="Ask: show me all 400+ acre comps in Real County"
-              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
+              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-32 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
             />
             {searchQuery && (
               <button
                 onClick={() => { setSearchQuery(''); clearAiSearch(); }}
                 title="Clear"
-                className="absolute right-[5.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
               >
                 <X size={12} />
               </button>
             )}
+            {/* Filters button — opens the advanced-filter popover. Highlights
+                gold when any filter inside is active (owner search has
+                results, OR scope ≠ All) so brokers see at a glance that
+                they have a non-default filter on. */}
+            <button
+              onClick={() => setFiltersOpen((v) => !v)}
+              title="Advanced filters"
+              aria-expanded={filtersOpen}
+              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-lg text-[11px] font-bold transition-colors flex items-center gap-1 ${
+                ownerSearchCount !== null || mapScope !== 'all' || countyFilter.size > 0
+                  ? 'bg-sage/20 hover:bg-sage/30 border-sage/40 text-sage'
+                  : 'bg-slate-500/10 hover:bg-slate-500/20 border-border text-slate-300 hover:text-white'
+              }`}
+            >
+              <SlidersHorizontal size={11} />
+              Filters
+            </button>
             <button
               onClick={askAi}
               disabled={askingAi || !searchQuery.trim()}
@@ -2970,73 +3262,220 @@ export default function MapPage() {
                 </button>
               </div>
             )}
-          </div>
-
-          {/* Owner search — find every TX parcel matching an owner name */}
-          <div className="relative mt-2">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-fuchsia-300 pointer-events-none" />
-            <input
-              type="text"
-              value={ownerSearchQuery}
-              onChange={(e) => setOwnerSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  (e.target as HTMLInputElement).blur();
-                } else if (e.key === 'Enter') {
-                  e.preventDefault();
-                  searchOwners();
-                }
-              }}
-              placeholder="Find parcels by owner (e.g. Grundhoefer Farms)"
-              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-fuchsia-400 rounded-xl pl-9 pr-24 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-fuchsia-400/30 transition-colors shadow-lg"
-            />
-            {(ownerSearchQuery || ownerSearchCount !== null) && (
-              <button
-                onClick={clearOwnerSearch}
-                title="Clear owner search"
-                className="absolute right-[5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
-              >
-                <X size={12} />
-              </button>
-            )}
-            <button
-              onClick={searchOwners}
-              disabled={ownerSearching || ownerSearchQuery.trim().length < 3}
-              title="Search parcels by owner name"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-fuchsia-500/25 hover:bg-fuchsia-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-fuchsia-400/40 hover:border-fuchsia-400 rounded-lg text-[11px] font-bold text-fuchsia-100 transition-colors flex items-center gap-1"
-            >
-              <Search size={11} />
-              {ownerSearching ? '…' : 'Find'}
-            </button>
+            {/* Owner-search result chip — lives below the bar same as the
+                AI result chip. Distinct fuchsia tint so brokers can tell
+                which kind of filter is active when both happen to be set. */}
             {ownerSearchCount !== null && (
-              <div className="absolute top-full mt-1 left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+              <div className={`absolute left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2 ${
+                aiResultMessage ? 'top-[calc(100%+2.5rem)]' : 'top-full mt-1'
+              }`}>
                 <p className="text-[11px] text-fuchsia-200 truncate">
                   {ownerSearchCount === 0
-                    ? `No matches for "${ownerSearchQuery}"`
-                    : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched${ownerSearchTruncated ? ' (showing first 200)' : ''}`}
+                    ? `No owner matches for "${ownerSearchQuery}"`
+                    : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched "${ownerSearchQuery}"${ownerSearchTruncated ? ' (first 200)' : ''}`}
                 </p>
                 <button
                   onClick={clearOwnerSearch}
                   className="text-fuchsia-300/80 hover:text-fuchsia-200 flex-shrink-0"
-                  title="Clear search"
+                  title="Clear owner search"
                 >
                   <X size={12} />
                 </button>
               </div>
             )}
           </div>
+
+          {/* ── Advanced filters popover ────────────────────────────────
+              Drops down from below the search bar. Holds the controls
+              that were previously top-of-map pills/bars: owner search
+              input + scope toggle. Designed to grow over time (acres
+              range, county multi-select, sold-after date, etc.) without
+              re-introducing always-visible chrome. */}
+          {filtersOpen && (
+            <div className="absolute top-full mt-2 left-0 right-0 bg-panel/95 backdrop-blur-md border border-border rounded-xl shadow-2xl p-3 z-30 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                  <SlidersHorizontal size={11} />
+                  Filters
+                </div>
+                <button
+                  onClick={() => setFiltersOpen(false)}
+                  className="text-slate-500 hover:text-white"
+                  title="Close filters"
+                  aria-label="Close filters"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              {/* Owner search — TX-wide parcel lookup by owner_name. Kept
+                  out of the AI bar above because it's a separate data
+                  source (TxGIO parcels statewide, not the comps table)
+                  and a separate code path. */}
+              <div>
+                <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 flex items-center gap-1.5">
+                  <Search size={10} />
+                  Search by owner
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={ownerSearchQuery}
+                    onChange={(e) => setOwnerSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        (e.target as HTMLInputElement).blur();
+                      } else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        searchOwners();
+                      }
+                    }}
+                    placeholder="e.g. Grundhoefer Farms"
+                    disabled={ownerSearching}
+                    className="w-full bg-night/60 border border-border focus:border-fuchsia-400 rounded-lg px-2.5 py-1.5 pr-20 text-xs text-white placeholder-slate-500 outline-none disabled:opacity-50"
+                  />
+                  {(ownerSearchQuery || ownerSearchCount !== null) && (
+                    <button
+                      onClick={clearOwnerSearch}
+                      title="Clear owner search"
+                      className="absolute right-[4.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                  <button
+                    onClick={searchOwners}
+                    disabled={ownerSearching || ownerSearchQuery.trim().length < 3}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-fuchsia-500/25 hover:bg-fuchsia-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-fuchsia-400/40 rounded text-[10px] font-bold text-fuchsia-100 flex items-center gap-1"
+                  >
+                    {ownerSearching ? <Loader2 size={10} className="animate-spin" /> : <Search size={10} />}
+                    Find
+                  </button>
+                </div>
+              </div>
+
+              {/* County filter — multi-select of counties that appear in
+                  the user's comps. Empty selection = show all counties.
+                  Sourced from comps (not the full 254 TX list) so the
+                  picker stays short and matches the broker's actual
+                  working set. Checkboxes for now since the list is
+                  typically 5-30 items; switch to a searchable dropdown
+                  later if a user accumulates >50 counties. */}
+              {availableCounties.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] uppercase tracking-wide text-slate-500">
+                      County
+                    </label>
+                    {countyFilter.size > 0 && (
+                      <button
+                        onClick={() => setCountyFilter(new Set())}
+                        className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                        title="Show comps in all counties"
+                      >
+                        clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="bg-night/60 border border-border rounded-lg max-h-40 overflow-y-auto p-1.5 space-y-0.5">
+                    {availableCounties.map((c) => {
+                      const checked = countyFilter.has(c.norm);
+                      return (
+                        <label
+                          key={c.norm}
+                          className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-slate-500/10 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setCountyFilter((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(c.norm)) next.delete(c.norm);
+                                else next.add(c.norm);
+                                return next;
+                              });
+                            }}
+                            className="w-3 h-3 accent-emerald-400"
+                          />
+                          <span className={`text-[11px] flex-1 ${checked ? 'text-emerald-300 font-bold' : 'text-slate-300'}`}>
+                            {c.display}
+                          </span>
+                          {/* Comp count — helps brokers see where their
+                              working data actually lives. Multi-county
+                              comps are counted in each of their counties
+                              (so totals can exceed comps.length). */}
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {c.count}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {countyFilter.size > 0 && (
+                    <div className="text-[10px] text-slate-500 mt-1">
+                      {countyFilter.size} of {availableCounties.length} selected
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Scope filter — moved out of the standalone pill row.
+                  Hidden in CMA workspace (which filters to its own comps).
+                  All / Company / Mine remains a quick toggle since brokers
+                  switch between scopes frequently. */}
+              {!viewingCMA && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 block">
+                    Scope
+                  </label>
+                  <div className="bg-night/60 border border-border rounded-lg overflow-hidden grid grid-cols-3">
+                    <button
+                      onClick={() => setMapScope('all')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Show every comp you have access to"
+                    >
+                      All
+                    </button>
+                    <button
+                      onClick={() => setMapScope('company')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Only comps marked as Company Transaction"
+                    >
+                      Company
+                    </button>
+                    <button
+                      onClick={() => setMapScope('mine')}
+                      className={`py-1.5 text-[11px] font-bold transition-colors ${
+                        mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                      }`}
+                      title="Only deals you personally closed"
+                    >
+                      My Sales
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Map controls */}
         <div className="absolute top-16 left-3 z-10 flex flex-col gap-2">
-          {/* Style switcher */}
+          {/* Style switcher — Satellite (aerial only) vs Terrain (aerial
+              + contour line overlay). Dark removed per broker feedback. */}
           <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden flex">
-            {(['satellite', 'streets', 'terrain'] as const).map(s => (
+            {(['satellite', 'terrain'] as const).map(s => (
               <button key={s} onClick={() => changeStyle(s)}
                 className={`px-3 py-2 text-xs font-bold capitalize transition-colors ${
                   mapStyle === s ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
                 }`}
-              >{s === 'streets' ? 'Dark' : s}</button>
+                title={s === 'terrain' ? 'Satellite imagery with contour lines' : 'Satellite imagery'}
+              >{s}</button>
             ))}
           </div>
 
@@ -3062,27 +3501,14 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Overlay toggles — county lines + FEMA floodplain. Independent
-              toggles in a single pill so they share the visual rhythm of
-              the basemap/scope/pin-label controls above. Active = sage
-              for counties (structural reference data), sky for floodplain
-              (hazard data — distinct so brokers reading the map can tell
-              which is which from peripheral vision). */}
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[14rem]">
-            <button
-              onClick={() => setOverlays((o) => ({ ...o, counties: !o.counties }))}
-              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
-                overlays.counties ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
-              }`}
-              title={overlays.counties ? 'Hide county lines' : 'Show county lines'}
-              aria-pressed={overlays.counties}
-            >
-              <Layers size={12} />
-              Counties
-            </button>
+          {/* Flood toggle — FEMA NFHL hazard zones. Counties always
+              render as structural reference (no toggle). Standalone pill
+              now that Counties was removed; visually matches the other
+              control pills in this column. */}
+          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden w-[10rem]">
             <button
               onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
-              className={`py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
+              className={`w-full py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
                 overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-slate-400 hover:text-white'
               }`}
               title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
@@ -3093,39 +3519,11 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Scope filter — All / Company / Mine. Hidden in CMA workspace
-              (which already filters to its own comps). */}
-          {!viewingCMA && (
-            <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-3 w-[17rem]">
-              <button
-                onClick={() => setMapScope('all')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Show every comp you have access to"
-              >
-                All
-              </button>
-              <button
-                onClick={() => setMapScope('company')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Only comps marked as Company Transaction (deals the firm handled)"
-              >
-                Company
-              </button>
-              <button
-                onClick={() => setMapScope('mine')}
-                className={`py-2 text-xs font-bold transition-colors text-center ${
-                  mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
-                }`}
-                title="Only deals you personally closed (tagged as the transaction agent)"
-              >
-                My Sales
-              </button>
-            </div>
-          )}
+          {/* Scope filter (All / Company / Mine) moved into the Filters
+              popover next to the search bar — one less always-visible
+              pill. Active scope still shows on the Filters button itself
+              (gold tint when scope ≠ All) so brokers see at a glance
+              that a non-default filter is on. */}
 
           {/* Parcel mode button */}
           {mapMode === 'view' && !drawingActive && (
@@ -4375,6 +4773,189 @@ export default function MapPage() {
                 </div>
               )}
             </div>
+
+            {/* ─── Source + Listing URL ──────────────────────────────
+                AI find + manual paste. Same flow as the review page
+                side panel — broker hits "Find listing online", AI
+                searches Lands of America / LandWatch / Land.com /
+                Realtor / Zillow, returns one URL or null, broker
+                reviews + Save. Manual paste fallback always available.
+
+                Only shown to the comp's owner (created_by) — the
+                /api/comp/[id]/find-listing endpoint enforces this on
+                the server side too. */}
+            {selectedComp.created_by === currentUserId && (
+            <div className="border-t border-border pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Listing</div>
+                {(selectedComp as any).source_type && (
+                  <div className="text-[10px] text-slate-400">
+                    {(selectedComp as any).source_type === 'listing_url' ? 'From listing' : 'From PDF'}
+                  </div>
+                )}
+              </div>
+
+              {/* SAVED state */}
+              {selectedComp.source_url && !listingCandidate && !pasteUrlMode && (
+                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                  <a
+                    href={selectedComp.source_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  >
+                    <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                    <span>{selectedComp.source_url}</span>
+                  </a>
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <button
+                      onClick={handleFindListing}
+                      disabled={findingListing}
+                      className="text-[10px] text-slate-500 hover:text-sage underline disabled:opacity-50"
+                      title="Re-run AI find to look for a better match"
+                    >
+                      {findingListing ? 'Searching…' : 'Find a better match'}
+                    </button>
+                    <button
+                      onClick={handleRemoveListingUrl}
+                      disabled={savingListing}
+                      className="text-[10px] text-slate-500 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                      title="Remove the saved listing URL"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* AI FOUND state */}
+              {listingCandidate && listingCandidate.url && (
+                <div className="bg-sage/10 border border-sage/40 rounded-lg p-2.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-sage text-[10px] font-bold uppercase tracking-wide">
+                    <Sparkles size={11} />
+                    AI found a match
+                  </div>
+                  <a
+                    href={listingCandidate.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  >
+                    <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                    <span>{listingCandidate.url}</span>
+                  </a>
+                  {listingCandidate.reason && (
+                    <p className="text-[10px] text-slate-300 leading-relaxed">{listingCandidate.reason}</p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <button
+                      onClick={() => setListingCandidate(null)}
+                      disabled={savingListing}
+                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    >
+                      <X size={10} />
+                      Not a match
+                    </button>
+                    <button
+                      onClick={() => handleSaveListingUrl(listingCandidate.url!)}
+                      disabled={savingListing}
+                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    >
+                      {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                      {savingListing ? 'Saving…' : 'Save as listing'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* AI EMPTY state */}
+              {listingCandidate && !listingCandidate.url && (
+                <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-2.5 space-y-1.5">
+                  <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wide">
+                    No confident match
+                  </div>
+                  {listingCandidate.reason && (
+                    <p className="text-[10px] text-slate-400 leading-relaxed">{listingCandidate.reason}</p>
+                  )}
+                  <p className="text-[10px] text-slate-500">Try again later or paste a URL manually below.</p>
+                  <button
+                    onClick={() => setListingCandidate(null)}
+                    className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* MANUAL PASTE state */}
+              {pasteUrlMode && (
+                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                  <input
+                    type="url"
+                    value={pasteUrlInput}
+                    onChange={(e) => setPasteUrlInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && pasteUrlInput.trim()) {
+                        e.preventDefault();
+                        handleSaveListingUrl(pasteUrlInput);
+                      }
+                      if (e.key === 'Escape') setPasteUrlMode(false);
+                    }}
+                    placeholder="https://landsofamerica.com/property/…"
+                    autoFocus
+                    className="w-full bg-night/60 border border-border focus:border-sage rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 outline-none"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => { setPasteUrlMode(false); setPasteUrlInput(''); }}
+                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => handleSaveListingUrl(pasteUrlInput)}
+                      disabled={savingListing || pasteUrlInput.trim().length < 5}
+                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                      Save URL
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* DEFAULT state */}
+              {!selectedComp.source_url && !listingCandidate && !pasteUrlMode && (
+                <div className="space-y-1.5">
+                  <button
+                    onClick={handleFindListing}
+                    disabled={findingListing}
+                    className="w-full py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
+                  >
+                    {findingListing ? (
+                      <>
+                        <Loader2 size={12} className="animate-spin" />
+                        Searching listing sites…
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={12} />
+                        Find listing online
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setPasteUrlMode(true)}
+                    className="w-full py-1 text-[10px] text-slate-500 hover:text-slate-300 underline flex items-center justify-center gap-1"
+                  >
+                    <LinkIcon size={10} />
+                    or paste URL manually
+                  </button>
+                </div>
+              )}
+            </div>
+            )}
 
             {/* Land character grid — Water · Road · Dev · Irrigation.
                 Strong tiers light emerald. Same chips as every other surface. */}

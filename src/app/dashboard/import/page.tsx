@@ -9,6 +9,48 @@ import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
+import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
+import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
+import { TieredLoadingMessage } from '@/components/TieredLoadingMessage';
+
+// Build a patch object that updates an existing comp with newly-extracted
+// data WITHOUT overwriting fields the broker has already verified.
+//
+// Policy: only fill values where the existing comp has nothing (null,
+// empty string, or missing). Never overwrite existing data — the broker
+// may have manually corrected it, and a re-extraction could regress.
+//
+// Defining-the-duplicate fields (sale_price, sale_date, acres) are
+// explicitly excluded — if these differ, it's not a duplicate, and the
+// dedup detection would have caught it before this merge runs.
+function buildMergePatch(existing: any, fresh: any): Record<string, any> {
+  const patch: Record<string, any> = {};
+  // Fields that fill if existing is null/empty.
+  const fillIfEmpty: Array<[string, any]> = [
+    ['aerial_image', fresh.aerialImage ?? fresh.aerial_image],
+    ['latitude', fresh.latitude],
+    ['longitude', fresh.longitude],
+    ['parcel_id', fresh.parcel_id],
+    ['boundary_geojson', fresh.geometry ?? fresh.boundary_geojson],
+    ['description', fresh.description],
+    ['address', fresh.address],
+    ['property_name', fresh.property_name],
+    ['grantor', fresh.grantor],
+    ['grantee', fresh.grantee],
+    ['price_per_acre', fresh.price_per_acre],
+    ['ppa_land_only', fresh.ppa_land_only],
+    ['improvements_value', fresh.improvements_value],
+  ];
+  for (const [field, value] of fillIfEmpty) {
+    const existingVal = existing?.[field];
+    const isEmpty = existingVal == null || existingVal === '' ||
+      (typeof existingVal === 'string' && existingVal.trim() === '');
+    if (isEmpty && value != null && value !== '') {
+      patch[field] = value;
+    }
+  }
+  return patch;
+}
 
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
@@ -639,6 +681,13 @@ export default function ImportPage() {
   }]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  // Optional specific status to surface during long-running AI ops.
+  // Caller sets this when entering each phase ("Reading PDF…", "Auto-
+  // locating parcels…", "Checking for duplicates…") so the tiered
+  // loading message can show what's actually happening in real time.
+  // Leave null when there's nothing specific worth surfacing — the
+  // brand voice line carries the wait on its own.
+  const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
   const [pendingComps, setPendingComps] = useState<ExtractedComp[]>([]);
   // Drag-and-drop state. Counter handles nested drag enter/leave events
   // (which fire for every child element the cursor crosses).
@@ -683,6 +732,7 @@ export default function ImportPage() {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setLoading(true);
+    setLoadingStatus('Reading the document…');
 
     try {
       const response = await fetch('/api/import-chat', {
@@ -718,6 +768,9 @@ export default function ImportPage() {
       // SKIP when the AI already extracted explicit coords (from a "Geographic
       // Location" field in the doc). Those are authoritative — running browser
       // auto-locate on top could replace them with a less-precise match.
+      if (Array.isArray(data.comps) && data.comps.length > 0) {
+        setLoadingStatus(`Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`);
+      }
       if (Array.isArray(data.comps)) {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
@@ -753,6 +806,41 @@ export default function ImportPage() {
         }
       }
 
+      // ─── Duplicate detection ────────────────────────────────────
+      // For each extracted comp, query existing comps with matching
+      // sale_date + sale_price (within $1) and check if grantor/grantee
+      // also match (fuzzy). Tags each comp with _duplicates so the
+      // verification card can render a warning banner.
+      //
+      // Targeted query (not "fetch all comps") so this scales — a broker
+      // with 1000 comps only fetches the handful that share the exact
+      // date + price, then fuzzy-matches the parties client-side.
+      if (Array.isArray(data.comps) && data.comps.length > 0) {
+        setLoadingStatus('Checking your vault for duplicates…');
+      }
+      if (Array.isArray(data.comps)) {
+        for (let i = 0; i < data.comps.length; i++) {
+          const c = data.comps[i];
+          if (!c.sale_date || !(Number(c.sale_price) > 0)) continue;
+          try {
+            const { data: candidates, error } = await supabase
+              .from('comps')
+              .select('id, property_name, county, grantor, grantee, sale_date, sale_price, created_at')
+              .eq('sale_date', c.sale_date)
+              .gte('sale_price', Number(c.sale_price) - 1)
+              .lte('sale_price', Number(c.sale_price) + 1);
+            if (error || !Array.isArray(candidates)) continue;
+            const matches = findDuplicateCandidates(c, candidates as any);
+            if (matches.length > 0) {
+              (data.comps[i] as any)._duplicates = matches;
+            }
+          } catch (e) {
+            // Silently skip — dedup detection is a nicety, not blocking
+            console.warn('[import] dedup check failed for', c.property_name, e);
+          }
+        }
+      }
+
       const assistantMessage: Message = {
         role: 'assistant',
         content: data.message,
@@ -769,6 +857,7 @@ export default function ImportPage() {
       toast.error('Failed to process message');
     } finally {
       setLoading(false);
+      setLoadingStatus(null);
     }
   };
 
@@ -1388,7 +1477,10 @@ export default function ImportPage() {
     const { data: inserted, error } = await supabase.from('comps').insert({
       created_by: user.id,
       property_name: comp.property_name,
-      county: comp.county || '',
+      // Normalize to canonical storage form (titlecase, no "County" suffix,
+      // compounds comma-separated). Replaces the raw AI-extracted string
+      // which was inconsistent ("Frio" vs "Frio County" vs "frio").
+      county: normalizeCountyForStorage(comp.county) || '',
       state: comp.state || 'TX',
       acres: comp.acres || 0,
       sale_price: comp.sale_price || 0,
@@ -1643,8 +1735,112 @@ export default function ImportPage() {
                         ? mapboxStaticUrl({ lat: sourceLatLng.lat, lng: sourceLatLng.lng, zoom: 14 })
                         : null;
 
+                      const duplicates = (comp as any)._duplicates as DuplicateMatch[] | undefined;
+                      const hasDuplicates = duplicates && duplicates.length > 0;
                       return (
                       <div key={ci} className="bg-night border border-border rounded-xl p-3">
+                        {/* Duplicate-match warning — surfaces BEFORE the
+                            comp details so the broker knows what they're
+                            about to save is already in the vault. Lists
+                            the existing match(es) and gives a one-click
+                            Skip to drop this comp from the import batch. */}
+                        {hasDuplicates && (
+                          <div className="mb-3 bg-amber-500/10 border border-amber-500/40 rounded-lg p-2.5">
+                            <div className="flex items-center gap-1.5 text-amber-300 text-xs font-bold mb-1.5">
+                              <AlertTriangle size={12} />
+                              {duplicates!.length === 1
+                                ? 'Possible duplicate of:'
+                                : `Possible duplicate of ${duplicates!.length} existing comp${duplicates!.length === 1 ? '' : 's'}:`}
+                            </div>
+                            <ul className="space-y-1 mb-2">
+                              {duplicates!.slice(0, 3).map((m, di) => {
+                                const savedDate = m.comp.created_at
+                                  ? new Date(m.comp.created_at).toLocaleDateString()
+                                  : '?';
+                                return (
+                                  <li key={di} className="text-[11px] text-amber-200">
+                                    <span className="font-bold">
+                                      {m.comp.property_name || `${m.comp.county || 'Comp'} ${m.comp.sale_date}`}
+                                    </span>
+                                    <span className="text-amber-200/70"> · saved {savedDate}</span>
+                                    {m.confidence === 'exact' && (
+                                      <span className="ml-1.5 text-[9px] uppercase tracking-wide text-amber-300/80 bg-amber-500/15 px-1 py-0.5 rounded">exact</span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            <div className="flex items-center gap-2 pt-1 flex-wrap">
+                              {/* MERGE — fills missing fields on the existing
+                                  comp without overwriting anything the broker
+                                  has already verified. The high-leverage path
+                                  when you re-import an appraisal: existing
+                                  row picks up the aerial, parcel_ids,
+                                  description, coords, etc., and the duplicate
+                                  row is never created. */}
+                              <button
+                                onClick={async () => {
+                                  const existing = duplicates![0].comp;
+                                  const patch = buildMergePatch(existing, comp);
+                                  if (Object.keys(patch).length === 0) {
+                                    toast('Nothing to merge — existing comp already has all these fields', { icon: 'ℹ️', duration: 3500 });
+                                    return;
+                                  }
+                                  const { error } = await supabase
+                                    .from('comps')
+                                    .update(patch)
+                                    .eq('id', existing.id);
+                                  if (error) {
+                                    toast.error(`Merge failed: ${error.message}`);
+                                    return;
+                                  }
+                                  const fields = Object.keys(patch).length;
+                                  toast.success(`Merged ${fields} field${fields === 1 ? '' : 's'} into ${existing.property_name || 'existing comp'}`);
+                                  // Drop this comp from the import batch (same
+                                  // as Skip) — it's been merged, not saved as
+                                  // a new row.
+                                  setMessages((prev) => prev.map((mm, mi) => {
+                                    if (mi !== i || mm.role !== 'assistant' || !mm.comps) return mm;
+                                    return { ...mm, comps: mm.comps.filter((_, idx) => idx !== ci) };
+                                  }));
+                                  setPendingComps((prev) =>
+                                    prev.filter((p) => p !== comp)
+                                  );
+                                }}
+                                className="px-2.5 py-1 bg-sage/20 hover:bg-sage/30 border border-sage/40 rounded text-[10px] font-bold text-sage transition-colors"
+                                title="Update the existing comp with any new info from this extraction (aerial, parcels, description) — only fills in missing fields, never overwrites"
+                              >
+                                Merge into existing
+                              </button>
+                              <button
+                                onClick={() => {
+                                  // Remove this comp from the message's comps array
+                                  // so it doesn't get rendered or accidentally saved.
+                                  setMessages((prev) => prev.map((mm, mi) => {
+                                    if (mi !== i || mm.role !== 'assistant' || !mm.comps) return mm;
+                                    return { ...mm, comps: mm.comps.filter((_, idx) => idx !== ci) };
+                                  }));
+                                  setPendingComps((prev) =>
+                                    prev.filter((p) => p !== comp)
+                                  );
+                                  toast.success('Skipped duplicate');
+                                }}
+                                className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 rounded text-[10px] font-bold text-amber-200 transition-colors"
+                              >
+                                Skip this
+                              </button>
+                              <button
+                                onClick={() => router.push(`/dashboard/review/${duplicates![0].comp.id}`)}
+                                className="px-2 py-1 border border-amber-500/30 hover:border-amber-500/60 rounded text-[10px] font-bold text-amber-200/80 hover:text-amber-200 transition-colors"
+                              >
+                                View existing
+                              </button>
+                              <span className="ml-auto text-[10px] text-amber-200/60">
+                                or save anyway below ↓
+                              </span>
+                            </div>
+                          </div>
+                        )}
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
                             <p className="text-sm font-bold text-white">
@@ -1816,16 +2012,12 @@ export default function ImportPage() {
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-card border border-border rounded-2xl px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-4 rounded bg-sage/20 flex items-center justify-center">
+              <div className="bg-card border border-border rounded-2xl px-4 py-3 max-w-[80%]">
+                <div className="flex items-start gap-3">
+                  <div className="w-5 h-5 rounded bg-sage/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <span className="text-sage text-[8px] font-bold">AI</span>
                   </div>
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  </div>
+                  <TieredLoadingMessage status={loadingStatus} />
                 </div>
               </div>
             </div>
