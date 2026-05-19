@@ -1483,7 +1483,22 @@ export default function ImportPage() {
       county: normalizeCountyForStorage(comp.county) || '',
       state: comp.state || 'TX',
       acres: comp.acres || 0,
+      // Source citations from the AI extraction — where in the document
+      // each numeric value came from. Surfaced on the verification card
+      // + review page so brokers can audit at-a-glance. Migration 027
+      // added these columns; safe to insert as null on older schemas
+      // because the resilient saveComp retry strips unknown fields.
+      acres_source: (comp as any).acres_source ?? null,
       sale_price: comp.sale_price || 0,
+      sale_price_source: (comp as any).sale_price_source ?? null,
+      // Persist price-per-acre values directly — they were previously
+      // computed-on-display from sale_price/acres, but the AI extracts
+      // them as discrete fields. Persisting unlocks the math gate's
+      // self-check at query time + the source citation surface.
+      price_per_acre: (comp as any).price_per_acre ?? null,
+      price_per_acre_source: (comp as any).price_per_acre_source ?? null,
+      ppa_land_only: (comp as any).ppa_land_only ?? null,
+      ppa_land_only_source: (comp as any).ppa_land_only_source ?? null,
       improvements_value: comp.improvements_value,
       sale_date: comp.sale_date,
       address: comp.address,
@@ -1849,6 +1864,35 @@ export default function ImportPage() {
                             <p className="text-xs text-slate-400 mt-0.5">
                               {comp.county}, {comp.state} · {comp.acres} acres
                             </p>
+                            {/* Source citations — show where the AI pulled each
+                                numeric value from. Forces broker to check the
+                                hard-to-spot wrong-table-row errors (Eatwell
+                                River Ranch saved 9 ac because it pulled from
+                                an improvements list instead of the Property
+                                Description table). One line per field that
+                                has a citation. */}
+                            {((comp as any).acres_source || (comp as any).sale_price_source || (comp as any).price_per_acre_source) && (
+                              <div className="mt-1.5 space-y-0.5 text-[10px] text-slate-500 leading-relaxed">
+                                {(comp as any).acres_source && (
+                                  <div className="flex gap-1">
+                                    <span className="text-slate-600 flex-shrink-0">↳ {comp.acres} ac:</span>
+                                    <span className="italic">{(comp as any).acres_source}</span>
+                                  </div>
+                                )}
+                                {(comp as any).sale_price_source && (
+                                  <div className="flex gap-1">
+                                    <span className="text-slate-600 flex-shrink-0">↳ ${comp.sale_price?.toLocaleString()}:</span>
+                                    <span className="italic">{(comp as any).sale_price_source}</span>
+                                  </div>
+                                )}
+                                {(comp as any).price_per_acre_source && (comp as any).price_per_acre && (
+                                  <div className="flex gap-1">
+                                    <span className="text-slate-600 flex-shrink-0">↳ ${Math.round((comp as any).price_per_acre).toLocaleString()}/ac:</span>
+                                    <span className="italic">{(comp as any).price_per_acre_source}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                             <div className="flex items-center gap-3 mt-1.5">
                               <span className="text-emerald-400 font-mono text-xs font-bold">
                                 ${comp.sale_price?.toLocaleString()}

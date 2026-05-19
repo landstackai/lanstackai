@@ -67,6 +67,13 @@ type Comp = {
   needs_location_review: boolean | null;
   source_type: string | null;
   source_url: string | null;
+  // Source citations from the AI extraction — where each numeric value
+  // came from in the original document. Surfaced in the side panel so
+  // brokers can audit the extraction at a glance.
+  acres_source: string | null;
+  sale_price_source: string | null;
+  price_per_acre_source: string | null;
+  ppa_land_only_source: string | null;
   confidence: string | null;
   description: string | null;
 };
@@ -191,11 +198,15 @@ export default function ReviewPage() {
       // columns live on the url-upload-extraction branch which hasn't
       // merged to main). insertCompResilient does the same dance for
       // saveCompSilent — same principle, applied to reads.
+      // Include the new *_source columns from migration 027. Retry
+      // without them if production hasn't applied the migration yet —
+      // same defense-in-depth pattern as source_type/source_url.
       const SELECT_WITH_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
         'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
-        'needs_extraction_review, needs_location_review, source_type, source_url, confidence, description';
+        'needs_extraction_review, needs_location_review, source_type, source_url, confidence, description, ' +
+        'acres_source, sale_price_source, price_per_acre_source, ppa_land_only_source';
       const SELECT_WITHOUT_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
@@ -209,8 +220,10 @@ export default function ReviewPage() {
         .maybeSingle();
 
       // If the source columns don't exist on this Supabase project,
-      // retry without them so the page still loads.
-      if (error && /source_(type|url)/i.test(error.message)) {
+      // retry without them so the page still loads. Covers both the
+      // source_type/source_url columns (migration 022) and the new
+      // *_source citation columns (migration 027).
+      if (error && /(source_(type|url)|acres_source|sale_price_source|price_per_acre_source|ppa_land_only_source)/i.test(error.message)) {
         const retry = await supabase
           .from('comps')
           .select(SELECT_WITHOUT_SOURCE)
@@ -1695,6 +1708,41 @@ export default function ReviewPage() {
               <Stat label="Sale date" value={comp.sale_date || '—'} />
             </div>
           </div>
+
+          {/* Extraction citations — where each numeric field came from in
+              the source document. Only shown when at least one citation
+              exists. Populated by the AI extraction's cite-the-source
+              system (migration 027). Helps brokers spot when the AI
+              pulled a value from the wrong table or improvement list. */}
+          {(comp.acres_source || comp.sale_price_source || comp.price_per_acre_source || comp.ppa_land_only_source) && (
+            <div className="border-t border-border pt-3 text-xs space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500">Extraction sources</div>
+              {comp.acres_source && (
+                <div className="text-[10px] leading-relaxed">
+                  <span className="text-slate-500">Acres:</span>{' '}
+                  <span className="text-slate-300 italic">{comp.acres_source}</span>
+                </div>
+              )}
+              {comp.sale_price_source && (
+                <div className="text-[10px] leading-relaxed">
+                  <span className="text-slate-500">Sale price:</span>{' '}
+                  <span className="text-slate-300 italic">{comp.sale_price_source}</span>
+                </div>
+              )}
+              {comp.price_per_acre_source && (
+                <div className="text-[10px] leading-relaxed">
+                  <span className="text-slate-500">$/acre:</span>{' '}
+                  <span className="text-slate-300 italic">{comp.price_per_acre_source}</span>
+                </div>
+              )}
+              {comp.ppa_land_only_source && comp.ppa_land_only_source !== comp.price_per_acre_source && (
+                <div className="text-[10px] leading-relaxed">
+                  <span className="text-slate-500">$/ac (land):</span>{' '}
+                  <span className="text-slate-300 italic">{comp.ppa_land_only_source}</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Property description — appraiser remarks, often 200-500
               words. Default collapsed to a 2-line preview because long

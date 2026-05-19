@@ -105,6 +105,58 @@ When you find comparable sales in a document:
 - Accuracy matters more than speed. If a value is illegible or missing, set
   it to null rather than guessing. Reflect uncertainty in confidence.per_field.
 
+CITE THE SOURCE — every numeric field must include a paired _source string
+identifying the EXACT location in the document the value came from. This is
+the strongest defense against silent wrong extractions like saving 9 acres
+for a 796-acre property.
+
+Required _source fields:
+  acres_source           — for "acres"
+  sale_price_source      — for "sale_price"
+  price_per_acre_source  — for "price_per_acre"
+  ppa_land_only_source   — for "ppa_land_only"
+
+Source format examples (preferred → acceptable → unacceptable):
+
+  PREFERRED — labeled structured tables:
+    "page 2 · Property Description table · 'Gross Land Area' row"
+    "page 1 · Transaction Data · 'Sales Price' row"
+    "page 2 · Adjusted Sales Price Indicators · 'Price per Gross Acre' row"
+
+  ACCEPTABLE — explicit prose statements that name the field:
+    "page 1 · description: 'Sale of 265.210 ac located at...'"
+    "page 2 · description: '455.92-acre ranch... sold for $3,145,855'"
+
+  NEVER — these are FORBIDDEN as sources for property-total fields:
+    "page 2 · improvements list: '9-acre pecan orchard'"
+       → an improvement, NOT the property total
+    "page 1 · 'approximately 11 miles north of Pearsall'"
+       → a distance phrase, NOT acreage
+    "page 1 · '7,300+ square foot main house'"
+       → improvement size in SF, NOT property acreage
+    "page 2 · 'Parent Tract: 8,820-acre Cooper Ranch'"
+       → parent holding, NOT the sold tract
+    "inferred from context" / "calculated" / "guessed"
+       → not a citable source
+
+If you cannot cite a specific document location, set the field to null
+and put the reason in _source (e.g. "no labeled value found in document").
+A missing value with a clear "couldn't find it" is far better than a
+fabricated number with a vague source.
+
+STRUCTURED TABLES ARE AUTHORITATIVE. When a labeled table like "Property
+Description" exists in the document with a "Gross Land Area" or "Land Area"
+or "Acres" row, that value WINS over any prose mention. Improvement lists
+and narrative descriptions are NEVER authoritative for property-total
+acreage or pricing — they describe sub-features.
+
+MULTI-COMPARABLE PDFs: when the document contains multiple comparables
+labeled "LAND COMPARABLE 1", "LAND COMPARABLE 2", "COMPARABLE SALE 1",
+"Property #1", etc., extract them as SEPARATE comps. Each comparable's
+fields must come ONLY from that comparable's section of the document.
+Never mix fields across comparables. Cite the section name in the source
+("page 2 · LAND COMPARABLE 2 · Property Description table · ...").
+
 CRITICAL: You MUST always respond with a SINGLE valid JSON object.
 The response must be parseable by JSON.parse — no prose outside the object, no
 markdown fences. If extraction succeeded, return:
@@ -118,11 +170,15 @@ Each comp should have these fields:
   "county": string or null,
   "state": string (default "TX"),
   "acres": number or null,
+  "acres_source": string or null,             // REQUIRED if acres is non-null. See "CITE THE SOURCE" rules.
   "sale_price": number or null,
+  "sale_price_source": string or null,        // REQUIRED if sale_price is non-null
   "price_land_only": number or null,
   "improvements_value": number or null,
   "price_per_acre": number or null,
+  "price_per_acre_source": string or null,    // REQUIRED if price_per_acre is non-null
   "ppa_land_only": number or null,
+  "ppa_land_only_source": string or null,     // REQUIRED if ppa_land_only is non-null
   "sale_date": "YYYY-MM-DD" or null,
   "address": string or null,
   "latitude": number or null,
