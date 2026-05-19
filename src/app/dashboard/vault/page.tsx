@@ -13,20 +13,46 @@ import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
 // Heuristic city extractor — comps store free-text "address" (e.g.
-// "E/S of Ranch Rd 336, Leakey, TX 78873"). City is the segment immediately
-// before the state. Returns null if the address doesn't fit the pattern.
+// "E/S of Ranch Rd 336, Leakey, TX 78873"). City is the segment
+// immediately before the state. Returns null if the candidate doesn't
+// look like a real city — many appraisal addresses are directional
+// descriptors ("East side of CR 2875"), county references
+// ("Frio County, TX"), or distance phrases ("approximately 11 miles
+// northeast of Pleasanton") that should NOT render in the City column.
+//
+// Patterns recognized as "not a city" and returned as null:
+//   - Contains "County" (it's a county name, not a city)
+//   - Road designators: Road / Rd / Hwy / FM / CR / RR / Ranch Road /
+//                       Highway / Trail / Loop / Drive / Lane
+//   - Directional descriptors: "north/south/east/west side of",
+//                              "north of", "south of", etc.
+//   - Distance phrases: "approximately X miles", "X miles to the..."
+//   - Pure ordinal/section descriptors: "End of...", "Side of..."
 function extractCity(address: string | null | undefined): string | null {
   if (!address) return null;
   const parts = address.split(',').map(s => s.trim()).filter(Boolean);
   if (parts.length < 2) return null;
-  // Last segment usually contains "ST 12345" or "ST" — the one before it is city.
-  // Validate the last segment looks state-like (2 letters maybe + zip).
+
+  // Last segment usually contains "ST 12345" or "ST" — the one before
+  // it is the city candidate.
   const last = parts[parts.length - 1];
-  if (!/^[A-Z]{2}(\s+\d{5}(-\d{4})?)?$/i.test(last)) {
-    // No clean state pattern — try the second-to-last anyway.
-    return parts[parts.length - 2] || null;
-  }
-  return parts[parts.length - 2] || null;
+  const stateLike = /^[A-Z]{2}(\s+\d{5}(-\d{4})?)?$/i.test(last);
+  const candidate = (stateLike ? parts[parts.length - 2] : parts[parts.length - 1]) || '';
+  if (!candidate) return null;
+
+  // "Not a city" filter — patterns that indicate the candidate is
+  // really a road / direction / county / distance descriptor, not a
+  // place name. Conservative: better to show "—" than to show a junk
+  // "city" that confuses brokers scanning the column.
+  const NOT_A_CITY = /\b(?:county|road|rd|highway|hwy|fm|fm\.|cr|c\.r\.|rr|r\.r\.|ranch\s+road|loop|trail|trl|drive|dr|lane|ln|boulevard|blvd|parkway|pkwy|court|ct|street|st\.|avenue|ave|way|side\s+of|miles?|approximately|approx|near|north\s+of|south\s+of|east\s+of|west\s+of|northeast\s+of|northwest\s+of|southeast\s+of|southwest\s+of|end\s+of|community\s+of|outside\s+of)\b/i;
+  if (NOT_A_CITY.test(candidate)) return null;
+
+  // Additionally reject candidates that are mostly numbers (e.g.
+  // "Highway 281" — already caught by the regex, but defense in depth)
+  // or contain a typical road/highway number signature.
+  if (/\b\d{2,4}\b/.test(candidate)) return null;
+
+  return candidate;
 }
 
 type SortKey = 'county' | 'city' | 'acres' | 'sale_price' | 'ppa_total' | 'ppa_adjusted' | 'improved';
