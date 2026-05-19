@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
 import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { reverseGeocodeCity } from '@/lib/utils/reverseGeocode';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
@@ -218,6 +219,54 @@ export default function VaultPage() {
   useEffect(() => {
     fetchComps();
   }, [fetchComps]);
+
+  // Lazy city backfill — for any comp missing comp.city but with valid
+  // coords, reverse-geocode the nearest city and write it back. Runs
+  // once per render of new comps; results cache permanently in the DB
+  // so subsequent renders are instant.
+  //
+  // Why client-side (not a DB migration): the geocode API requires HTTP
+  // access we can't do from inside Postgres. Spreading the cost across
+  // normal browsing keeps things simple — first vault load might take
+  // an extra few seconds; afterwards everything's instant.
+  //
+  // RLS limits this to comps the user owns (created_by = auth.uid()).
+  // Comps owned by teammates that need backfill will get filled when
+  // their owner browses the vault.
+  useEffect(() => {
+    if (!comps || comps.length === 0) return;
+    const needsBackfill = comps.filter(
+      (c) =>
+        !(c as any).city &&
+        typeof c.latitude === 'number' &&
+        typeof c.longitude === 'number'
+    );
+    if (needsBackfill.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const c of needsBackfill) {
+        if (cancelled) return;
+        const city = await reverseGeocodeCity(c.latitude!, c.longitude!);
+        if (!city || cancelled) continue;
+        const { error } = await supabase
+          .from('comps')
+          .update({ city })
+          .eq('id', c.id);
+        if (error) {
+          // RLS blocks updates on comps the user doesn't own — silently
+          // skip. Teammate's comp; they'll backfill it themselves.
+          continue;
+        }
+        // Patch local state so the row updates without a full refetch
+        setComps((prev) =>
+          prev.map((x) => (x.id === c.id ? ({ ...x, city } as any) : x))
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [comps, supabase]);
 
   const handleDeleteComp = async (id: string) => {
     const { error } = await supabase.from('comps').delete().eq('id', id);
@@ -507,8 +556,10 @@ export default function VaultPage() {
               });
             const sortedBase = [...filtered].sort((a, b) => {
               const mul = sortDir === 'asc' ? 1 : -1;
-              const cityA = extractCity(a.address) || '';
-              const cityB = extractCity(b.address) || '';
+              // Sort uses the same priority chain as the row render:
+              // comp.city → extractCity heuristic → empty string.
+              const cityA = (a as any).city || extractCity(a.address) || '';
+              const cityB = (b as any).city || extractCity(b.address) || '';
               const ppaA = a.price_per_acre || 0;
               const ppaB = b.price_per_acre || 0;
               const adjA = a.ppa_land_only || 0;
@@ -638,7 +689,15 @@ export default function VaultPage() {
                     </thead>
                     <tbody>
                       {sorted.map((comp) => {
-                        const city = extractCity(comp.address);
+                        // City resolution priority:
+                        //   1. comp.city — structured column, set by the lazy
+                        //      reverse-geocode backfill or future import flow
+                        //   2. extractCity(comp.address) — heuristic on the
+                        //      address string for comps that have clean
+                        //      "Street, City, ST Zip" addresses
+                        //   3. null → render as '—'
+                        const city =
+                          (comp as any).city || extractCity(comp.address);
                         const totalPpa = comp.price_per_acre || 0;
                         const adjustedPpa = comp.ppa_land_only || 0;
                         const hasAdjustment = adjustedPpa > 0 && Math.abs(totalPpa - adjustedPpa) > 1;
