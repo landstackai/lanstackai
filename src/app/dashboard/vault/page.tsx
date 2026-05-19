@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion, Sparkles, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { reverseGeocodeCity } from '@/lib/utils/reverseGeocode';
 import CompCard from '@/components/comp/CompCard';
@@ -79,6 +79,27 @@ export default function VaultPage() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<CompFilters>(defaultFilters);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
+
+  // ─── AI search state ────────────────────────────────────────────────
+  // The vault's search bar is AI-powered: broker types natural language
+  // ("Live Water, Kerr, Kendall, Comal county" or "500+ acre Frio comps
+  // sold last year") and the same /api/ai-search endpoint that backs the
+  // map's search parses it into structured filter criteria.
+  //
+  // Behavior:
+  //   1. On Enter → POST /api/ai-search with the query
+  //   2. If response.mode === 'filter' → set aiCriteria, table re-filters
+  //   3. If response.mode === 'unknown' → fall back to plain text search
+  //      via the existing filters.search field
+  //   4. If response.mode === 'location' → toast (the vault doesn't fly)
+  //
+  // Filter chips below the search bar show what the AI understood; click
+  // X on any chip to remove that criterion. "Clear all" wipes the AI
+  // filter entirely.
+  const [aiQuery, setAiQuery] = useState('');
+  const [aiCriteria, setAiCriteria] = useState<any>(null);
+  const [aiMessage, setAiMessage] = useState<string | null>(null);
+  const [askingAi, setAskingAi] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showQuickCapture, setShowQuickCapture] = useState(false);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
@@ -298,6 +319,82 @@ export default function VaultPage() {
     };
   }, [comps, supabase]);
 
+  // ─── AI search handlers ──────────────────────────────────────────────
+  // POST the user's query to /api/ai-search. The endpoint returns
+  // {mode, message, criteria, location} — same shape used by the map's
+  // search. Translate the response into local state that the table can
+  // filter against.
+  const askAi = useCallback(async () => {
+    const q = aiQuery.trim();
+    if (!q || askingAi) return;
+    setAskingAi(true);
+    try {
+      const res = await fetch('/api/ai-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data?.error || 'AI search failed');
+        return;
+      }
+      if (data.mode === 'filter' && data.criteria) {
+        setAiCriteria(data.criteria);
+        setAiMessage(data.message || null);
+        // Clear the existing text-search filter when AI takes over —
+        // otherwise both would try to filter and one would suppress
+        // matches the other expected.
+        setFilters((f) => ({ ...f, search: '' }));
+      } else if (data.mode === 'location') {
+        // Locations are a map-page concept; the vault doesn't fly.
+        toast(`"${data.location?.name}" is a place — use the map page to fly there.`, { duration: 3500, icon: '📍' });
+      } else {
+        // mode === 'unknown' or unparseable → fall back to plain text
+        // search via the existing filters.search column.
+        setFilters((f) => ({ ...f, search: q }));
+        setAiCriteria(null);
+        setAiMessage(null);
+        toast(`Using plain text search for "${q}"`, { duration: 2500 });
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'AI search failed');
+    } finally {
+      setAskingAi(false);
+    }
+  }, [aiQuery, askingAi]);
+
+  const clearAiFilter = () => {
+    setAiCriteria(null);
+    setAiMessage(null);
+    setAiQuery('');
+  };
+
+  // Remove a single criterion from aiCriteria. Used by the X on each
+  // filter chip. Counties + water are arrays (remove one entry);
+  // min_acres / max_acres / has_improvements / etc. are scalars (set
+  // to null). When the criteria object becomes empty, clear it entirely
+  // so the chip row hides.
+  const removeAiCriterion = (key: string, value?: any) => {
+    setAiCriteria((prev: any) => {
+      if (!prev) return null;
+      const next = { ...prev };
+      if (value != null && Array.isArray(next[key])) {
+        next[key] = (next[key] as any[]).filter((v) => v !== value);
+        if (next[key].length === 0) delete next[key];
+      } else {
+        delete next[key];
+      }
+      // If everything's gone, clear the whole thing
+      const remaining = Object.keys(next).filter((k) => next[k] != null && (!Array.isArray(next[k]) || next[k].length > 0));
+      if (remaining.length === 0) {
+        setAiMessage(null);
+        return null;
+      }
+      return next;
+    });
+  };
+
   const handleDeleteComp = async (id: string) => {
     const { error } = await supabase.from('comps').delete().eq('id', id);
     if (error) {
@@ -365,18 +462,73 @@ export default function VaultPage() {
           </div>
         </div>
 
-        {/* Row 2 — search + filter + view mode */}
+        {/* Row 2 — AI search + filter + view mode */}
         <div className="flex items-center gap-3 mt-5">
-          {/* Search */}
-          <div className="relative flex-1 max-w-md">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          {/* AI-powered search. Natural-language queries are parsed via
+              /api/ai-search into structured filter criteria. Plain text
+              (property names, owners) falls back to the existing
+              substring search.
+
+              Layout: sparkle icon (left) · input · clear-X (right, when
+              text present) · Ask button (right, primary emerald). Same
+              pattern Linear / Notion / Raycast use for command-bar
+              inputs — primary action is always visible on the right. */}
+          <div className="relative flex-1 max-w-2xl">
+            <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-emerald-600 pointer-events-none" />
             <input
               type="text"
-              placeholder="Search by property name, address, or county…"
-              value={filters.search}
-              onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-              className="w-full bg-white border border-gray-300 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
+              placeholder='Ask: "Live water Kerr, Kendall, Comal" or "500+ acres in Frio County"'
+              value={aiQuery || filters.search}
+              onChange={(e) => {
+                setAiQuery(e.target.value);
+                // Mirror to filters.search so plain-text fallback keeps
+                // working as the user types — the AI handler clears it
+                // when it takes over.
+                setFilters({ ...filters, search: e.target.value });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  askAi();
+                }
+              }}
+              disabled={askingAi}
+              className="w-full bg-white border border-gray-300 rounded-lg pl-9 pr-28 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all disabled:opacity-60"
             />
+            {/* Clear-input X — appears only when there's text. Resets
+                the query AND any active AI criteria (clean slate). */}
+            {(aiQuery || filters.search) && !askingAi && (
+              <button
+                type="button"
+                onClick={() => {
+                  setAiQuery('');
+                  setFilters((f) => ({ ...f, search: '' }));
+                  clearAiFilter();
+                }}
+                title="Clear search"
+                className="absolute right-[74px] top-1/2 -translate-y-1/2 p-1 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+              >
+                <X size={13} />
+              </button>
+            )}
+            {/* Ask button — primary action, anchored inside the input.
+                Loading state shows a spinner without changing button
+                width (avoids layout shift). */}
+            <button
+              type="button"
+              onClick={askAi}
+              disabled={askingAi || !(aiQuery || filters.search).trim()}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[12px] font-medium rounded-md transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
+            >
+              {askingAi ? (
+                <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              ) : (
+                <>
+                  <Sparkles size={11} />
+                  Ask
+                </>
+              )}
+            </button>
           </div>
 
           {/* Scope tabs */}
@@ -426,6 +578,93 @@ export default function VaultPage() {
           </div>
 
         </div>
+
+        {/* ─── AI filter chips row ─────────────────────────────────────
+            Renders one chip per active criterion from aiCriteria. Click
+            an X on any chip to remove just that criterion (table re-
+            filters live). "Clear all" wipes the whole AI filter. The
+            AI's parse message ("Searching for live water Kerr + Kendall
+            + Comal County") sits to the right as quiet gray text — a
+            human-readable receipt of what the AI heard. */}
+        {(aiCriteria || aiMessage) && (() => {
+          // Flatten aiCriteria into renderable chips. Arrays produce
+          // one chip per entry (each removable individually); scalars
+          // produce one chip (removable wipes the whole key).
+          const chips: Array<{ key: string; value?: any; label: string }> = [];
+          if (aiCriteria) {
+            if (Array.isArray(aiCriteria.counties)) {
+              for (const c of aiCriteria.counties) chips.push({ key: 'counties', value: c, label: c });
+            }
+            if (Array.isArray(aiCriteria.water)) {
+              for (const w of aiCriteria.water) chips.push({ key: 'water', value: w, label: `${w} water` });
+            }
+            if (Array.isArray(aiCriteria.irrigation)) {
+              for (const v of aiCriteria.irrigation) chips.push({ key: 'irrigation', value: v, label: `${v} irrigation` });
+            }
+            if (Array.isArray(aiCriteria.road_frontage)) {
+              for (const v of aiCriteria.road_frontage) chips.push({ key: 'road_frontage', value: v, label: `${v} road` });
+            }
+            if (Array.isArray(aiCriteria.dev_potential)) {
+              for (const v of aiCriteria.dev_potential) chips.push({ key: 'dev_potential', value: v, label: `${v} dev potential` });
+            }
+            if (Array.isArray(aiCriteria.best_use)) {
+              for (const v of aiCriteria.best_use) chips.push({ key: 'best_use', value: v, label: v });
+            }
+            if (Array.isArray(aiCriteria.keywords_in_description)) {
+              for (const v of aiCriteria.keywords_in_description) chips.push({ key: 'keywords_in_description', value: v, label: `"${v}"` });
+            }
+            if (aiCriteria.min_acres != null) chips.push({ key: 'min_acres', label: `≥ ${aiCriteria.min_acres.toLocaleString()} ac` });
+            if (aiCriteria.max_acres != null) chips.push({ key: 'max_acres', label: `≤ ${aiCriteria.max_acres.toLocaleString()} ac` });
+            if (aiCriteria.min_ppa != null) chips.push({ key: 'min_ppa', label: `≥ $${aiCriteria.min_ppa.toLocaleString()}/ac` });
+            if (aiCriteria.max_ppa != null) chips.push({ key: 'max_ppa', label: `≤ $${aiCriteria.max_ppa.toLocaleString()}/ac` });
+            if (aiCriteria.sold_after_date) chips.push({ key: 'sold_after_date', label: `sold after ${aiCriteria.sold_after_date}` });
+            if (aiCriteria.sold_before_date) chips.push({ key: 'sold_before_date', label: `sold before ${aiCriteria.sold_before_date}` });
+            if (aiCriteria.has_improvements === true) chips.push({ key: 'has_improvements', label: 'improved' });
+            if (aiCriteria.has_improvements === false) chips.push({ key: 'has_improvements', label: 'unimproved' });
+            if (aiCriteria.has_water_rights === true) chips.push({ key: 'has_water_rights', label: 'water rights' });
+            if (aiCriteria.has_water_rights === false) chips.push({ key: 'has_water_rights', label: 'no water rights' });
+          }
+          if (chips.length === 0 && !aiMessage) return null;
+          return (
+            <div className="flex items-center flex-wrap gap-2 mt-3">
+              {chips.length > 0 && (
+                <>
+                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
+                    Filtering by
+                  </span>
+                  {chips.map((chip, idx) => (
+                    <span
+                      key={`${chip.key}-${chip.value ?? idx}`}
+                      className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-[12px] font-medium text-emerald-800"
+                    >
+                      {chip.label}
+                      <button
+                        type="button"
+                        onClick={() => removeAiCriterion(chip.key, chip.value)}
+                        title={`Remove ${chip.label}`}
+                        className="p-0.5 rounded-full text-emerald-600 hover:bg-emerald-100 hover:text-emerald-900 transition-colors"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={clearAiFilter}
+                    className="text-[12px] font-medium text-gray-500 hover:text-gray-900 underline-offset-2 hover:underline transition-colors"
+                  >
+                    Clear all
+                  </button>
+                </>
+              )}
+              {aiMessage && (
+                <span className="text-[12px] text-gray-500 italic ml-auto">
+                  {aiMessage}
+                </span>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Filter panel */}
@@ -654,11 +893,73 @@ export default function VaultPage() {
              filtered to a single county — but the click-through still
              goes to the same comp.id and they remain one pin on the map. */
           (() => {
-            // Apply "Needs Location" filter first, then sort, then split
-            // compound counties.
+            // Filter pipeline: AI criteria → Needs-Location filter → sort → split counties.
+            //
+            // AI criteria are applied client-side here (not at the DB
+            // query) because they include multi-county / multi-water /
+            // range matching that's awkward to translate to a single
+            // Supabase query. The comp list is small enough (<1000)
+            // that client-side filtering is instant.
+            const splitCountiesLocal = (raw: any): string[] => String(raw ?? '')
+              .split(/\s+and\s+|\s*&\s*|\s*,\s*/i)
+              .map((s) => s.toLowerCase().replace(/\bcounty\b/g, '').trim())
+              .filter(Boolean);
+            const matchesCounty = (val: any, allowed: string[] | null | undefined) => {
+              if (!allowed || allowed.length === 0) return true;
+              if (val == null) return false;
+              const compCounties = splitCountiesLocal(val);
+              return allowed.some((a) => {
+                const norm = String(a).toLowerCase().replace(/\bcounty\b/g, '').trim();
+                return compCounties.includes(norm);
+              });
+            };
+            const aiFiltered = !aiCriteria ? comps : comps.filter((c) => {
+              if (!matchesCounty(c.county, aiCriteria.counties)) return false;
+              if (Array.isArray(aiCriteria.water) && aiCriteria.water.length > 0) {
+                if (!aiCriteria.water.includes(c.water)) return false;
+              }
+              if (Array.isArray(aiCriteria.irrigation) && aiCriteria.irrigation.length > 0) {
+                const v = (c as any).irrigation;
+                if (!v || !aiCriteria.irrigation.includes(v)) return false;
+              }
+              if (Array.isArray(aiCriteria.road_frontage) && aiCriteria.road_frontage.length > 0) {
+                if (!aiCriteria.road_frontage.includes(c.road_frontage)) return false;
+              }
+              if (Array.isArray(aiCriteria.dev_potential) && aiCriteria.dev_potential.length > 0) {
+                if (!aiCriteria.dev_potential.includes(c.dev_potential)) return false;
+              }
+              if (Array.isArray(aiCriteria.best_use) && aiCriteria.best_use.length > 0) {
+                const compUses = Array.isArray((c as any).best_use) ? (c as any).best_use : [];
+                if (!aiCriteria.best_use.some((u: string) => compUses.includes(u))) return false;
+              }
+              if (aiCriteria.has_improvements != null) {
+                if (Boolean(c.has_improvements) !== Boolean(aiCriteria.has_improvements)) return false;
+              }
+              if (aiCriteria.has_water_rights != null) {
+                if (Boolean((c as any).has_water_rights) !== Boolean(aiCriteria.has_water_rights)) return false;
+              }
+              if (aiCriteria.min_acres != null && (c.acres ?? 0) < aiCriteria.min_acres) return false;
+              if (aiCriteria.max_acres != null && (c.acres ?? 0) > aiCriteria.max_acres) return false;
+              const ppa = c.ppa_land_only || c.price_per_acre || 0;
+              if (aiCriteria.min_ppa != null && ppa < aiCriteria.min_ppa) return false;
+              if (aiCriteria.max_ppa != null && ppa > aiCriteria.max_ppa) return false;
+              if (aiCriteria.sold_after_date && c.sale_date) {
+                if (new Date(c.sale_date).getTime() < new Date(aiCriteria.sold_after_date).getTime()) return false;
+              }
+              if (aiCriteria.sold_before_date && c.sale_date) {
+                if (new Date(c.sale_date).getTime() > new Date(aiCriteria.sold_before_date).getTime()) return false;
+              }
+              if (Array.isArray(aiCriteria.keywords_in_description) && aiCriteria.keywords_in_description.length > 0) {
+                const desc = (c.description || '').toLowerCase();
+                if (!aiCriteria.keywords_in_description.some((k: string) => desc.includes(String(k).toLowerCase()))) return false;
+              }
+              return true;
+            });
+
+            // Apply "Needs Location" filter on top of AI filter.
             const filtered = needsLocationOnly
-              ? comps.filter((c) => c.latitude == null || c.longitude == null)
-              : comps;
+              ? aiFiltered.filter((c) => c.latitude == null || c.longitude == null)
+              : aiFiltered;
             // ─── Compute review-needed comps (separate from main list) ───
             // Sorted newest first (created_at desc) so the most recent
             // imports surface immediately for triage.
