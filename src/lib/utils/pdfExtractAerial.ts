@@ -117,6 +117,84 @@ export async function extractLargestAerial(
 }
 
 /**
+ * Per-page variant: returns the largest qualifying aerial for EACH page
+ * of the PDF, as an array of {page, dataUrl} entries. Pages with no
+ * qualifying image are omitted.
+ *
+ * Used by multi-comparable imports — when one PDF contains "LAND
+ * COMPARABLE 1" on page 1 + "LAND COMPARABLE 2" on page 2, each comp
+ * needs ITS OWN aerial. Caller maps comps to pages via the AI's source
+ * citations (which now include the page number) and picks the right
+ * aerial for each.
+ *
+ * @param file     The PDF File object
+ * @param opts     Optional cap on number of pages to scan (default 10).
+ *                 Higher than single-page extractLargestAerial since
+ *                 multi-comp documents tend to be longer.
+ */
+export async function extractLargestAerialPerPage(
+  file: File,
+  opts: { maxPages?: number } = {}
+): Promise<Array<{ page: number; dataUrl: string }>> {
+  const maxPages = opts.maxPages ?? 10;
+  const results: Array<{ page: number; dataUrl: string }> = [];
+
+  try {
+    const pdfjs = await getPdfjs();
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: buffer }).promise;
+    const pageCount = Math.min(pdf.numPages, maxPages);
+
+    for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+      let pageBest: { area: number; dataUrl: string } | null = null;
+      try {
+        const page = await pdf.getPage(pageNum);
+        const opList = await page.getOperatorList();
+        const PAINT_IMAGE = (pdfjs as any).OPS.paintImageXObject;
+        const PAINT_INLINE_IMAGE = (pdfjs as any).OPS.paintInlineImageXObject;
+
+        for (let i = 0; i < opList.fnArray.length; i++) {
+          const op = opList.fnArray[i];
+          if (op !== PAINT_IMAGE && op !== PAINT_INLINE_IMAGE) continue;
+          try {
+            let img: any = null;
+            if (op === PAINT_IMAGE) {
+              const name = opList.argsArray[i]?.[0];
+              if (typeof name !== 'string') continue;
+              img = await resolveObj(page, name);
+            } else {
+              img = opList.argsArray[i]?.[0];
+            }
+            if (!img) continue;
+            const w = img.width ?? img.bitmap?.width;
+            const h = img.height ?? img.bitmap?.height;
+            if (!w || !h) continue;
+            if (w < MIN_IMAGE_DIMENSION || h < MIN_IMAGE_DIMENSION) continue;
+            const dataUrl = await imageToDataUrl(img, w, h);
+            if (!dataUrl) continue;
+            const area = w * h;
+            if (!pageBest || area > pageBest.area) {
+              pageBest = { area, dataUrl };
+            }
+          } catch {
+            // Skip this image; try the next
+          }
+        }
+      } catch {
+        // Skip this page; try the next
+      }
+      if (pageBest) {
+        results.push({ page: pageNum, dataUrl: pageBest.dataUrl });
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  return results;
+}
+
+/**
  * Resolve a pdfjs object by name. pdfjs's objs.get is documented as taking
  * a callback when the object isn't yet ready, but after a successful
  * getOperatorList() the page's objects should be resolved. Try sync first,

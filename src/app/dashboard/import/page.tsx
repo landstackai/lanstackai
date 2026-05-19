@@ -7,7 +7,7 @@ import { ExtractedComp } from '@/types';
 import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangle, Clock, Check } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
-import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
+import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
@@ -716,12 +716,12 @@ export default function ImportPage() {
     text: string,
     fileContent?: string,
     images?: string[],
-    // Optional extracted aerial photo from the source PDF — passed through
-    // from the upload handler. When present, this is the actual aerial
-    // image extracted from the PDF's embedded XObjects (via pdfExtractAerial),
-    // NOT a rendered page snapshot. The verification card shows it directly
-    // on the LEFT side so the broker can compare against the matched parcel.
-    sourceAerial?: string | null,
+    // Optional aerial photo(s) extracted from the source PDF. For single-
+    // comp uploads, pass a string (the single best aerial). For multi-
+    // comp uploads (one PDF with multiple LAND COMPARABLE sections),
+    // pass the per-page array — caller uses each comp's citations to
+    // attribute the right aerial. NULL when no aerials were extracted.
+    sourceAerial?: string | null | Array<{ page: number; dataUrl: string }>,
   ) => {
     const userMessage: Message = {
       role: 'user',
@@ -750,15 +750,75 @@ export default function ImportPage() {
 
       const data = await response.json();
 
-      // Attach the source aerial to the extracted comp so the verification
-      // card can show it on the LEFT side (vs. the matched parcel on the
-      // RIGHT). `sourceAerial` is the actual aerial image extracted from
-      // the PDF's embedded XObjects — NOT a rendered page screenshot.
-      // Only attach when a single comp came back (multi-comp PDFs can't
-      // reliably attribute one image to one comp without per-page AI
-      // extraction; safer to leave aerialImage null and fall back to text).
-      if (sourceAerial && Array.isArray(data.comps) && data.comps.length === 1) {
-        (data.comps[0] as any).aerialImage = sourceAerial;
+      // Attach the source aerial(s) to the extracted comp(s) so the
+      // verification card can show them on the LEFT side (vs. the
+      // matched parcel on the RIGHT). Two cases:
+      //
+      // 1. Single-comp PDF — sourceAerial is a string. Attach directly.
+      // 2. Multi-comp PDF — sourceAerial is an array of {page, dataUrl}.
+      //    Use each comp's cite-the-source citations to find which page
+      //    that comp lives on, then attach that page's aerial.
+      //
+      // The page-attribution heuristic: count how many citations on each
+      // comp reference each page. The page with the most citations is
+      // that comp's primary page. Aerial from that page → that comp.
+      // Fallback: if no citation has a page number, attach the aerial
+      // at the same index as the comp (comp 1 → page 1's aerial).
+      if (sourceAerial && Array.isArray(data.comps) && data.comps.length > 0) {
+        if (typeof sourceAerial === 'string') {
+          // Single-comp case: attach the single best aerial. Only valid
+          // when exactly one comp came back — otherwise we'd attach the
+          // same aerial to all comps (wrong).
+          if (data.comps.length === 1) {
+            (data.comps[0] as any).aerialImage = sourceAerial;
+          }
+        } else if (Array.isArray(sourceAerial) && sourceAerial.length > 0) {
+          // Multi-comp case: attribute each aerial to a comp via
+          // citations or index fallback.
+          for (let i = 0; i < data.comps.length; i++) {
+            const c = data.comps[i];
+            // Gather all citation strings for this comp
+            const citations = [
+              c?.acres_source,
+              c?.sale_price_source,
+              c?.price_per_acre_source,
+              c?.ppa_land_only_source,
+            ].filter((x: any) => typeof x === 'string') as string[];
+            // Tally page references — match patterns like "page 2",
+            // "page N", or "p. 3"
+            const pageHits: Record<number, number> = {};
+            for (const cite of citations) {
+              // Array.from rather than for-of — tsconfig has no target set
+              // so RegExpStringIterator can't be spread/iterated directly.
+              const matches = Array.from(cite.matchAll(/\bpage\s+(\d+)|\bp\.\s*(\d+)/gi));
+              for (const m of matches) {
+                const pg = Number(m[1] ?? m[2]);
+                if (Number.isFinite(pg) && pg > 0) {
+                  pageHits[pg] = (pageHits[pg] || 0) + 1;
+                }
+              }
+            }
+            // Pick the page with the most citation references
+            let dominantPage: number | null = null;
+            let bestCount = 0;
+            for (const [pg, count] of Object.entries(pageHits)) {
+              if (count > bestCount) {
+                dominantPage = Number(pg);
+                bestCount = count;
+              }
+            }
+            // If no page found in citations, fall back to index (comp 0
+            // → first aerial, comp 1 → second aerial, etc.). Not perfect
+            // but better than nothing.
+            const aerial =
+              (dominantPage != null
+                ? sourceAerial.find((a) => a.page === dominantPage)
+                : null) || sourceAerial[i] || null;
+            if (aerial) {
+              (data.comps[i] as any).aerialImage = aerial.dataUrl;
+            }
+          }
+        }
       }
 
       // Browser-side auto-locate: server-side auto-locate fails inside Vercel
@@ -1394,13 +1454,25 @@ export default function ImportPage() {
         // Extract the largest embedded aerial in PARALLEL with page rendering
         // — both operations parse the PDF, but pdfjs caches the parse so the
         // second open is cheap, and the network/AI call is the dominant cost
-        // anyway. Aerial extraction returns null when no qualifying image
-        // exists (text-only PDFs, scanned-as-raster appraisals), in which
-        // case the verification card falls back to the text panel.
-        const [images, sourceAerial] = await Promise.all([
+        // anyway. Aerial extraction returns an array of per-page aerials
+        // (or [] when no qualifying images exist — text-only PDFs,
+        // scanned-as-raster appraisals). sendMessage handles both:
+        //   - Single-comp result → attaches the best aerial (largest)
+        //   - Multi-comp result → attributes each aerial to the comp
+        //     whose citations reference that page
+        const [images, sourceAerialPages] = await Promise.all([
           pdfToImages(file, { scale: 1.5, maxPages: 60 }),
-          extractLargestAerial(file).catch(() => null),
+          extractLargestAerialPerPage(file).catch(() => [] as Array<{ page: number; dataUrl: string }>),
         ]);
+        // Pass the per-page array if we have multiple aerials, OR the
+        // single best (largest) when only one page yielded an image —
+        // keeps the single-comp single-aerial fast path working.
+        const sourceAerial: string | null | Array<{ page: number; dataUrl: string }> =
+          sourceAerialPages.length === 0
+            ? null
+            : sourceAerialPages.length === 1
+              ? sourceAerialPages[0].dataUrl
+              : sourceAerialPages;
         toast.dismiss('pdf-render');
         if (images.length === 0) {
           toast.error('Could not render PDF');
