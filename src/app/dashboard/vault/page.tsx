@@ -279,19 +279,71 @@ export default function VaultPage() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-white">
-      {/* Header */}
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-3">
+    <div className="flex flex-col h-full bg-gray-50">
+      {/* ─── Header: page title + stats + actions ───────────────────────
+          Two-row design for visual hierarchy. Top row owns the page
+          identity (title, total count, primary CTAs). Second row is
+          the working surface (search, filters, view mode). Sticky on
+          scroll with a subtle shadow when not at top. */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 pt-5 pb-3 shadow-sm">
+        {/* Row 1 — title + key stats + primary actions */}
+        <div className="flex items-end justify-between gap-4 mb-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 tracking-tight leading-tight">
+              Comp Vault
+            </h1>
+            <div className="flex items-center gap-5 mt-1.5 text-sm">
+              <span className="text-gray-500">
+                <span className="font-bold text-gray-900 font-mono tabular-nums">{stats.total}</span>
+                {' '}comps
+              </span>
+              <span className="text-gray-300">·</span>
+              <span className="text-gray-500">
+                <span className="font-bold text-gray-900 font-mono tabular-nums">{stats.sold}</span>
+                {' '}sold
+              </span>
+              {stats.avgPPA > 0 && (
+                <>
+                  <span className="text-gray-300">·</span>
+                  <span className="text-gray-500">
+                    avg{' '}
+                    <span className="font-bold text-emerald-700 font-mono tabular-nums">
+                      {formatPPA(stats.avgPPA)}
+                    </span>
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowQuickCapture(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-colors shadow-sm"
+            >
+              <Plus size={14} />
+              Quick
+            </button>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold transition-colors shadow-sm"
+            >
+              <Plus size={14} />
+              Add Comp
+            </button>
+          </div>
+        </div>
+
+        {/* Row 2 — search + filter + view mode */}
         <div className="flex items-center gap-3">
           {/* Search */}
           <div className="relative flex-1 max-w-md">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              placeholder="Search comps..."
+              placeholder="Search by property name, address, or county…"
               value={filters.search}
               onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-              className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm text-gray-900 placeholder-slate-500 outline-none focus:border-sage transition-colors"
+              className="w-full bg-white border border-gray-300 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all"
             />
           </div>
 
@@ -341,37 +393,6 @@ export default function VaultPage() {
             </button>
           </div>
 
-          {/* Add buttons */}
-          <button
-            onClick={() => setShowQuickCapture(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold text-gray-700 hover:text-gray-900 transition-colors"
-          >
-            <Plus size={13} />
-            <span className="hidden md:inline">Quick</span>
-          </button>
-
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors"
-          >
-            <Plus size={13} />
-            <span className="hidden md:inline">Add Comp</span>
-          </button>
-        </div>
-
-        {/* Stats bar */}
-        <div className="flex items-center gap-4 mt-2">
-          <span className="text-xs text-gray-500">
-            <span className="text-gray-900 font-bold">{stats.total}</span> comps
-          </span>
-          <span className="text-xs text-gray-500">
-            <span className="text-gray-900 font-bold">{stats.sold}</span> sold
-          </span>
-          {stats.avgPPA > 0 && (
-            <span className="text-xs text-gray-500">
-              Avg <span className="text-sage font-bold font-mono">{formatPPA(stats.avgPPA)}</span>
-            </span>
-          )}
         </div>
       </div>
 
@@ -485,7 +506,7 @@ export default function VaultPage() {
       )}
 
       {/* Comp list */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <div className="w-6 h-6 border-2 border-sage border-t-transparent rounded-full animate-spin" />
@@ -619,17 +640,23 @@ export default function VaultPage() {
                     immediately. Click any row to open the per-comp
                     review page. */}
                 {reviewComps.length > 0 && (
-                  <div className="bg-white border border-gray-200 rounded-xl mb-3 overflow-hidden">
+                  <div className="bg-white border border-gray-200 rounded-xl mb-4 overflow-hidden shadow-sm relative">
+                    {/* Amber left-edge accent — semantic alert color. Same
+                        pattern as Stripe / Linear / Notion inline alerts. */}
+                    <div className="absolute left-0 top-0 bottom-0 w-1 bg-amber-500" />
                     <button
                       onClick={() => setNeedsReviewOpen((v) => !v)}
-                      className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-100 transition-colors"
+                      className="w-full flex items-center justify-between pl-5 pr-4 py-3.5 hover:bg-amber-50/50 transition-colors"
                       aria-expanded={needsReviewOpen}
                     >
-                      <div className="flex items-center gap-2">
-                        <AlertTriangle size={14} className="text-amber-400" />
-                        <span className="text-sm font-bold text-gray-900">
+                      <div className="flex items-center gap-2.5">
+                        <div className="flex items-center justify-center w-6 h-6 bg-amber-100 rounded-full">
+                          <AlertTriangle size={12} className="text-amber-700" />
+                        </div>
+                        <span className="text-sm font-semibold text-gray-900">
                           {reviewComps.length} {reviewComps.length === 1 ? 'property needs' : 'properties need'} review
                         </span>
+                        <span className="text-xs text-gray-500">— click any row to fix</span>
                       </div>
                       {needsReviewOpen ? <ChevronUp size={16} className="text-gray-600" /> : <ChevronDown size={16} className="text-gray-600" />}
                     </button>
@@ -672,10 +699,10 @@ export default function VaultPage() {
                   </div>
                 )}
 
-              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
                 <div className="overflow-x-auto">
                   <table className="w-full">
-                    <thead className="bg-white/40 border-b border-gray-200 sticky top-0 z-10">
+                    <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
                       <tr>
                         <SortHeader k="county" label="County" />
                         <SortHeader k="city" label="City" />
@@ -712,7 +739,7 @@ export default function VaultPage() {
                               setEditingComp(comp);
                               setShowAddModal(true);
                             }}
-                            className="border-b border-gray-200 last:border-b-0 hover:bg-sage/10 cursor-pointer group transition-colors"
+                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 cursor-pointer group transition-colors"
                           >
                             {/* County (with property name as subtext if set).
                                 Three possible badges, any combination:
@@ -731,8 +758,8 @@ export default function VaultPage() {
                                 Red sorts first because it's the most actionable:
                                 you literally cannot show this comp on a map
                                 until someone places it. */}
-                            <td className="py-2.5 px-3">
-                              <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
+                            <td className="py-3.5 px-3">
+                              <div className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
                                 {(comp.latitude == null || comp.longitude == null) && (
                                   <span
                                     title="No map location set. Open this comp to place a pin manually via the location picker."
@@ -781,36 +808,36 @@ export default function VaultPage() {
                               )}
                             </td>
                             {/* City */}
-                            <td className="py-2.5 px-3 text-sm text-gray-700">
-                              {city || <span className="text-gray-400">—</span>}
+                            <td className="py-3.5 px-3 text-sm text-gray-700">
+                              {city || <span className="text-gray-300">—</span>}
                               {comp.state && city && (
-                                <span className="text-[10px] text-gray-500 ml-1">{comp.state}</span>
+                                <span className="text-[10px] text-gray-400 ml-1">{comp.state}</span>
                               )}
                             </td>
                             {/* Acres */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-gray-900">
+                            <td className="py-3.5 px-3 text-right text-sm font-mono tabular-nums text-gray-900">
                               {formatAcres(comp.acres)}
                             </td>
                             {/* Total Price */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-gray-900 font-bold">
+                            <td className="py-3.5 px-3 text-right text-sm font-mono tabular-nums text-gray-900 font-bold">
                               {formatCurrency(comp.sale_price)}
                             </td>
                             {/* Total Per Acre — emerald */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-emerald-600 font-bold">
+                            <td className="py-3.5 px-3 text-right text-sm font-mono tabular-nums text-emerald-700 font-bold">
                               {totalPpa > 0 ? formatPPA(totalPpa) : '—'}
                             </td>
                             {/* Adjusted Per Acre — amber, or em-dash when no adjustment */}
-                            <td className={`py-2.5 px-3 text-right text-sm font-mono font-bold ${hasAdjustment ? 'text-amber-700' : 'text-gray-400'}`}>
+                            <td className={`py-3.5 px-3 text-right text-sm font-mono tabular-nums font-bold ${hasAdjustment ? 'text-amber-700' : 'text-gray-300'}`}>
                               {hasAdjustment ? formatPPA(adjustedPpa) : '—'}
                             </td>
-                            {/* Improved badge */}
-                            <td className="py-2.5 px-3 text-center">
+                            {/* Improved badge — Stripe/Linear pattern: subtle bg, bold text, rounded pill */}
+                            <td className="py-3.5 px-3 text-center">
                               {comp.has_improvements ? (
-                                <span className="inline-block text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded">
-                                  ✓
+                                <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded-full">
+                                  Improved
                                 </span>
                               ) : (
-                                <span className="text-slate-700">—</span>
+                                <span className="text-gray-300">—</span>
                               )}
                             </td>
                             {/* Hover actions */}
