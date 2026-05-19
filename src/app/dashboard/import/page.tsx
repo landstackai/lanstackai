@@ -12,6 +12,45 @@ import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
 
+// Build a patch object that updates an existing comp with newly-extracted
+// data WITHOUT overwriting fields the broker has already verified.
+//
+// Policy: only fill values where the existing comp has nothing (null,
+// empty string, or missing). Never overwrite existing data — the broker
+// may have manually corrected it, and a re-extraction could regress.
+//
+// Defining-the-duplicate fields (sale_price, sale_date, acres) are
+// explicitly excluded — if these differ, it's not a duplicate, and the
+// dedup detection would have caught it before this merge runs.
+function buildMergePatch(existing: any, fresh: any): Record<string, any> {
+  const patch: Record<string, any> = {};
+  // Fields that fill if existing is null/empty.
+  const fillIfEmpty: Array<[string, any]> = [
+    ['aerial_image', fresh.aerialImage ?? fresh.aerial_image],
+    ['latitude', fresh.latitude],
+    ['longitude', fresh.longitude],
+    ['parcel_id', fresh.parcel_id],
+    ['boundary_geojson', fresh.geometry ?? fresh.boundary_geojson],
+    ['description', fresh.description],
+    ['address', fresh.address],
+    ['property_name', fresh.property_name],
+    ['grantor', fresh.grantor],
+    ['grantee', fresh.grantee],
+    ['price_per_acre', fresh.price_per_acre],
+    ['ppa_land_only', fresh.ppa_land_only],
+    ['improvements_value', fresh.improvements_value],
+  ];
+  for (const [field, value] of fillIfEmpty) {
+    const existingVal = existing?.[field];
+    const isEmpty = existingVal == null || existingVal === '' ||
+      (typeof existingVal === 'string' && existingVal.trim() === '');
+    if (isEmpty && value != null && value !== '') {
+      patch[field] = value;
+    }
+  }
+  return patch;
+}
+
 // Browser-side auto-locate: uses our cached /api/parcels-by-owner endpoint
 // (which the browser CAN cache, unlike Vercel function-to-self calls).
 // Mirrors the server-side autoLocateFromMetadata logic but runs in the
@@ -1715,7 +1754,48 @@ export default function ImportPage() {
                                 );
                               })}
                             </ul>
-                            <div className="flex items-center gap-2 pt-1">
+                            <div className="flex items-center gap-2 pt-1 flex-wrap">
+                              {/* MERGE — fills missing fields on the existing
+                                  comp without overwriting anything the broker
+                                  has already verified. The high-leverage path
+                                  when you re-import an appraisal: existing
+                                  row picks up the aerial, parcel_ids,
+                                  description, coords, etc., and the duplicate
+                                  row is never created. */}
+                              <button
+                                onClick={async () => {
+                                  const existing = duplicates![0].comp;
+                                  const patch = buildMergePatch(existing, comp);
+                                  if (Object.keys(patch).length === 0) {
+                                    toast('Nothing to merge — existing comp already has all these fields', { icon: 'ℹ️', duration: 3500 });
+                                    return;
+                                  }
+                                  const { error } = await supabase
+                                    .from('comps')
+                                    .update(patch)
+                                    .eq('id', existing.id);
+                                  if (error) {
+                                    toast.error(`Merge failed: ${error.message}`);
+                                    return;
+                                  }
+                                  const fields = Object.keys(patch).length;
+                                  toast.success(`Merged ${fields} field${fields === 1 ? '' : 's'} into ${existing.property_name || 'existing comp'}`);
+                                  // Drop this comp from the import batch (same
+                                  // as Skip) — it's been merged, not saved as
+                                  // a new row.
+                                  setMessages((prev) => prev.map((mm, mi) => {
+                                    if (mi !== i || mm.role !== 'assistant' || !mm.comps) return mm;
+                                    return { ...mm, comps: mm.comps.filter((_, idx) => idx !== ci) };
+                                  }));
+                                  setPendingComps((prev) =>
+                                    prev.filter((p) => p !== comp)
+                                  );
+                                }}
+                                className="px-2.5 py-1 bg-sage/20 hover:bg-sage/30 border border-sage/40 rounded text-[10px] font-bold text-sage transition-colors"
+                                title="Update the existing comp with any new info from this extraction (aerial, parcels, description) — only fills in missing fields, never overwrites"
+                              >
+                                Merge into existing
+                              </button>
                               <button
                                 onClick={() => {
                                   // Remove this comp from the message's comps array
