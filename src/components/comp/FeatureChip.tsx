@@ -2,40 +2,94 @@
 
 /**
  * FeatureChip — displays a categorical comp attribute (water, road, dev,
- * minerals) as a small labeled box. When `strong` is true the chip is
- * "lit up" with emerald accents to signal a value-driving feature; when
- * the value is missing/None it renders muted so the eye skips it.
+ * minerals, irrigation) as a small labeled box. When `strong` is true the
+ * chip "lights up"; when the value is None/missing it renders muted.
  *
- * Visual language matches the Mid-row highlight in the averages tables.
+ * Strong-state color coding by attribute (semantic palette):
+ *   water       → sky blue     (water = blue, universal)
+ *   dev         → purple        (development = future, growth)
+ *   road        → olive        (earthen — paths/roads default)
+ *   irrigation  → olive        (agricultural)
+ *   minerals    → olive        (resource — default)
+ *
+ * Distinct colors give the right-panel grid visual variety without
+ * randomness — every color carries semantic meaning. Falls back to olive
+ * when no attr is passed (backwards-compatible).
  */
+type AttrKey = 'water' | 'road' | 'dev' | 'irrigation' | 'minerals';
+
 type FeatureChipProps = {
   label: string;
   value: string | null | undefined;
   strong?: boolean;
+  attr?: AttrKey;
 };
 
-export function FeatureChip({ label, value, strong = false }: FeatureChipProps) {
+// Strong-state palettes per attribute. Each token group has bg / border /
+// label-text / value-text variants tuned for the cream surface.
+const STRONG_PALETTE: Record<AttrKey, {
+  bg: string;
+  border: string;
+  label: string;
+  value: string;
+}> = {
+  water: {
+    bg: 'bg-sky-50',
+    border: 'border-sky-200',
+    label: 'text-sky-700/80',
+    value: 'text-sky-700',
+  },
+  dev: {
+    bg: 'bg-purple-50',
+    border: 'border-purple-200',
+    label: 'text-purple-700/80',
+    value: 'text-purple-700',
+  },
+  road: {
+    bg: 'bg-olive-tint',
+    border: 'border-olive-border',
+    label: 'text-olive-2/80',
+    value: 'text-olive-2',
+  },
+  irrigation: {
+    bg: 'bg-olive-tint',
+    border: 'border-olive-border',
+    label: 'text-olive-2/80',
+    value: 'text-olive-2',
+  },
+  minerals: {
+    bg: 'bg-olive-tint',
+    border: 'border-olive-border',
+    label: 'text-olive-2/80',
+    value: 'text-olive-2',
+  },
+};
+
+const DEFAULT_STRONG = STRONG_PALETTE.road;
+
+export function FeatureChip({ label, value, strong = false, attr }: FeatureChipProps) {
   const trimmed = (value ?? '').trim();
   const displayValue = trimmed.length > 0 ? trimmed : 'None';
   // "Empty" state for grey-out: literally none, or no value at all.
   const isEmpty = trimmed.length === 0 || trimmed.toLowerCase() === 'none' || trimmed.toLowerCase() === 'n/a';
+  const palette = attr ? STRONG_PALETTE[attr] : DEFAULT_STRONG;
 
   return (
     <div
       className={`rounded-lg p-2 border transition-colors ${
-        strong ? 'bg-olive-tint border-olive-border' : 'bg-cream border-beige'
+        strong ? `${palette.bg} ${palette.border}` : 'bg-cream border-beige'
       }`}
     >
       <p
         className={`text-[9px] font-bold uppercase tracking-wider ${
-          strong ? 'text-olive-2/80' : 'text-ink-3'
+          strong ? palette.label : 'text-ink-3'
         }`}
       >
         {label}
       </p>
       <p
         className={`text-xs font-bold mt-0.5 ${
-          strong ? 'text-olive-2' : isEmpty ? 'text-ink-3' : 'text-ink'
+          strong ? palette.value : isEmpty ? 'text-ink-3' : 'text-ink'
         }`}
       >
         {displayValue}

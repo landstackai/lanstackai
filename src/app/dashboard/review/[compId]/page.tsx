@@ -1955,7 +1955,10 @@ export default function ReviewPage() {
                 <button
                   onClick={handleFindListing}
                   disabled={findingListing}
-                  className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  // iMessage blue — matches the same "Find listing online"
+                  // button on the map page side panel. AI search action =
+                  // blue across surfaces.
+                  className="w-full py-2 bg-imsg hover:bg-imsg-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shadow-sm"
                   title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
                 >
                   {findingListing ? (

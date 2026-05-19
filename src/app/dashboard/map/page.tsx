@@ -4632,8 +4632,13 @@ export default function MapPage() {
           Math.abs(acresInDesc - savedAcres) > 0.5;
 
         const conf = selectedComp.confidence;
+        // Verified gets the slate-blue treatment — same color the vault uses
+        // for its "Improved" badge. Universal "trust + status" affordance:
+        // slate-blue means "this has been confirmed." Distinct from olive
+        // (creation/state) and iMessage blue (chat send) so each color
+        // carries one meaning.
         const confStyle =
-          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-olive-2', ring: 'border-olive-border bg-olive-tint' }
+          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-slate-blue-2', ring: 'border-slate-blue/30 bg-slate-blue/10' }
           : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-600', ring: 'border-amber-400/30 bg-amber-50' }
           : { Icon: ShieldQuestion, color: 'text-ink-2', ring: 'border-beige bg-cream' };
 
@@ -4659,7 +4664,10 @@ export default function MapPage() {
                 <span className={`text-[10px] font-bold uppercase tracking-wider ${confStyle.color}`}>{conf}</span>
               </div>
               {selectedComp.has_improvements && (
-                <span className="text-[10px] font-bold px-2 py-1 bg-olive-tint border border-olive-border text-olive rounded-md uppercase tracking-wider">
+                // Improved badge = slate-blue. Matches the vault table's
+                // Improved pill so the broker learns "blue badge = building
+                // value on the land" across every surface.
+                <span className="text-[10px] font-bold px-2 py-1 bg-slate-blue/10 border border-slate-blue/30 text-slate-blue-2 rounded-md uppercase tracking-wider">
                   Improved
                 </span>
               )}
@@ -4669,8 +4677,10 @@ export default function MapPage() {
                 </span>
               )}
               {selectedComp.improvement_source === 'agent_verified' && (
+                // Agent-Verified = darker slate-blue (verification chain).
+                // Reinforces that blue across the panel = "trust / status".
                 <span
-                  className="text-[10px] font-bold px-2 py-1 bg-olive-tint border border-olive-border text-olive-2 rounded-md uppercase tracking-wider"
+                  className="text-[10px] font-bold px-2 py-1 bg-slate-blue/15 border border-slate-blue/40 text-slate-blue-2 rounded-md uppercase tracking-wider"
                   title="An agent involved in this transaction verified the improvement value."
                 >
                   Agent-Verified
@@ -4938,7 +4948,13 @@ export default function MapPage() {
                   <button
                     onClick={handleFindListing}
                     disabled={findingListing}
-                    className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    // iMessage blue — "Find listing online" is an AI search
+                    // action (sends the comp to the AI to hunt for a
+                    // matching public listing). Same family as the Ask
+                    // button: blue = "send to AI." Makes the right panel's
+                    // primary action visually distinct from the olive +
+                    // slate-blue surrounding chrome.
+                    className="w-full py-2 bg-imsg hover:bg-imsg-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shadow-sm"
                     title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
                   >
                     {findingListing ? (
@@ -4971,10 +4987,15 @@ export default function MapPage() {
               const irrigationVal = (selectedComp as any).irrigation as string | null;
               return (
                 <div className="grid grid-cols-2 gap-2">
-                  <FeatureChip label="Water" value={selectedComp.water} strong={isStrongFeature('water', selectedComp.water)} />
-                  <FeatureChip label="Road" value={selectedComp.road_frontage} strong={isStrongFeature('road', selectedComp.road_frontage)} />
-                  <FeatureChip label="Dev" value={selectedComp.dev_potential} strong={isStrongFeature('dev', selectedComp.dev_potential)} />
-                  <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
+                  {/* Strong-state palette per attr: water→sky, dev→purple,
+                      road/irrigation→olive. Adds tasteful color variety to
+                      the right panel without becoming a rainbow. Each color
+                      carries semantic meaning (water=blue universal, dev=
+                      purple for "growth/future"). */}
+                  <FeatureChip label="Water" value={selectedComp.water} strong={isStrongFeature('water', selectedComp.water)} attr="water" />
+                  <FeatureChip label="Road" value={selectedComp.road_frontage} strong={isStrongFeature('road', selectedComp.road_frontage)} attr="road" />
+                  <FeatureChip label="Dev" value={selectedComp.dev_potential} strong={isStrongFeature('dev', selectedComp.dev_potential)} attr="dev" />
+                  <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} attr="irrigation" />
                 </div>
               );
             })()}
