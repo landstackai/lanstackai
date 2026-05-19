@@ -11,6 +11,7 @@ import { extractLargestAerial } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
+import { TieredLoadingMessage } from '@/components/TieredLoadingMessage';
 
 // Build a patch object that updates an existing comp with newly-extracted
 // data WITHOUT overwriting fields the broker has already verified.
@@ -680,6 +681,13 @@ export default function ImportPage() {
   }]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  // Optional specific status to surface during long-running AI ops.
+  // Caller sets this when entering each phase ("Reading PDF…", "Auto-
+  // locating parcels…", "Checking for duplicates…") so the tiered
+  // loading message can show what's actually happening in real time.
+  // Leave null when there's nothing specific worth surfacing — the
+  // brand voice line carries the wait on its own.
+  const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
   const [pendingComps, setPendingComps] = useState<ExtractedComp[]>([]);
   // Drag-and-drop state. Counter handles nested drag enter/leave events
   // (which fire for every child element the cursor crosses).
@@ -724,6 +732,7 @@ export default function ImportPage() {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setLoading(true);
+    setLoadingStatus('Reading the document…');
 
     try {
       const response = await fetch('/api/import-chat', {
@@ -759,6 +768,9 @@ export default function ImportPage() {
       // SKIP when the AI already extracted explicit coords (from a "Geographic
       // Location" field in the doc). Those are authoritative — running browser
       // auto-locate on top could replace them with a less-precise match.
+      if (Array.isArray(data.comps) && data.comps.length > 0) {
+        setLoadingStatus(`Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`);
+      }
       if (Array.isArray(data.comps)) {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
@@ -803,6 +815,9 @@ export default function ImportPage() {
       // Targeted query (not "fetch all comps") so this scales — a broker
       // with 1000 comps only fetches the handful that share the exact
       // date + price, then fuzzy-matches the parties client-side.
+      if (Array.isArray(data.comps) && data.comps.length > 0) {
+        setLoadingStatus('Checking your vault for duplicates…');
+      }
       if (Array.isArray(data.comps)) {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
@@ -842,6 +857,7 @@ export default function ImportPage() {
       toast.error('Failed to process message');
     } finally {
       setLoading(false);
+      setLoadingStatus(null);
     }
   };
 
@@ -1996,16 +2012,12 @@ export default function ImportPage() {
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-card border border-border rounded-2xl px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-4 rounded bg-sage/20 flex items-center justify-center">
+              <div className="bg-card border border-border rounded-2xl px-4 py-3 max-w-[80%]">
+                <div className="flex items-start gap-3">
+                  <div className="w-5 h-5 rounded bg-sage/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                     <span className="text-sage text-[8px] font-bold">AI</span>
                   </div>
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-1.5 h-1.5 bg-sage rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  </div>
+                  <TieredLoadingMessage status={loadingStatus} />
                 </div>
               </div>
             </div>
