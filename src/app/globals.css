@@ -55,67 +55,94 @@ html, body {
   font-family: 'Syne', sans-serif;
 }
 
+/* Default popup style — branded warm dark with frosted blur. Floats
+   over the satellite map; dark+blur reads cleanly against the busy
+   imagery and looks Apple Maps-modern. Light theme = content surfaces
+   (the right panel etc.); dark theme = chrome that floats. */
 .mapboxgl-popup-content {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: rgba(26, 24, 21, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(58, 52, 46, 0.6);
   border-radius: 10px;
   padding: 0;
-  color: var(--text);
+  color: #F5F1E8;
   font-family: 'Syne', sans-serif;
-  box-shadow: 0 8px 32px rgba(31, 31, 28, 0.12);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .mapboxgl-popup-tip {
-  border-top-color: var(--panel) !important;
-  border-bottom-color: var(--panel) !important;
+  border-top-color: rgba(26, 24, 21, 0.92) !important;
+  border-bottom-color: rgba(26, 24, 21, 0.92) !important;
 }
 
-/* Comp hover preview — white card on cream map UI. Soft shadow instead
-   of the old heavy dark shadow (light theme — pops via subtle elevation,
-   not contrast against a dark surface). */
+/* Comp hover preview — branded warm dark with frosted glass blur over
+   the satellite map. Same surface system as the sidebar nav + floating
+   map buttons (chrome/overlay surfaces). */
 .comp-hover-popup .mapboxgl-popup-content {
-  background: var(--panel) !important;
-  border: 1px solid var(--border) !important;
+  background: rgba(26, 24, 21, 0.92) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  border: 1px solid rgba(58, 52, 46, 0.7) !important;
   border-radius: 10px !important;
   padding: 0 !important;
-  color: var(--text) !important;
-  box-shadow: 0 8px 32px rgba(31, 31, 28, 0.14) !important;
+  color: #F5F1E8 !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.25) !important;
 }
 .comp-hover-popup .mapboxgl-popup-tip {
-  border-top-color: var(--panel) !important;
-  border-bottom-color: var(--panel) !important;
-  border-left-color: var(--panel) !important;
-  border-right-color: var(--panel) !important;
+  border-top-color: rgba(26, 24, 21, 0.92) !important;
+  border-bottom-color: rgba(26, 24, 21, 0.92) !important;
+  border-left-color: rgba(26, 24, 21, 0.92) !important;
+  border-right-color: rgba(26, 24, 21, 0.92) !important;
 }
 
-/* Parcel hover tooltip on the review page — tight one-line label.
-   White on cream, subtle border + shadow. */
+/* Parcel hover tooltip — tight one-line label. Same warm dark + blur
+   for consistency with the comp popup, but more compact. */
 .parcel-hover-popup .mapboxgl-popup-content {
-  background: rgba(255, 255, 255, 0.97) !important;
-  border: 1px solid var(--border) !important;
+  background: rgba(26, 24, 21, 0.94) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+  border: 1px solid rgba(58, 52, 46, 0.7) !important;
   border-radius: 6px !important;
   padding: 6px 10px !important;
-  color: var(--text) !important;
+  color: #F5F1E8 !important;
   font-size: 11px !important;
   line-height: 1.35 !important;
-  box-shadow: 0 4px 16px rgba(31, 31, 28, 0.14) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35) !important;
   pointer-events: none;
 }
 .parcel-hover-popup .mapboxgl-popup-tip { display: none !important; }
 
+/* Mapbox zoom controls — branded warm dark to match floating map chrome
+   (sidebar, popups, button pills). Frosted blur over the satellite. */
 .mapboxgl-ctrl-group {
-  background: var(--panel) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 8px !important;
+  background: rgba(26, 24, 21, 0.85) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(58, 52, 46, 0.7) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25) !important;
+  overflow: hidden;
 }
 
 .mapboxgl-ctrl-group button {
   background: transparent !important;
-  color: var(--text2) !important;
+  color: #A8A296 !important;
 }
 
 .mapboxgl-ctrl-group button:hover {
-  background: rgba(255,255,255,0.05) !important;
+  background: rgba(245, 241, 232, 0.08) !important;
+  color: #F5F1E8 !important;
+}
+
+.mapboxgl-ctrl-group button + button {
+  border-top: 1px solid rgba(58, 52, 46, 0.5) !important;
+}
+
+/* Mapbox built-in icons (zoom +/-, compass) are SVGs that inherit
+   `currentColor`. Invert their stroke for the dark surface. */
+.mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
+  filter: invert(0.85) brightness(1.1);
 }
 
 @keyframes pulse {

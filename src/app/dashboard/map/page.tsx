@@ -2850,39 +2850,43 @@ export default function MapPage() {
       const isStrongIrrigation = (comp as any).irrigation === 'Strong';
       const isAgentVerified = comp.improvement_source === 'agent_verified';
       const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
-      // Light-theme popup badges. IMPROVED + IRRIGATION = slate-blue (the
-      // "status/trust" color used across the app). ADJ + Agent-Verified
-      // use amber + slate-blue respectively. Restrained — three colors
-      // total in this popup: ink, olive, slate-blue.
+      // Branded warm dark popup — floats over satellite map with frosted
+      // blur (CSS in globals.css). Accent colors use their "light"
+      // variants so they glow against the warm dark surface:
+      //   olive-light  (#A8B57A) for the headline $/Ac
+      //   amber-warm   (#E8B872) for the adjusted delta
+      //   slate-blue-light (#7B9FCE) for status badges
+      //   cream-1 (#F5F1E8)        primary text
+      //   cream-2-text (#A8A296)   muted labels
       const bluePill = (label: string) =>
-        `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.10);color:#3A5A8A;border:1px solid rgba(74,111,165,0.22);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+        `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.15);color:#7B9FCE;border:1px solid rgba(123,159,206,0.35);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
       const improvedBadge = isImproved ? bluePill('IMPROVED') : '';
       const irrigationBadge = isStrongIrrigation ? bluePill('IRRIGATION') : '';
       const adjBadge = hasAdjustment
-        ? `<span style="font-size:9px;color:#92400E;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+        ? `<span style="font-size:9px;color:#E8B872;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
         : '';
       const agentBadge = isAgentVerified
-        ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.12);color:#3A5A8A;border:1px solid rgba(74,111,165,0.28);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+        ? `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.18);color:#7B9FCE;border:1px solid rgba(123,159,206,0.40);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
         : '';
-      const adjustedColor = hasAdjustment ? '#92400E' : 'rgba(146,64,14,0.45)';
+      const adjustedColor = hasAdjustment ? '#E8B872' : 'rgba(232,184,114,0.45)';
       const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
       const popupHtml = `
         <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-            <span style="font-weight:700;font-size:12px;color:#1F1F1C;letter-spacing:-0.01em;">${propertyName}</span>
+            <span style="font-weight:600;font-size:12px;color:#F5F1E8;letter-spacing:-0.01em;">${propertyName}</span>
             ${improvedBadge}
             ${irrigationBadge}
             ${adjBadge}
             ${agentBadge}
           </div>
           <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
-            <div style="color:#9C9A8F;">Acres</div>
-            <div style="color:#9C9A8F;">Total</div>
-            <div style="color:#9C9A8F;">Total $/Ac</div>
-            <div style="color:#9C9A8F;">Adjusted $/Ac</div>
-            <div style="color:#1F1F1C;font-weight:700;">${formatAcres(comp.acres)}</div>
-            <div style="color:#1F1F1C;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
-            <div style="color:#5C6B33;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+            <div style="color:#A8A296;">Acres</div>
+            <div style="color:#A8A296;">Total</div>
+            <div style="color:#A8A296;">Total $/Ac</div>
+            <div style="color:#A8A296;">Adjusted $/Ac</div>
+            <div style="color:#F5F1E8;font-weight:700;">${formatAcres(comp.acres)}</div>
+            <div style="color:#F5F1E8;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+            <div style="color:#A8B57A;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
             <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
           </div>
         </div>
@@ -3197,10 +3201,12 @@ export default function MapPage() {
         )}
 
         {/* Search bar — single input that drives the AI search (filter +
-            location + place). Owner search and scope filter live in the
-            advanced-filters popover opened by the sliders button to the
-            right of the input. Consolidates what used to be two stacked
-            bars into one row of map chrome. */}
+            location + place). Matched to the vault's search bar exactly
+            (per broker request): solid white background, beige-2 border,
+            olive sparkle on the left, iMessage-blue Ask button on the
+            right. Floating shadow keeps it elevated over the satellite.
+            Filters button is integrated inline (the map has a popover
+            anchored to it, which doesn't exist on the vault).  */}
         <div className="absolute top-3 left-3 right-3 md:left-1/2 md:right-auto md:-translate-x-1/2 md:w-[36rem] z-20">
           <div className="relative">
             <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-olive pointer-events-none" />
@@ -3217,53 +3223,47 @@ export default function MapPage() {
                 }
               }}
               placeholder="Ask: show me all 400+ acre comps in Real County"
-              className="w-full bg-white/95 backdrop-blur-sm border border-beige focus:border-olive rounded-xl pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:ring-1 focus:ring-olive/30 transition-colors shadow-lg"
+              className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10"
             />
             {searchQuery && (
               <button
                 onClick={() => { setSearchQuery(''); clearAiSearch(); }}
                 title="Clear"
-                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink"
+                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink p-1"
               >
                 <X size={12} />
               </button>
             )}
-            {/* Filters button — opens the advanced-filter popover. Highlights
-                gold when any filter inside is active (owner search has
-                results, OR scope ≠ All) so brokers see at a glance that
-                they have a non-default filter on. */}
+            {/* Filters button — opens the advanced-filter popover. Sits
+                INSIDE the search bar (the map's popover is anchored to
+                this button). When any filter is active, olive-tint
+                indicates the non-default state. */}
             <button
               onClick={() => setFiltersOpen((v) => !v)}
               title="Advanced filters"
               aria-expanded={filtersOpen}
-              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-lg text-[11px] font-bold transition-colors flex items-center gap-1 ${
+              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-md text-[11px] font-semibold transition-colors flex items-center gap-1 ${
                 ownerSearchCount !== null || mapScope !== 'all' || countyFilter.size > 0
-                  ? 'bg-olive-tint hover:bg-olive-tint border-olive-border text-olive-2'
-                  : 'bg-cream hover:bg-cream-2 border-beige text-ink-2 hover:text-ink'
+                  ? 'bg-olive-tint border-olive-border text-olive-2'
+                  : 'bg-cream border-beige text-ink-2 hover:text-ink hover:border-beige-2'
               }`}
             >
               <SlidersHorizontal size={11} />
               Filters
             </button>
-            {/* iMessage-blue "Ask" send button. Same color as the vault's
-                Ask button — both surfaces are conversational ("ask me
-                something"), so they share the universal iOS chat blue.
-                Brokers don't have to learn what color = chat; their
-                phones have already taught them. The purple sparkle on
-                the left and purple result message below stay — they
-                signal "AI parsing", which is distinct from the send
-                action. Color split = action vs system. */}
+            {/* iMessage-blue "Ask" send button — identical to the vault's
+                Ask button. Universal "send a chat message" affordance. */}
             <button
               onClick={askAi}
               disabled={askingAi || !searchQuery.trim()}
               title="Ask AI"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-[11px] font-semibold text-white transition-colors flex items-center gap-1 shadow-sm"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed rounded-md text-[12px] font-medium text-white transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
             >
               <Sparkles size={11} />
               {askingAi ? '…' : 'Ask'}
             </button>
             {aiResultMessage && (
-              <div className="absolute top-full mt-1 left-0 right-0 bg-olive-tint backdrop-blur-sm border border-olive-border rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+              <div className="absolute top-full mt-1 left-0 right-0 bg-white border border-beige-2 rounded-lg px-3 py-2 flex items-center justify-between gap-2 shadow-md shadow-black/10">
                 <p className="text-[11px] text-ink-2 truncate">{aiResultMessage}</p>
                 <button
                   onClick={clearAiSearch}
@@ -3275,20 +3275,20 @@ export default function MapPage() {
               </div>
             )}
             {/* Owner-search result chip — lives below the bar same as the
-                AI result chip. Distinct fuchsia tint so brokers can tell
-                which kind of filter is active when both happen to be set. */}
+                AI result chip. Slate-blue tint distinguishes it from
+                the AI result chip (olive) while staying in our palette. */}
             {ownerSearchCount !== null && (
-              <div className={`absolute left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2 ${
+              <div className={`absolute left-0 right-0 bg-slate-blue/10 backdrop-blur-sm border border-slate-blue/30 rounded-lg px-3 py-2 flex items-center justify-between gap-2 shadow-md shadow-black/10 ${
                 aiResultMessage ? 'top-[calc(100%+2.5rem)]' : 'top-full mt-1'
               }`}>
-                <p className="text-[11px] text-fuchsia-200 truncate">
+                <p className="text-[11px] text-slate-blue-2 truncate">
                   {ownerSearchCount === 0
                     ? `No owner matches for "${ownerSearchQuery}"`
                     : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched "${ownerSearchQuery}"${ownerSearchTruncated ? ' (first 200)' : ''}`}
                 </p>
                 <button
                   onClick={clearOwnerSearch}
-                  className="text-fuchsia-300/80 hover:text-fuchsia-200 flex-shrink-0"
+                  className="text-slate-blue hover:text-slate-blue-2 flex-shrink-0"
                   title="Clear owner search"
                 >
                   <X size={12} />
@@ -3478,13 +3478,15 @@ export default function MapPage() {
 
         {/* Map controls */}
         <div className="absolute top-16 left-3 z-10 flex flex-col gap-2">
-          {/* Style switcher — Satellite (aerial only) vs Terrain (aerial
-              + contour line overlay). Dark removed per broker feedback. */}
-          <div className="bg-white/90 backdrop-blur-sm border border-beige rounded-xl overflow-hidden flex">
+          {/* Style switcher — branded warm dark with frosted blur. All
+              floating chrome over the satellite map shares this surface
+              treatment (same as sidebar + popups). Olive-light glows for
+              active state. */}
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden flex shadow-lg shadow-black/20">
             {(['satellite', 'terrain'] as const).map(s => (
               <button key={s} onClick={() => changeStyle(s)}
-                className={`px-3 py-2 text-xs font-bold capitalize transition-colors ${
-                  mapStyle === s ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
+                className={`px-3 py-2 text-xs font-semibold capitalize transition-colors ${
+                  mapStyle === s ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
                 }`}
                 title={s === 'terrain' ? 'Satellite imagery with contour lines' : 'Satellite imagery'}
               >{s}</button>
@@ -3492,11 +3494,11 @@ export default function MapPage() {
           </div>
 
           {/* Pin label toggle — $/Ac vs Total Price */}
-          <div className="bg-white/90 backdrop-blur-sm border border-beige rounded-xl overflow-hidden grid grid-cols-2 w-[10rem]">
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden grid grid-cols-2 w-[10rem] shadow-lg shadow-black/20">
             <button
               onClick={() => setPinLabelMode('ppa')}
-              className={`py-2 text-xs font-bold transition-colors text-center ${
-                pinLabelMode === 'ppa' ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
+              className={`py-2 text-xs font-semibold transition-colors text-center ${
+                pinLabelMode === 'ppa' ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title="Show price per acre on pins"
             >
@@ -3504,8 +3506,8 @@ export default function MapPage() {
             </button>
             <button
               onClick={() => setPinLabelMode('total')}
-              className={`py-2 text-xs font-bold transition-colors text-center ${
-                pinLabelMode === 'total' ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
+              className={`py-2 text-xs font-semibold transition-colors text-center ${
+                pinLabelMode === 'total' ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title="Show total sale price on pins"
             >
@@ -3513,15 +3515,12 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Flood toggle — FEMA NFHL hazard zones. Counties always
-              render as structural reference (no toggle). Standalone pill
-              now that Counties was removed; visually matches the other
-              control pills in this column. */}
-          <div className="bg-white/90 backdrop-blur-sm border border-beige rounded-xl overflow-hidden w-[10rem]">
+          {/* Flood toggle */}
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden w-[10rem] shadow-lg shadow-black/20">
             <button
               onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
-              className={`w-full py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
-                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-ink-2 hover:text-ink'
+              className={`w-full py-2 px-2 text-xs font-semibold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
               aria-pressed={overlays.floodplain}
@@ -3556,7 +3555,7 @@ export default function MapPage() {
                 setTappedParcel(null);
                 toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
               }}
-              className="bg-white/90 backdrop-blur-sm border border-beige hover:border-olive rounded-xl px-3 py-2 text-xs font-bold text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <MousePointer size={12} />
               Select Parcels
@@ -3564,7 +3563,7 @@ export default function MapPage() {
           )}
 
           {mapMode === 'parcel_select' && (
-            <div className={`${settingSubjectForCma ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-300' : 'bg-olive-tint border-olive-border text-olive-2'} border rounded-xl px-3 py-2 text-xs font-bold flex items-center gap-1.5`}>
+            <div className={`${settingSubjectForCma ? 'bg-amber-warm/15 border-amber-warm/40 text-amber-warm' : 'bg-olive-light/15 border-olive-light/40 text-olive-light'} backdrop-blur-md border rounded-xl px-3 py-2 text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-black/20`}>
               <MousePointer size={12} />
               {settingSubjectForCma
                 ? `Mapping subject for "${viewingCMA?.subject_name || 'CMA'}"`
@@ -3578,7 +3577,7 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && (
             <button
               onClick={startDrawing}
-              className="bg-white/90 backdrop-blur-sm border border-beige hover:border-olive rounded-xl px-3 py-2 text-xs font-bold text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <Pencil size={12} />
               Draw Boundary
@@ -3587,28 +3586,28 @@ export default function MapPage() {
 
           {drawingActive && (
             <div className="flex gap-1.5 items-stretch">
-              <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-2.5">
-                <Pencil size={14} className="text-amber-700 shrink-0" />
+              <div className="bg-ink-deep/85 backdrop-blur-md border border-amber-warm/40 rounded-xl px-3 py-2 flex items-center gap-2.5 shadow-lg shadow-black/20">
+                <Pencil size={14} className="text-amber-warm shrink-0" />
                 <div className="flex flex-col leading-tight">
-                  <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">
+                  <span className="text-[10px] font-semibold text-amber-warm uppercase tracking-wider">
                     {drawVertexCount === 0
                       ? 'Click the first corner of the property'
                       : drawVertexCount < 3
                       ? `Keep clicking corners (${drawVertexCount} placed, need at least 3)`
                       : `${drawVertexCount} corners placed — click Finish or double-click to close`}
                   </span>
-                  <span className="text-[9px] text-amber-700/70">
-                    Press <kbd className="font-mono px-0.5 bg-amber-100 rounded">Backspace</kbd> to remove last corner
+                  <span className="text-[9px] text-cream-2-text">
+                    Press <kbd className="font-mono px-0.5 bg-ink-elev text-cream-1 rounded">Backspace</kbd> to remove last corner
                   </span>
                 </div>
               </div>
               <button
                 onClick={finishDrawing}
                 disabled={drawVertexCount < 3}
-                className={`rounded-xl px-3 py-2 text-xs font-bold transition-colors flex items-center gap-1.5 border ${
+                className={`backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold transition-colors flex items-center gap-1.5 border shadow-lg shadow-black/20 ${
                   drawVertexCount >= 3
-                    ? 'bg-olive-tint border-olive-border text-olive-2 hover:bg-olive-tint hover:border-olive cursor-pointer'
-                    : 'bg-white/40 border-beige/40 text-ink-3 cursor-not-allowed'
+                    ? 'bg-olive-light/15 border-olive-light/40 text-olive-light hover:bg-olive-light/20 hover:border-olive-light/60 cursor-pointer'
+                    : 'bg-ink-deep/60 border-ink-line/40 text-cream-3-text cursor-not-allowed'
                 }`}
                 title={drawVertexCount < 3 ? 'Place at least 3 corners first' : 'Close the polygon'}
               >
@@ -3617,14 +3616,14 @@ export default function MapPage() {
               </button>
               <button
                 onClick={startOverDrawing}
-                className="bg-white/90 border border-beige hover:border-amber-500/60 rounded-xl px-2.5 py-2 text-xs font-bold text-ink-2 hover:text-amber-600 transition-colors"
+                className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-amber-warm/50 rounded-xl px-2.5 py-2 text-xs font-semibold text-cream-2-text hover:text-amber-warm transition-colors shadow-lg shadow-black/20"
                 title="Discard and start over"
               >
                 Start Over
               </button>
               <button
                 onClick={stopDrawing}
-                className="bg-white/90 border border-beige hover:border-red-400 rounded-xl px-2 text-xs font-bold text-ink-2 hover:text-red-500 transition-colors"
+                className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-red-400/50 rounded-xl px-2 text-xs font-semibold text-cream-2-text hover:text-red-300 transition-colors shadow-lg shadow-black/20"
                 title="Cancel drawing (discards everything)"
               >
                 <X size={12} />
@@ -3636,7 +3635,7 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && !cmaMode && (
             <button
               onClick={startCMA}
-              className="bg-white/90 backdrop-blur-sm border border-beige hover:border-slate-blue rounded-xl px-3 py-2 text-xs font-bold text-ink-2 hover:text-slate-blue-2 transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-slate-blue-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-slate-blue-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <FileText size={12} />
               Build CMA
