@@ -2850,35 +2850,39 @@ export default function MapPage() {
       const isStrongIrrigation = (comp as any).irrigation === 'Strong';
       const isAgentVerified = comp.improvement_source === 'agent_verified';
       const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
-      const purplePill = (label: string) =>
-        `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(192,132,252,0.1);color:#c084fc;border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
-      const improvedBadge = isImproved ? purplePill('IMPROVED') : '';
-      const irrigationBadge = isStrongIrrigation ? purplePill('IRRIGATION') : '';
+      // Light-theme popup badges. IMPROVED + IRRIGATION = slate-blue (the
+      // "status/trust" color used across the app). ADJ + Agent-Verified
+      // use amber + slate-blue respectively. Restrained — three colors
+      // total in this popup: ink, olive, slate-blue.
+      const bluePill = (label: string) =>
+        `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.10);color:#3A5A8A;border:1px solid rgba(74,111,165,0.22);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+      const improvedBadge = isImproved ? bluePill('IMPROVED') : '';
+      const irrigationBadge = isStrongIrrigation ? bluePill('IRRIGATION') : '';
       const adjBadge = hasAdjustment
-        ? `<span style="font-size:9px;color:#fbbf24;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+        ? `<span style="font-size:9px;color:#92400E;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
         : '';
       const agentBadge = isAgentVerified
-        ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(52,211,153,0.1);color:#6ee7b7;border:1px solid rgba(52,211,153,0.3);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+        ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.12);color:#3A5A8A;border:1px solid rgba(74,111,165,0.28);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
         : '';
-      const adjustedColor = hasAdjustment ? '#fcd34d' : 'rgba(253,230,138,0.45)';
+      const adjustedColor = hasAdjustment ? '#92400E' : 'rgba(146,64,14,0.45)';
       const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
       const popupHtml = `
         <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-            <span style="font-weight:700;font-size:12px;color:#fff;letter-spacing:-0.01em;">${propertyName}</span>
+            <span style="font-weight:700;font-size:12px;color:#1F1F1C;letter-spacing:-0.01em;">${propertyName}</span>
             ${improvedBadge}
             ${irrigationBadge}
             ${adjBadge}
             ${agentBadge}
           </div>
           <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
-            <div style="color:#64748b;">Acres</div>
-            <div style="color:#64748b;">Total</div>
-            <div style="color:#64748b;">Total $/Ac</div>
-            <div style="color:#64748b;">Adjusted $/Ac</div>
-            <div style="color:#fff;font-weight:700;">${formatAcres(comp.acres)}</div>
-            <div style="color:#fff;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
-            <div style="color:#34d399;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+            <div style="color:#9C9A8F;">Acres</div>
+            <div style="color:#9C9A8F;">Total</div>
+            <div style="color:#9C9A8F;">Total $/Ac</div>
+            <div style="color:#9C9A8F;">Adjusted $/Ac</div>
+            <div style="color:#1F1F1C;font-weight:700;">${formatAcres(comp.acres)}</div>
+            <div style="color:#1F1F1C;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+            <div style="color:#5C6B33;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
             <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
           </div>
         </div>
@@ -3169,9 +3173,9 @@ export default function MapPage() {
         {/* Edit Boundary toolbar — appears when actively editing a saved boundary */}
         {editingBoundaryComp && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30">
-            <div className="bg-amber-500/15 backdrop-blur-md border border-amber-500/40 rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2">
+            <div className="bg-amber-500/15 backdrop-blur-md border border-amber-300 rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2">
               <Pencil size={14} className="text-amber-600" />
-              <span className="text-xs font-bold text-amber-200 mr-1">
+              <span className="text-xs font-bold text-amber-800 mr-1">
                 Editing: {editingBoundaryComp.property_name || `${editingBoundaryComp.county} comp`}
               </span>
               <button
@@ -3583,18 +3587,18 @@ export default function MapPage() {
 
           {drawingActive && (
             <div className="flex gap-1.5 items-stretch">
-              <div className="bg-amber-500/15 border border-amber-500/40 rounded-xl px-3 py-2 flex items-center gap-2.5">
-                <Pencil size={14} className="text-amber-600 shrink-0" />
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-2.5">
+                <Pencil size={14} className="text-amber-700 shrink-0" />
                 <div className="flex flex-col leading-tight">
-                  <span className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">
+                  <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">
                     {drawVertexCount === 0
                       ? 'Click the first corner of the property'
                       : drawVertexCount < 3
                       ? `Keep clicking corners (${drawVertexCount} placed, need at least 3)`
                       : `${drawVertexCount} corners placed — click Finish or double-click to close`}
                   </span>
-                  <span className="text-[9px] text-amber-300/60">
-                    Press <kbd className="font-mono px-0.5 bg-amber-500/20 rounded">Backspace</kbd> to remove last corner
+                  <span className="text-[9px] text-amber-700/70">
+                    Press <kbd className="font-mono px-0.5 bg-amber-100 rounded">Backspace</kbd> to remove last corner
                   </span>
                 </div>
               </div>
@@ -3632,7 +3636,7 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && !cmaMode && (
             <button
               onClick={startCMA}
-              className="bg-white/90 backdrop-blur-sm border border-beige hover:border-blue-400 rounded-xl px-3 py-2 text-xs font-bold text-ink-2 hover:text-blue-400 transition-colors flex items-center gap-1.5"
+              className="bg-white/90 backdrop-blur-sm border border-beige hover:border-slate-blue rounded-xl px-3 py-2 text-xs font-bold text-ink-2 hover:text-slate-blue-2 transition-colors flex items-center gap-1.5"
             >
               <FileText size={12} />
               Build CMA
@@ -3640,7 +3644,7 @@ export default function MapPage() {
           )}
 
           {cmaMode && (
-            <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl px-3 py-2 text-xs font-bold text-blue-400 flex items-center gap-1.5">
+            <div className="bg-slate-blue/10 border border-slate-blue/30 rounded-xl px-3 py-2 text-xs font-bold text-slate-blue-2 flex items-center gap-1.5">
               <FileText size={12} />
               {cmaPhase === 'subject' ? 'CMA · Tap subject parcels' : 'CMA · Tap comp pins'}
             </div>
@@ -3658,7 +3662,7 @@ export default function MapPage() {
               </button>
               <button
                 onClick={clearDrawings}
-                className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+                className="bg-red-50 backdrop-blur-sm border border-red-200 hover:border-red-300 hover:bg-red-100 rounded-xl px-3 py-2 text-xs font-bold text-red-700 hover:text-red-800 transition-colors flex items-center gap-1.5"
                 title="Discard everything and start over"
               >
                 <Trash2 size={12} />
@@ -3672,7 +3676,7 @@ export default function MapPage() {
           {sheetMode === 'none' && mergedAcres > 0 && !drawingActive && (
             <button
               onClick={clearDrawings}
-              className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+              className="bg-red-50 backdrop-blur-sm border border-red-200 hover:border-red-300 hover:bg-red-100 rounded-xl px-3 py-2 text-xs font-bold text-red-700 hover:text-red-800 transition-colors flex items-center gap-1.5"
               title="Remove the boundary preview from the map"
             >
               <Trash2 size={12} />
@@ -3713,7 +3717,7 @@ export default function MapPage() {
           <div className="hidden md:flex w-80 bg-white border-l border-beige flex-col overflow-y-auto">
             <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
               <div className="flex items-center gap-2">
-                <FileText size={14} className="text-blue-400" />
+                <FileText size={14} className="text-slate-blue-2" />
                 <span className="font-bold text-sm">Build CMA</span>
               </div>
               <button onClick={cancelCMA} className="text-ink-3 hover:text-ink">
@@ -3728,7 +3732,7 @@ export default function MapPage() {
                     {cmaEditingId ? 'Subject Tract (locked)' : 'Subject Tract'}
                   </p>
                   {cmaSubjectParcels.length > 0 && (
-                    <span className="text-[10px] font-bold text-blue-400 font-mono">
+                    <span className="text-[10px] font-bold text-slate-blue-2 font-mono">
                       {cmaSubjectParcels.length} parcel{cmaSubjectParcels.length === 1 ? '' : 's'} · {acres.toFixed(1)} ac
                     </span>
                   )}
@@ -3754,19 +3758,19 @@ export default function MapPage() {
                       value={cmaSubjectMeta.name}
                       onChange={(e) => setCmaSubjectMeta(m => ({ ...m, name: e.target.value }))}
                       placeholder="Subject name"
-                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-blue-400"
+                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-slate-blue"
                     />
                     <input
                       value={cmaSubjectMeta.county}
                       onChange={(e) => setCmaSubjectMeta(m => ({ ...m, county: e.target.value }))}
                       placeholder="County"
-                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-blue-400"
+                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-slate-blue"
                     />
                     <div className="space-y-1 max-h-32 overflow-y-auto pt-1">
                       {cmaSubjectParcels.map((p, i) => (
                         <div key={p.parcel_id} className="flex items-center justify-between bg-cream border border-beige rounded-md px-2 py-1">
                           <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                            <span className="text-[9px] font-bold text-blue-400 font-mono">{i + 1}</span>
+                            <span className="text-[9px] font-bold text-slate-blue-2 font-mono">{i + 1}</span>
                             <span className="text-[11px] text-ink-2 truncate">{p.owner_name || p.parcel_id || 'parcel'}</span>
                           </div>
                           <span className="text-[10px] text-ink-3 font-mono mr-1.5">
@@ -3787,14 +3791,14 @@ export default function MapPage() {
                     {cmaPhase === 'subject' ? (
                       <button
                         onClick={lockSubjectTract}
-                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-400/40 hover:border-blue-400 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-slate-blue/40 hover:border-slate-blue text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                       >
                         <Combine size={12} /> Lock Subject Tract → Pick Comps
                       </button>
                     ) : (
                       <button
                         onClick={unlockSubjectTract}
-                        className="w-full mt-1 py-1.5 bg-cream border border-beige hover:border-blue-400 text-[11px] font-bold text-ink-2 hover:text-blue-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full mt-1 py-1.5 bg-cream border border-beige hover:border-slate-blue text-[11px] font-bold text-ink-2 hover:text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                       >
                         <Pencil size={11} /> Edit Subject Parcels
                       </button>
@@ -3819,7 +3823,7 @@ export default function MapPage() {
               <div className="bg-cream border border-beige rounded-xl p-3">
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Selected Comps</p>
-                  <span className="text-[10px] font-bold text-blue-400 font-mono">{cmaCompIds.length}</span>
+                  <span className="text-[10px] font-bold text-slate-blue-2 font-mono">{cmaCompIds.length}</span>
                 </div>
                 {cmaCompIds.length === 0 ? (
                   <p className="text-xs text-ink-2 italic">Click comp pins on the map to add them.</p>
@@ -3848,11 +3852,11 @@ export default function MapPage() {
 
               {/* Value range */}
               {ppas.length > 0 && acres > 0 && (
-                <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl p-3 space-y-1">
-                  <p className="text-[10px] font-bold text-blue-300/80 uppercase tracking-wider mb-1">Estimated Value</p>
+                <div className="bg-slate-blue/10 border border-slate-blue/30 rounded-xl p-3 space-y-1">
+                  <p className="text-[10px] font-bold text-slate-blue-2/80 uppercase tracking-wider mb-1">Estimated Value</p>
                   <div className="flex justify-between text-xs">
                     <span className="text-ink-2">Low</span>
-                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaLow * acres)}</span>
+                    <span className="font-mono font-bold text-slate-blue-2">{formatCurrency(ppaLow * acres)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-ink font-bold">Mid</span>
@@ -3860,9 +3864,9 @@ export default function MapPage() {
                   </div>
                   <div className="flex justify-between text-xs">
                     <span className="text-ink-2">High</span>
-                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaHigh * acres)}</span>
+                    <span className="font-mono font-bold text-slate-blue-2">{formatCurrency(ppaHigh * acres)}</span>
                   </div>
-                  <p className="text-[10px] text-ink-3 font-mono mt-1.5 pt-1.5 border-t border-blue-400/20">
+                  <p className="text-[10px] text-ink-3 font-mono mt-1.5 pt-1.5 border-t border-slate-blue/20">
                     Range from {formatPPA(ppaLow)} to {formatPPA(ppaHigh)} · {acres.toFixed(0)} ac
                   </p>
                 </div>
@@ -3956,7 +3960,7 @@ export default function MapPage() {
           <div className="hidden md:flex w-96 bg-white border-l border-beige flex-col overflow-y-auto">
             <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
               <div className="flex items-center gap-2 min-w-0">
-                <FileText size={14} className="text-blue-400 flex-shrink-0" />
+                <FileText size={14} className="text-slate-blue-2 flex-shrink-0" />
                 <span className="font-bold text-sm truncate">{viewingCMA.subject_name}</span>
               </div>
               <button onClick={exitCmaWorkspace} className="text-ink-3 hover:text-ink flex-shrink-0">
@@ -3989,7 +3993,7 @@ export default function MapPage() {
                 ) : null}
                 <button
                   onClick={editCmaComps}
-                  className="py-2 border border-blue-400/40 bg-blue-500/15 hover:bg-blue-500/25 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  className="py-2 border border-slate-blue/40 bg-blue-500/15 hover:bg-blue-500/25 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Pencil size={12} /> Edit / Add Comps
                 </button>
@@ -4037,16 +4041,16 @@ export default function MapPage() {
 
               {/* Land-only average — only shown if at least one comp has an improvement value */}
               {landOnlyPpas.length > 0 && (
-                <div className="bg-cream border border-amber-400/30 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-amber-400/20 bg-amber-400/5 flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
+                <div className="bg-cream border border-amber-200 rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-amber-200 bg-amber-50 flex items-center justify-between">
+                    <p className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
                     <p className="text-[9px] text-ink-2 font-mono">Based on {landOnlySampleSize} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
                       <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(landLow * subjAcres)}</td></tr>
-                      <tr className="bg-amber-400/5 border-t border-amber-400/15"><td className="px-3 py-2 text-amber-200 font-bold">Mid</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatCurrency(landOnlyValue)}</td></tr>
-                      <tr className="border-t border-amber-400/15"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(landHigh * subjAcres)}</td></tr>
+                      <tr className="bg-amber-50 border-t border-amber-200/60"><td className="px-3 py-2 text-amber-800 font-bold">Mid</td><td className="text-right px-3 py-2 text-amber-800 font-bold">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-800 font-bold">{formatCurrency(landOnlyValue)}</td></tr>
+                      <tr className="border-t border-amber-200/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(landHigh * subjAcres)}</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -4171,7 +4175,7 @@ export default function MapPage() {
                       onMouseEnter={() => setHoveredCompId(c.id)}
                       onMouseLeave={() => setHoveredCompId(prev => prev === c.id ? null : prev)}
                       className={`bg-cream border rounded-xl overflow-hidden transition-colors ${
-                        isHovered ? 'border-blue-400 ring-2 ring-blue-400/30' : 'border-beige'
+                        isHovered ? 'border-slate-blue ring-2 ring-blue-400/30' : 'border-beige'
                       }`}
                     >
                       <button
@@ -4201,7 +4205,7 @@ export default function MapPage() {
                               </span>
                             )}
                             {isBrokerEstimated && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-400/15 border border-amber-400/30 text-amber-300 font-bold flex-shrink-0">
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-bold flex-shrink-0">
                                 Broker-estimated
                               </span>
                             )}
@@ -4223,7 +4227,7 @@ export default function MapPage() {
                           </div>
                           <div>
                             <p className="text-ink-3">Adjusted $/Ac</p>
-                            <p className={`font-bold ${effImp != null ? 'text-amber-300' : 'text-amber-200/70'}`}>
+                            <p className={`font-bold ${effImp != null ? 'text-amber-800' : 'text-amber-700/60'}`}>
                               {landOnly != null ? formatPPA(landOnly) : '—'}
                             </p>
                           </div>
@@ -4236,7 +4240,7 @@ export default function MapPage() {
                               client-facing reasoning first. Mirrors the share
                               report's placement (read-only there). */}
                           <div className="pb-2 border-b border-beige/60 space-y-1">
-                            <p className="text-[10px] font-bold text-blue-400 uppercase tracking-wider">
+                            <p className="text-[10px] font-bold text-slate-blue-2 uppercase tracking-wider">
                               Your Note on This Comp
                             </p>
                             <textarea
@@ -4245,7 +4249,7 @@ export default function MapPage() {
                               onClick={(e) => e.stopPropagation()}
                               placeholder="e.g. Most direct comparison — same river frontage and similar improvements."
                               rows={2}
-                              className="w-full bg-cream border border-beige focus:border-blue-400 rounded px-2 py-1.5 text-[12px] text-ink outline-none resize-none"
+                              className="w-full bg-cream border border-beige focus:border-slate-blue rounded px-2 py-1.5 text-[12px] text-ink outline-none resize-none"
                             />
                             <p className="text-[9px] text-ink-3">Shown to the client in the expanded comp on the share report.</p>
                           </div>
@@ -4267,7 +4271,7 @@ export default function MapPage() {
                           {c.has_improvements && c.improvements_value != null && (
                             <div className="flex justify-between">
                               <span className="text-ink-3">Improvements</span>
-                              <span className="text-blue-300">{formatCurrency(c.improvements_value)} ECV</span>
+                              <span className="text-slate-blue-2 font-mono">{formatCurrency(c.improvements_value)} ECV</span>
                             </div>
                           )}
                           {c.improvements_notes && (
@@ -4339,7 +4343,7 @@ export default function MapPage() {
                                     e.stopPropagation();
                                     setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
                                   }}
-                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
                                 >
                                   + Add adjustment
                                 </button>
@@ -4350,7 +4354,7 @@ export default function MapPage() {
                                     e.stopPropagation();
                                     setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
                                   }}
-                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
                                 >
                                   Edit
                                 </button>
@@ -4425,7 +4429,7 @@ export default function MapPage() {
                                         if (ok) toast.success('Adjustment saved');
                                       }
                                     }}
-                                    className="flex-1 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded text-[11px] font-bold text-amber-200 transition-colors"
+                                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded text-[11px] font-bold text-amber-800 transition-colors"
                                   >
                                     Save
                                   </button>
@@ -4509,7 +4513,7 @@ export default function MapPage() {
                                 map.current?.flyTo({ center: [c.longitude, c.latitude], zoom: 14, duration: 800 });
                               }
                             }}
-                            className="text-[10px] text-blue-400 hover:text-blue-300 font-bold mt-1"
+                            className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold mt-1"
                           >
                             Fly to →
                           </button>
@@ -4724,9 +4728,9 @@ export default function MapPage() {
                           {formatPPA(allIn)}
                         </p>
                       </div>
-                      <div className="bg-amber-50 border border-amber-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                        <p className="text-[10px] font-bold text-amber-300/80 uppercase tracking-wider">Adjusted $/Ac</p>
-                        <p className="text-base font-bold text-amber-300 font-mono leading-tight">
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-baseline justify-between">
+                        <p className="text-[10px] font-bold text-amber-800/80 uppercase tracking-wider">Adjusted $/Ac</p>
+                        <p className="text-base font-bold text-amber-800 font-mono leading-tight">
                           {formatPPA(landOnly)}
                         </p>
                       </div>
@@ -4744,10 +4748,10 @@ export default function MapPage() {
             })()}
 
             {acreageDiscrepancy && acresInDesc != null && selectedComp.created_by === currentUserId && (
-              <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl px-3 py-2 space-y-2">
+              <div className="bg-amber-50 border border-amber-300 rounded-xl px-3 py-2 space-y-2">
                 <div className="flex items-start gap-2">
                   <ShieldAlert size={14} className="text-amber-600 mt-0.5 flex-shrink-0" />
-                  <div className="text-[11px] text-amber-200 leading-relaxed">
+                  <div className="text-[11px] text-amber-800 leading-relaxed">
                     <span className="font-bold">Acreage discrepancy.</span> Description mentions{' '}
                     <span className="font-mono font-bold">{acresInDesc.toLocaleString()} ac</span>{' '}
                     but saved value is{' '}
@@ -4756,7 +4760,7 @@ export default function MapPage() {
                 </div>
                 <button
                   onClick={() => fixAcresFromDescription(selectedComp.id, acresInDesc!)}
-                  className="w-full py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-lg text-[11px] font-bold text-amber-200 transition-colors"
+                  className="w-full py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg text-[11px] font-bold text-amber-800 transition-colors"
                 >
                   Use {acresInDesc.toLocaleString()} ac from description
                 </button>
@@ -4781,7 +4785,7 @@ export default function MapPage() {
               {selectedComp.has_improvements && selectedComp.improvements_value != null && (
                 <div className="flex justify-between">
                   <span className="text-ink-3">Improvements</span>
-                  <span className="text-blue-300">{formatCurrency(selectedComp.improvements_value)} ECV</span>
+                  <span className="text-slate-blue-2 font-mono">{formatCurrency(selectedComp.improvements_value)} ECV</span>
                 </div>
               )}
               {selectedComp.improvements_notes && (
@@ -4837,7 +4841,7 @@ export default function MapPage() {
                     <button
                       onClick={handleRemoveListingUrl}
                       disabled={savingListing}
-                      className="text-[10px] text-ink-3 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                      className="text-[10px] text-ink-3 hover:text-red-700 underline disabled:opacity-50 ml-auto"
                       title="Remove the saved listing URL"
                     >
                       Remove

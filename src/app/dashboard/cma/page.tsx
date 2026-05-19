@@ -129,8 +129,8 @@ export default function CMALibraryPage() {
     <div className="flex flex-col h-full bg-cream overflow-y-auto">
       <div className="flex-shrink-0 bg-white border-b border-beige px-5 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-blue-400/10 border border-blue-400/20 flex items-center justify-center">
-            <FileText size={16} className="text-blue-400" />
+          <div className="w-9 h-9 rounded-xl bg-slate-blue/10 border border-slate-blue/20 flex items-center justify-center">
+            <FileText size={16} className="text-slate-blue-2" />
           </div>
           <div>
             <h1 className="font-bold text-base">My CMAs</h1>
@@ -175,17 +175,17 @@ export default function CMALibraryPage() {
             return (
               <div
                 key={cma.id}
-                className="bg-white border border-beige hover:border-blue-400/40 rounded-xl p-4 transition-colors"
+                className="bg-white border border-beige hover:border-slate-blue/40 rounded-xl p-4 transition-colors"
               >
                 <div className="flex items-start justify-between gap-3">
                   <Link href={`/dashboard/map?cma=${cma.id}`} className="flex-1 min-w-0 group">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="font-bold text-base text-ink group-hover:text-blue-300 transition-colors truncate">
+                      <h2 className="font-bold text-base text-ink group-hover:text-slate-blue-2 transition-colors truncate">
                         {cma.subject_name || 'Untitled CMA'}
                       </h2>
                       {isSharedWithMe && (
                         <span
-                          className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 border border-purple-400/30 text-purple-300 rounded uppercase tracking-wider"
+                          className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 bg-slate-blue/10 border border-slate-blue/30 text-slate-blue-2 rounded uppercase tracking-wider"
                           title="A teammate added you as a collaborator on this CMA"
                         >
                           <Users size={9} />
@@ -203,7 +203,7 @@ export default function CMALibraryPage() {
                       {new Date(cma.created_at).toLocaleDateString()}
                     </p>
                     {cma.value_mid != null && (
-                      <p className="text-sm font-bold text-emerald-400 font-mono mt-2">
+                      <p className="text-sm font-bold text-olive-2 font-mono mt-2">
                         {formatCurrency(cma.value_low || 0)} – {formatCurrency(cma.value_high || 0)}
                         <span className="text-ink-3 font-normal text-xs ml-2">
                           (mid {formatCurrency(cma.value_mid)})
@@ -215,7 +215,7 @@ export default function CMALibraryPage() {
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <Link
                       href={`/dashboard/map?cma=${cma.id}`}
-                      className="p-2 text-ink-2 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+                      className="p-2 text-ink-2 hover:text-slate-blue-2 hover:bg-slate-blue/10 rounded-lg transition-colors"
                       title="Open on map"
                     >
                       <MapPin size={14} />
@@ -225,7 +225,7 @@ export default function CMALibraryPage() {
                         href={`/report/${cma.share_token}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="p-2 text-ink-2 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors"
+                        className="p-2 text-ink-2 hover:text-slate-blue-2 hover:bg-slate-blue/10 rounded-lg transition-colors"
                         title="Preview as client"
                       >
                         <Eye size={14} />

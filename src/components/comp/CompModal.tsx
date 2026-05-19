@@ -555,7 +555,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   {(['None', 'Seasonal', 'Strong'] as WaterQuality[]).map(w => (
                     <button key={w} onClick={() => setForm(f => ({...f, water: w}))}
                       className={`py-2 rounded-lg border text-sm font-bold transition-colors ${
-                        form.water === w ? 'border-blue-400 bg-blue-400/10 text-blue-400' : 'border-beige text-ink-2'
+                        form.water === w ? 'border-olive bg-olive-tint text-olive-2' : 'border-beige text-ink-2'
                       }`}
                     >{w}</button>
                   ))}

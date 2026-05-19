@@ -15,10 +15,10 @@ interface CompCardProps {
 }
 
 const statusColors: Record<string, string> = {
-  Sold: 'bg-emerald-400/10 text-emerald-400',
-  Active: 'bg-blue-400/10 text-blue-400',
-  Pending: 'bg-amber-50 text-amber-600',
-  Withdrawn: 'bg-red-400/10 text-red-500',
+  Sold: 'bg-olive-tint text-olive-2',
+  Active: 'bg-slate-blue/10 text-slate-blue-2',
+  Pending: 'bg-amber-50 text-amber-800',
+  Withdrawn: 'bg-red-50 text-red-700',
 };
 
 export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected, onSelect }: CompCardProps) {
@@ -61,7 +61,7 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
             )}
             {comp.improvement_source === 'agent_verified' && (
               <span
-                className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded"
+                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded"
                 title="An agent involved in this transaction verified the improvement value."
               >
                 AGENT-VERIFIED
@@ -80,7 +80,7 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
         </div>
 
         <div className="text-right flex-shrink-0">
-          <div className="text-sm font-bold text-emerald-400 font-mono">
+          <div className="text-sm font-bold text-olive-2 font-mono">
             {formatPPA(displayPPA || 0)}
           </div>
           <div className="text-xs text-ink-3 font-mono">
@@ -145,7 +145,7 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
 
       <div className="flex items-end justify-between">
         <div>
-          <div className="text-lg font-bold text-emerald-400 font-mono leading-none">
+          <div className="text-lg font-bold text-olive-2 font-mono leading-none">
             {formatPPA(displayPPA || 0)}
           </div>
           <div className="text-xs text-ink-3 font-mono mt-0.5">
@@ -153,7 +153,7 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {comp.water === 'Strong' && <span className="text-blue-400 text-xs">💧</span>}
+          {comp.water === 'Strong' && <span className="text-slate-blue-2 text-xs">💧</span>}
           {comp.has_improvements && <span className="text-xs text-purple-400">🏠</span>}
           <VisibilityIcon size={10} className="text-ink-3" />
         </div>

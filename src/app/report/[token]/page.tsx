@@ -190,10 +190,10 @@ export default function ClientReport({ params }: ClientReportProps) {
         const el = document.createElement('div');
         el.dataset.compId = comp.id;
         el.style.cssText = `
-          background:#0b0f14;border:2px solid #34d399;border-radius:20px;
+          background:#FFFFFF;border:2px solid #6B7B3F;border-radius:20px;
           padding:4px 8px;font-family:'DM Mono',monospace;font-size:11px;
-          font-weight:700;color:#34d399;cursor:pointer;white-space:nowrap;
-          box-shadow:0 2px 8px rgba(0,0,0,.5);
+          font-weight:700;color:#5C6B33;cursor:pointer;white-space:nowrap;
+          box-shadow:0 2px 8px rgba(31,31,28,.18);
           transition:border-color .15s, box-shadow .15s, color .15s;
         `;
         el.textContent = `$${Math.round((comp.ppa_land_only || comp.price_per_acre || 0) / 1000)}k`;
@@ -209,35 +209,37 @@ export default function ClientReport({ params }: ClientReportProps) {
         const isStrongIrrigation = (comp as any).irrigation === 'Strong';
         const isAgentVerified = (comp as any).improvement_source === 'agent_verified';
         const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
-        const purplePill = (label: string) =>
-          `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(192,132,252,0.1);color:#c084fc;border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
-        const improvedBadge = isImproved ? purplePill('IMPROVED') : '';
-        const irrigationBadge = isStrongIrrigation ? purplePill('IRRIGATION') : '';
+        // Light-theme popup — same treatment as the dashboard map popup.
+        // Ink text on white, slate-blue status badges, amber-800 ADJ.
+        const bluePill = (label: string) =>
+          `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.10);color:#3A5A8A;border:1px solid rgba(74,111,165,0.22);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+        const improvedBadge = isImproved ? bluePill('IMPROVED') : '';
+        const irrigationBadge = isStrongIrrigation ? bluePill('IRRIGATION') : '';
         const adjBadge = hasAdjustment
-          ? `<span style="font-size:9px;color:#fbbf24;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+          ? `<span style="font-size:9px;color:#92400E;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
           : '';
         const agentBadge = isAgentVerified
-          ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(52,211,153,0.1);color:#6ee7b7;border:1px solid rgba(52,211,153,0.3);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+          ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(74,111,165,0.12);color:#3A5A8A;border:1px solid rgba(74,111,165,0.28);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
           : '';
-        const adjustedColor = hasAdjustment ? '#fcd34d' : 'rgba(253,230,138,0.45)';
+        const adjustedColor = hasAdjustment ? '#92400E' : 'rgba(146,64,14,0.45)';
         const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
         const popupHtml = `
           <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-              <span style="font-weight:700;font-size:12px;color:#fff;letter-spacing:-0.01em;">${propertyName}</span>
+              <span style="font-weight:700;font-size:12px;color:#1F1F1C;letter-spacing:-0.01em;">${propertyName}</span>
               ${improvedBadge}
               ${irrigationBadge}
               ${adjBadge}
               ${agentBadge}
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
-              <div style="color:#64748b;">Acres</div>
-              <div style="color:#64748b;">Total</div>
-              <div style="color:#64748b;">Total $/Ac</div>
-              <div style="color:#64748b;">Adjusted $/Ac</div>
-              <div style="color:#fff;font-weight:700;">${formatAcres(comp.acres)}</div>
-              <div style="color:#fff;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
-              <div style="color:#34d399;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+              <div style="color:#9C9A8F;">Acres</div>
+              <div style="color:#9C9A8F;">Total</div>
+              <div style="color:#9C9A8F;">Total $/Ac</div>
+              <div style="color:#9C9A8F;">Adjusted $/Ac</div>
+              <div style="color:#1F1F1C;font-weight:700;">${formatAcres(comp.acres)}</div>
+              <div style="color:#1F1F1C;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+              <div style="color:#5C6B33;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
               <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
             </div>
           </div>
@@ -942,7 +944,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                                               </div>
                                               <p className="text-[12px] text-ink group-hover:text-ink font-bold flex items-center gap-1.5">
                                                 {src.cta}
-                                                <ExternalLink size={11} className="text-ink-3 group-hover:text-blue-400 flex-shrink-0" />
+                                                <ExternalLink size={11} className="text-ink-3 group-hover:text-slate-blue-2 flex-shrink-0" />
                                               </p>
                                               <p className="text-[10px] text-ink-3 mt-0.5 truncate">
                                                 {lnk.url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 40)}
@@ -964,7 +966,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                                     e.stopPropagation();
                                     map.current?.flyTo({ center: [comp.longitude!, comp.latitude!], zoom: 14, duration: 800 });
                                   }}
-                                  className="text-[10px] text-blue-400 hover:text-blue-300 font-bold pt-1"
+                                  className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold pt-1"
                                 >
                                   View on map →
                                 </button>
