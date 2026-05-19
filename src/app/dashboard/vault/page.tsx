@@ -83,7 +83,18 @@ export default function VaultPage() {
   const [showQuickCapture, setShowQuickCapture] = useState(false);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
   const [showFilters, setShowFilters] = useState(false);
-  const [stats, setStats] = useState({ total: 0, sold: 0, avgPPA: 0 });
+  // Vault-level KPIs displayed in dashboard tiles above the table.
+  // Same pattern Stripe / QuickBooks / Google Analytics use to anchor
+  // a data view — broker sees the headline numbers before they have to
+  // read a single row.
+  const [stats, setStats] = useState({
+    total: 0,
+    sold: 0,
+    avgPPA: 0,
+    totalVolume: 0,           // sum of all sold sale_prices
+    recentSales: 0,           // count of sales in the last 90 days
+    avgAcres: 0,              // average property size
+  });
   // Sort state for the new table view. Default: most recently sold first
   // (proxy via sale_price desc → switch this to sale_date desc later if we
   // expose date as a sortable column).
@@ -197,16 +208,35 @@ export default function VaultPage() {
       const compData = data as Comp[];
       setComps(compData);
 
-      // Calculate stats
+      // Calculate KPIs for the dashboard tiles.
       const sold = compData.filter(c => c.status === 'Sold');
       const avgPPA = sold.length > 0
         ? sold.reduce((sum, c) => sum + (c.ppa_land_only || c.price_per_acre || 0), 0) / sold.length
         : 0;
+      const totalVolume = sold.reduce((sum, c) => sum + (c.sale_price || 0), 0);
+      const avgAcres = sold.length > 0
+        ? sold.reduce((sum, c) => sum + (c.acres || 0), 0) / sold.length
+        : 0;
+      // Recent activity — sales in the last 90 days. Anchors the broker
+      // to "how active is this market lately."
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const recentSales = sold.filter((c) => {
+        if (!c.sale_date) return false;
+        try {
+          return new Date(c.sale_date).getTime() >= ninetyDaysAgo.getTime();
+        } catch {
+          return false;
+        }
+      }).length;
 
       setStats({
         total: compData.length,
         sold: sold.length,
         avgPPA,
+        totalVolume,
+        recentSales,
+        avgAcres,
       });
     } catch (error) {
       console.error('Error fetching comps:', error);
@@ -285,37 +315,33 @@ export default function VaultPage() {
           identity (title, total count, primary CTAs). Second row is
           the working surface (search, filters, view mode). Sticky on
           scroll with a subtle shadow when not at top. */}
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 pt-5 pb-3 shadow-sm">
-        {/* Row 1 — title + key stats + primary actions */}
-        <div className="flex items-end justify-between gap-4 mb-4">
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 pt-6 pb-4 shadow-sm">
+        {/* Row 1 — page title + primary actions. Title gets its own
+            line so it reads like a real page header instead of being
+            crowded by stats. Stats moved to dedicated KPI tiles below
+            the header (Google Analytics / QuickBooks / Stripe pattern). */}
+        <div className="flex items-end justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900 tracking-tight leading-tight">
+            <h1 className="text-3xl font-bold text-gray-900 tracking-tight leading-tight">
               Comp Vault
             </h1>
-            <div className="flex items-center gap-5 mt-1.5 text-sm">
-              <span className="text-gray-500">
-                <span className="font-bold text-gray-900 font-mono tabular-nums">{stats.total}</span>
-                {' '}comps
-              </span>
-              <span className="text-gray-300">·</span>
-              <span className="text-gray-500">
-                <span className="font-bold text-gray-900 font-mono tabular-nums">{stats.sold}</span>
-                {' '}sold
-              </span>
-              {stats.avgPPA > 0 && (
-                <>
-                  <span className="text-gray-300">·</span>
-                  <span className="text-gray-500">
-                    avg{' '}
-                    <span className="font-bold text-emerald-700 font-mono tabular-nums">
-                      {formatPPA(stats.avgPPA)}
-                    </span>
-                  </span>
-                </>
-              )}
-            </div>
+            <p className="text-sm text-gray-500 mt-1">
+              Land sales database across {stats.total === 1 ? '1 property' : `${stats.total} properties`}
+            </p>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                // Export — placeholder; ships as CSV download next pass.
+                // Inert for now so the affordance exists at design level.
+                toast('Export coming soon — CSV / PDF support', { icon: '📤' });
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-colors shadow-sm"
+              title="Export comps as CSV or PDF"
+            >
+              <FileText size={14} />
+              Export
+            </button>
             <button
               onClick={() => setShowQuickCapture(true)}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-colors shadow-sm"
@@ -334,7 +360,7 @@ export default function VaultPage() {
         </div>
 
         {/* Row 2 — search + filter + view mode */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 mt-5">
           {/* Search */}
           <div className="relative flex-1 max-w-md">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -507,6 +533,63 @@ export default function VaultPage() {
 
       {/* Comp list */}
       <div className="flex-1 overflow-y-auto p-6">
+        {/* ─── KPI tiles ────────────────────────────────────────────────
+            4-card dashboard pattern — Total Volume, Avg $/Acre, Avg
+            Acres, Recent Sales. Same convention used by Stripe / Google
+            Analytics / QuickBooks. Anchors the broker with the headline
+            numbers BEFORE they read any row. Each card has:
+              - Tiny uppercase label (gray-500, tracking-wide)
+              - Big bold number with tabular figures
+              - Subtle subtitle for context
+            Grid: 4 cols on desktop, 2x2 on tablet, 1-col on mobile. */}
+        {stats.sold > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                Total Volume
+              </div>
+              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+                {formatCurrency(stats.totalVolume)}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                across {stats.sold} {stats.sold === 1 ? 'sale' : 'sales'}
+              </div>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                Avg Price / Acre
+              </div>
+              <div className="text-2xl font-bold text-emerald-700 tabular-nums">
+                {formatPPA(stats.avgPPA)}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                portfolio-wide average
+              </div>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                Avg Property Size
+              </div>
+              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+                {formatAcres(stats.avgAcres)}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                acres per sale
+              </div>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                Recent Activity
+              </div>
+              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+                {stats.recentSales}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {stats.recentSales === 1 ? 'sale' : 'sales'} in last 90 days
+              </div>
+            </div>
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <div className="w-6 h-6 border-2 border-sage border-t-transparent rounded-full animate-spin" />
