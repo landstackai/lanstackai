@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
@@ -64,6 +65,67 @@ export default function VaultPage() {
   // "Needs Location" filter — show only comps with missing coordinates. Useful
   // after batch imports where rural addresses didn't geocode.
   const [needsLocationOnly, setNeedsLocationOnly] = useState(false);
+  // Collapsible "Needs review" section at top of vault. Defaults to open
+  // when there are items to review, closed when there aren't (handled in
+  // the render — this state only stores the user's manual toggle).
+  const [needsReviewOpen, setNeedsReviewOpen] = useState(true);
+
+  const router = useRouter();
+
+  // Classify a comp's review urgency. Most pressing reason wins when a
+  // comp qualifies under multiple categories. Returns null when no
+  // review needed (comp is clean).
+  type ReviewReason = {
+    key: 'no_location' | 'math' | 'flagged' | 'low_confidence';
+    label: string;
+    icon: 'red' | 'amber' | 'gray' | 'sky';
+  };
+  const classifyReview = (c: Comp): ReviewReason | null => {
+    if (c.latitude == null || c.longitude == null) {
+      return { key: 'no_location', label: 'No location pin', icon: 'red' };
+    }
+    if ((c as any).needs_extraction_review) {
+      return { key: 'math', label: "Math doesn't add up", icon: 'amber' };
+    }
+    if ((c as any).needs_location_review) {
+      return { key: 'flagged', label: 'Marked for review', icon: 'gray' };
+    }
+    if (c.confidence === 'Unverified') {
+      return { key: 'low_confidence', label: 'Low confidence', icon: 'sky' };
+    }
+    return null;
+  };
+
+  // Split a comp's compound county into one virtual row per county.
+  // "Atascosa, Frio" → two display rows ({_displayCounty: 'Atascosa',
+  // _alsoIn: ['Frio']} and {_displayCounty: 'Frio', _alsoIn: ['Atascosa']}).
+  // The underlying comp.id is unchanged so map/CMA/click-through all
+  // reference the same comp — only the LIST display is split.
+  type CompRow = Comp & { _displayCounty: string; _alsoIn: string[]; _rowKey: string };
+  const splitCountyRows = (list: Comp[]): CompRow[] => {
+    const rows: CompRow[] = [];
+    for (const c of list) {
+      const raw = (c.county || '').trim();
+      if (!raw) {
+        rows.push({ ...c, _displayCounty: '', _alsoIn: [], _rowKey: c.id });
+        continue;
+      }
+      const parts = raw.split(/,\s*/).filter(Boolean);
+      if (parts.length <= 1) {
+        rows.push({ ...c, _displayCounty: parts[0] || raw, _alsoIn: [], _rowKey: c.id });
+      } else {
+        for (const cy of parts) {
+          rows.push({
+            ...c,
+            _displayCounty: cy,
+            _alsoIn: parts.filter((x) => x !== cy),
+            _rowKey: `${c.id}::${cy}`,
+          });
+        }
+      }
+    }
+    return rows;
+  };
 
   const toggleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -395,13 +457,29 @@ export default function VaultPage() {
         ) : (
           /* TABLE VIEW — 7 columns: County · City · Acres · Total Price ·
              Per Acre (Total $/Ac) · Adjusted ($/Ac) · Improved.
-             Click any column header to sort. Row click opens edit modal. */
+             Click any column header to sort. Row click opens edit modal.
+
+             Multi-county comps (e.g. "Atascosa, Frio") expand into one row
+             per county so they're findable when sorted by county or
+             filtered to a single county — but the click-through still
+             goes to the same comp.id and they remain one pin on the map. */
           (() => {
-            // Apply "Needs Location" filter first, then sort.
+            // Apply "Needs Location" filter first, then sort, then split
+            // compound counties.
             const filtered = needsLocationOnly
               ? comps.filter((c) => c.latitude == null || c.longitude == null)
               : comps;
-            const sorted = [...filtered].sort((a, b) => {
+            // ─── Compute review-needed comps (separate from main list) ───
+            // Sorted newest first (created_at desc) so the most recent
+            // imports surface immediately for triage.
+            const reviewComps = [...comps]
+              .filter((c) => classifyReview(c) !== null)
+              .sort((a, b) => {
+                const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+                const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+                return tb - ta;
+              });
+            const sortedBase = [...filtered].sort((a, b) => {
               const mul = sortDir === 'asc' ? 1 : -1;
               const cityA = extractCity(a.address) || '';
               const cityB = extractCity(b.address) || '';
@@ -422,6 +500,18 @@ export default function VaultPage() {
                 default: return 0;
               }
             });
+            // Split compound counties into virtual rows. Done AFTER sort so
+            // each split row sorts by its own _displayCounty when county is
+            // the active sort key.
+            const sorted = (() => {
+              const splitRows = splitCountyRows(sortedBase);
+              if (sortKey === 'county') {
+                return [...splitRows].sort((a, b) =>
+                  a._displayCounty.localeCompare(b._displayCounty) * (sortDir === 'asc' ? 1 : -1)
+                );
+              }
+              return splitRows;
+            })();
             const SortHeader = ({ k, label, align = 'left' }: { k: SortKey; label: string; align?: 'left' | 'right' | 'center' }) => (
               <th
                 onClick={() => toggleSort(k)}
@@ -433,7 +523,78 @@ export default function VaultPage() {
                 </span>
               </th>
             );
+            // Icon helper for the review section — color comes from the
+            // classifyReview() icon field.
+            const reviewIcon = (icon: ReviewReason['icon']) => {
+              const cls = 'w-3.5 h-3.5';
+              if (icon === 'red') return <MapPinOff className={`${cls} text-red-400`} />;
+              if (icon === 'amber') return <AlertTriangle className={`${cls} text-amber-400`} />;
+              if (icon === 'sky') return <ShieldQuestion className={`${cls} text-sky-400`} />;
+              return <Clock className={`${cls} text-slate-400`} />;
+            };
             return (
+              <>
+                {/* ─── Needs review section (collapsible) ──────────────
+                    Surfaces comps that need attention — no pin, math
+                    issues, low confidence — above the main vault list so
+                    they don't get lost in a long-scroll. Sorted newest
+                    first so the most recent imports route to triage
+                    immediately. Click any row to open the per-comp
+                    review page. */}
+                {reviewComps.length > 0 && (
+                  <div className="bg-panel border border-border rounded-xl mb-3 overflow-hidden">
+                    <button
+                      onClick={() => setNeedsReviewOpen((v) => !v)}
+                      className="w-full flex items-center justify-between px-4 py-3 hover:bg-night/30 transition-colors"
+                      aria-expanded={needsReviewOpen}
+                    >
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle size={14} className="text-amber-400" />
+                        <span className="text-sm font-bold text-white">
+                          {reviewComps.length} {reviewComps.length === 1 ? 'property needs' : 'properties need'} review
+                        </span>
+                      </div>
+                      {needsReviewOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                    </button>
+                    {needsReviewOpen && (
+                      <div className="border-t border-border">
+                        <table className="w-full">
+                          <tbody>
+                            {reviewComps.map((c) => {
+                              const r = classifyReview(c);
+                              if (!r) return null;
+                              const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
+                              return (
+                                <tr
+                                  key={c.id}
+                                  onClick={() => router.push(`/dashboard/review/${c.id}`)}
+                                  className="border-b border-border last:border-b-0 hover:bg-amber-500/5 cursor-pointer transition-colors"
+                                >
+                                  <td className="py-2.5 px-4 w-7">
+                                    {reviewIcon(r.icon)}
+                                  </td>
+                                  <td className="py-2.5 px-2 text-sm text-white font-bold">
+                                    {c.property_name || `${compCounty} comp`}
+                                  </td>
+                                  <td className="py-2.5 px-2 text-xs text-slate-400 whitespace-nowrap">
+                                    {c.county || '—'} {c.acres ? `· ${formatAcres(c.acres)}` : ''}
+                                  </td>
+                                  <td className="py-2.5 px-2 text-xs text-slate-300 whitespace-nowrap">
+                                    {r.label}
+                                  </td>
+                                  <td className="py-2.5 px-4 text-right text-[10px] text-slate-500 whitespace-nowrap">
+                                    {c.created_at ? new Date(c.created_at).toLocaleDateString() : ''}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
               <div className="bg-panel border border-border rounded-xl overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full">
@@ -455,9 +616,13 @@ export default function VaultPage() {
                         const totalPpa = comp.price_per_acre || 0;
                         const adjustedPpa = comp.ppa_land_only || 0;
                         const hasAdjustment = adjustedPpa > 0 && Math.abs(totalPpa - adjustedPpa) > 1;
+                        // Multi-county: row's display county is _displayCounty;
+                        // _alsoIn lists the other counties this comp is in.
+                        const displayCounty = comp._displayCounty || comp.county || '—';
+                        const alsoIn = comp._alsoIn || [];
                         return (
                           <tr
-                            key={comp.id}
+                            key={comp._rowKey || comp.id}
                             onClick={() => {
                               setEditingComp(comp);
                               setShowAddModal(true);
@@ -509,11 +674,24 @@ export default function VaultPage() {
                                     <Clock className="w-3.5 h-3.5 text-slate-400" />
                                   </span>
                                 )}
-                                <span>{comp.county || '—'}</span>
+                                <span>{displayCounty}</span>
+                                {alsoIn.length > 0 && (
+                                  <span
+                                    className="text-[9px] uppercase tracking-wide text-slate-500 bg-slate-500/15 border border-slate-500/30 rounded px-1 py-px"
+                                    title={`This comp spans multiple counties. Also in: ${alsoIn.join(', ')}`}
+                                  >
+                                    +{alsoIn.length}
+                                  </span>
+                                )}
                               </div>
                               {comp.property_name && (
                                 <div className="text-[10px] text-slate-500 truncate max-w-[180px]">
                                   {comp.property_name}
+                                </div>
+                              )}
+                              {alsoIn.length > 0 && (
+                                <div className="text-[9px] text-slate-600 mt-0.5">
+                                  Also in {alsoIn.join(', ')}
                                 </div>
                               )}
                             </td>
@@ -583,6 +761,7 @@ export default function VaultPage() {
                   </table>
                 </div>
               </div>
+              </>
             );
           })()
         )}
