@@ -34,7 +34,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // quirk). MapboxDraw CSS is also loaded globally there.
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2 } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2, Sparkles, ExternalLink, Link as LinkIcon, Trash2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { useMapHover } from '@/lib/hooks/useMapHover';
 import toast from 'react-hot-toast';
@@ -94,6 +94,22 @@ export default function ReviewPage() {
   // would dominate the side panel if always expanded. Default collapsed
   // to a 1-line preview; broker clicks to read in full.
   const [descriptionOpen, setDescriptionOpen] = useState(false);
+
+  // ─── Listing URL — AI find + manual paste ──────────────────────────
+  // Two ways to attach a listing URL to a comp:
+  //   1. Click "Find listing online" → fires /api/comp/[id]/find-listing
+  //      → AI searches Land.com/Zillow/Realtor → returns one URL or null
+  //      → broker reviews + clicks Save (or Reject + try paste)
+  //   2. Paste a URL directly → save
+  //
+  // Save writes to comp.source_url. The endpoint is conservative — it
+  // returns null when it can't find a confident match. That's fine; the
+  // broker can retry later or use the paste fallback.
+  const [findingListing, setFindingListing] = useState(false);
+  const [listingCandidate, setListingCandidate] = useState<{ url: string | null; reason: string | null } | null>(null);
+  const [pasteUrlMode, setPasteUrlMode] = useState(false);
+  const [pasteUrlInput, setPasteUrlInput] = useState('');
+  const [savingListing, setSavingListing] = useState(false);
 
   // Per-parcel owner + acreage lookup. Fired whenever comp.parcel_id
   // changes (initial load, after a reselect save). One TxGIO/Regrid hit
@@ -692,6 +708,83 @@ export default function ReviewPage() {
   // ── Mark verified handler ───────────────────────────────────────────
   // Clears needs_location_review = false. The gray clock badge in the
   // vault clears as a side effect (the badge is driven by that column).
+  // Trigger AI find-listing search. Returns either a single URL with a
+  // reason, or null (no confident match). Broker decides what to do with
+  // the result — Save / Reject / retry later. Conservative endpoint:
+  // returns null rather than guessing.
+  const handleFindListing = useCallback(async () => {
+    if (!comp || findingListing) return;
+    setFindingListing(true);
+    setListingCandidate(null);
+    try {
+      const res = await fetch(`/api/comp/${comp.id}/find-listing`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data?.error || 'Find listing failed');
+        return;
+      }
+      setListingCandidate({ url: data?.url ?? null, reason: data?.reason ?? null });
+    } catch (e: any) {
+      toast.error(e?.message || 'Find listing failed');
+    } finally {
+      setFindingListing(false);
+    }
+  }, [comp, findingListing]);
+
+  // Save a URL (from AI find or manual paste) to comp.source_url.
+  const handleSaveListingUrl = useCallback(async (url: string) => {
+    if (!comp || savingListing) return;
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    // Basic URL shape check; don't be heroic.
+    try {
+      const u = new URL(trimmed);
+      if (!u.protocol.startsWith('http')) throw new Error('not http');
+    } catch {
+      toast.error('That doesn\'t look like a valid URL');
+      return;
+    }
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: trimmed })
+        .eq('id', comp.id);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL saved');
+      setComp({ ...comp, source_url: trimmed });
+      setListingCandidate(null);
+      setPasteUrlMode(false);
+      setPasteUrlInput('');
+    } finally {
+      setSavingListing(false);
+    }
+  }, [comp, savingListing, supabase]);
+
+  // Clear the saved listing URL (reset to null on the comp).
+  const handleRemoveListingUrl = useCallback(async () => {
+    if (!comp || savingListing) return;
+    if (!confirm('Remove the saved listing URL?')) return;
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: null })
+        .eq('id', comp.id);
+      if (error) {
+        toast.error(`Remove failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL removed');
+      setComp({ ...comp, source_url: null });
+    } finally {
+      setSavingListing(false);
+    }
+  }, [comp, savingListing, supabase]);
+
   const handleMarkVerified = useCallback(async () => {
     if (!comp || saving) return;
     setSaving(true);
@@ -1649,25 +1742,203 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* Source */}
-          {(comp.source_type || comp.source_url) && (
-            <div className="border-t border-border pt-3 text-xs">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Source</div>
-              <div className="text-slate-300">
-                {comp.source_type === 'listing_url' ? 'Listing URL' : 'PDF appraisal'}
-              </div>
-              {comp.source_url && (
+          {/* ─── Source + Listing URL ──────────────────────────────────
+              Source type tag (PDF appraisal / Listing URL) + the
+              listing-link surface. Always visible so brokers know
+              what's attached and have a one-click path to find/save
+              a listing for any comp.
+
+              Three states for the listing-link area:
+                1. Saved URL exists → show clickable link + remove
+                2. Find returned a candidate → show URL + reason +
+                   Save / Reject
+                3. No link yet → "Find listing online" button (primary)
+                   + "Paste URL manually" link (secondary)
+              Manual paste always available; broker can override AI
+              find at any time. */}
+          <div className="border-t border-border pt-3 text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[10px] uppercase tracking-wide text-slate-500">Source</div>
+              {comp.source_type && (
+                <div className="text-[10px] text-slate-400">
+                  {comp.source_type === 'listing_url' ? 'Listing URL' : 'PDF appraisal'}
+                </div>
+              )}
+            </div>
+
+            {/* SAVED state — listing URL already on the comp */}
+            {comp.source_url && !listingCandidate && !pasteUrlMode && (
+              <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
                 <a
                   href={comp.source_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-sage hover:underline break-all text-[11px]"
+                  className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
                 >
-                  {comp.source_url}
+                  <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                  <span>{comp.source_url}</span>
                 </a>
-              )}
-            </div>
-          )}
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    onClick={handleFindListing}
+                    disabled={findingListing}
+                    className="text-[10px] text-slate-500 hover:text-sage underline disabled:opacity-50"
+                    title="Re-run AI find to look for a better match"
+                  >
+                    {findingListing ? 'Searching…' : 'Find a better match'}
+                  </button>
+                  <button
+                    onClick={handleRemoveListingUrl}
+                    disabled={savingListing}
+                    className="text-[10px] text-slate-500 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                    title="Remove the saved listing URL"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* AI FOUND state — candidate returned, broker reviews */}
+            {listingCandidate && listingCandidate.url && (
+              <div className="bg-sage/10 border border-sage/40 rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center gap-1.5 text-sage text-[10px] font-bold uppercase tracking-wide">
+                  <Sparkles size={11} />
+                  AI found a match
+                </div>
+                <a
+                  href={listingCandidate.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                >
+                  <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                  <span>{listingCandidate.url}</span>
+                </a>
+                {listingCandidate.reason && (
+                  <p className="text-[10px] text-slate-300 leading-relaxed">
+                    {listingCandidate.reason}
+                  </p>
+                )}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={() => setListingCandidate(null)}
+                    disabled={savingListing}
+                    className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                  >
+                    <X size={10} />
+                    Not a match
+                  </button>
+                  <button
+                    onClick={() => handleSaveListingUrl(listingCandidate.url!)}
+                    disabled={savingListing}
+                    className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                  >
+                    {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                    {savingListing ? 'Saving…' : 'Save as listing'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* AI EMPTY state — searched, no confident match */}
+            {listingCandidate && !listingCandidate.url && (
+              <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-2.5 space-y-1.5">
+                <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wide">
+                  No confident match
+                </div>
+                {listingCandidate.reason && (
+                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                    {listingCandidate.reason}
+                  </p>
+                )}
+                <p className="text-[10px] text-slate-500">
+                  Try again later or paste a URL manually below.
+                </p>
+                <button
+                  onClick={() => setListingCandidate(null)}
+                  className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* MANUAL PASTE state — input visible */}
+            {pasteUrlMode && (
+              <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                <input
+                  type="url"
+                  value={pasteUrlInput}
+                  onChange={(e) => setPasteUrlInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && pasteUrlInput.trim()) {
+                      e.preventDefault();
+                      handleSaveListingUrl(pasteUrlInput);
+                    }
+                    if (e.key === 'Escape') setPasteUrlMode(false);
+                  }}
+                  placeholder="https://landsofamerica.com/property/…"
+                  autoFocus
+                  className="w-full bg-night/60 border border-border focus:border-sage rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 outline-none"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => { setPasteUrlMode(false); setPasteUrlInput(''); }}
+                    className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleSaveListingUrl(pasteUrlInput)}
+                    disabled={savingListing || pasteUrlInput.trim().length < 5}
+                    className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                    Save URL
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* DEFAULT state — Find / Paste actions */}
+            {!comp.source_url && !listingCandidate && !pasteUrlMode && (
+              <div className="space-y-1.5">
+                <button
+                  onClick={handleFindListing}
+                  disabled={findingListing}
+                  className="w-full py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
+                >
+                  {findingListing ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      Searching listing sites…
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={12} />
+                      Find listing online
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => setPasteUrlMode(true)}
+                  className="w-full py-1 text-[10px] text-slate-500 hover:text-slate-300 underline flex items-center justify-center gap-1"
+                >
+                  <LinkIcon size={10} />
+                  or paste URL manually
+                </button>
+              </div>
+            )}
+
+            {/* Search loading message under "Find" button while in flight */}
+            {findingListing && !listingCandidate && (
+              <p className="text-[10px] text-slate-500 leading-relaxed italic">
+                Landstack is searching Lands of America, LandWatch, Land.com, Realtor, and Zillow for a confident match. Conservative on purpose — a missing link is better than a wrong one.
+              </p>
+            )}
+          </div>
 
           {/* Parcel owners — fetched live from TxGIO/Regrid for each
               prop_id in comp.parcel_id. Shown in view mode AND during
