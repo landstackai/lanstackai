@@ -279,24 +279,24 @@ export default function VaultPage() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-night">
+    <div className="flex flex-col h-full bg-white">
       {/* Header */}
-      <div className="flex-shrink-0 bg-panel border-b border-border px-4 py-3">
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-3">
         <div className="flex items-center gap-3">
           {/* Search */}
           <div className="relative flex-1 max-w-md">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
             <input
               type="text"
               placeholder="Search comps..."
               value={filters.search}
               onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-              className="w-full bg-card border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors"
+              className="w-full bg-gray-50 border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm text-gray-900 placeholder-slate-500 outline-none focus:border-sage transition-colors"
             />
           </div>
 
           {/* Scope tabs */}
-          <div className="hidden md:flex bg-card border border-border rounded-lg p-0.5">
+          <div className="hidden md:flex bg-gray-50 border border-gray-200 rounded-lg p-0.5">
             {(['all', 'mine', 'team'] as const).map((scope) => (
               <button
                 key={scope}
@@ -304,7 +304,7 @@ export default function VaultPage() {
                 className={`px-3 py-1.5 rounded-md text-xs font-bold capitalize transition-all ${
                   filters.scope === scope
                     ? 'bg-sage/10 text-sage'
-                    : 'text-slate-400 hover:text-slate-200'
+                    : 'text-gray-600 hover:text-gray-800'
                 }`}
               >
                 {scope}
@@ -318,7 +318,7 @@ export default function VaultPage() {
             className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors ${
               showFilters
                 ? 'bg-sage/10 border-sage/20 text-sage'
-                : 'bg-card border-border text-slate-400 hover:text-slate-200'
+                : 'bg-gray-50 border-gray-200 text-gray-600 hover:text-gray-800'
             }`}
           >
             <SlidersHorizontal size={13} />
@@ -326,16 +326,16 @@ export default function VaultPage() {
           </button>
 
           {/* View mode */}
-          <div className="hidden md:flex bg-card border border-border rounded-lg p-0.5">
+          <div className="hidden md:flex bg-gray-50 border border-gray-200 rounded-lg p-0.5">
             <button
               onClick={() => setViewMode('list')}
-              className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'text-sage bg-sage/10' : 'text-slate-400'}`}
+              className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'text-sage bg-sage/10' : 'text-gray-600'}`}
             >
               <List size={14} />
             </button>
             <button
               onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded-md transition-all ${viewMode === 'grid' ? 'text-sage bg-sage/10' : 'text-slate-400'}`}
+              className={`p-1.5 rounded-md transition-all ${viewMode === 'grid' ? 'text-sage bg-sage/10' : 'text-gray-600'}`}
             >
               <Grid size={14} />
             </button>
@@ -344,7 +344,7 @@ export default function VaultPage() {
           {/* Add buttons */}
           <button
             onClick={() => setShowQuickCapture(true)}
-            className="flex items-center gap-1.5 px-3 py-2 bg-card border border-border rounded-lg text-xs font-bold text-slate-300 hover:text-white transition-colors"
+            className="flex items-center gap-1.5 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold text-gray-700 hover:text-gray-900 transition-colors"
           >
             <Plus size={13} />
             <span className="hidden md:inline">Quick</span>
@@ -361,14 +361,14 @@ export default function VaultPage() {
 
         {/* Stats bar */}
         <div className="flex items-center gap-4 mt-2">
-          <span className="text-xs text-slate-500">
-            <span className="text-white font-bold">{stats.total}</span> comps
+          <span className="text-xs text-gray-500">
+            <span className="text-gray-900 font-bold">{stats.total}</span> comps
           </span>
-          <span className="text-xs text-slate-500">
-            <span className="text-white font-bold">{stats.sold}</span> sold
+          <span className="text-xs text-gray-500">
+            <span className="text-gray-900 font-bold">{stats.sold}</span> sold
           </span>
           {stats.avgPPA > 0 && (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-gray-500">
               Avg <span className="text-sage font-bold font-mono">{formatPPA(stats.avgPPA)}</span>
             </span>
           )}
@@ -377,12 +377,12 @@ export default function VaultPage() {
 
       {/* Filter panel */}
       {showFilters && (
-        <div className="flex-shrink-0 bg-panel border-b border-border px-4 py-3">
+        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-3">
           <div className="flex flex-wrap gap-3">
             <select
               value={filters.status}
               onChange={(e) => setFilters({ ...filters, status: e.target.value as any })}
-              className="bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+              className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-gray-900 outline-none focus:border-sage"
             >
               <option value="">All Status</option>
               <option value="Sold">Sold</option>
@@ -394,7 +394,7 @@ export default function VaultPage() {
             <select
               value={filters.water}
               onChange={(e) => setFilters({ ...filters, water: e.target.value as any })}
-              className="bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+              className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-gray-900 outline-none focus:border-sage"
             >
               <option value="">All Water</option>
               <option value="Strong">Strong</option>
@@ -405,7 +405,7 @@ export default function VaultPage() {
             <select
               value={filters.visibility}
               onChange={(e) => setFilters({ ...filters, visibility: e.target.value as any })}
-              className="bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+              className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-gray-900 outline-none focus:border-sage"
             >
               <option value="">All Visibility</option>
               <option value="private">Private</option>
@@ -418,14 +418,14 @@ export default function VaultPage() {
               placeholder="Min acres"
               value={filters.min_acres}
               onChange={(e) => setFilters({ ...filters, min_acres: e.target.value })}
-              className="w-28 bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+              className="w-28 bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-gray-900 outline-none focus:border-sage"
             />
             <input
               type="number"
               placeholder="Max acres"
               value={filters.max_acres}
               onChange={(e) => setFilters({ ...filters, max_acres: e.target.value })}
-              className="w-28 bg-card border border-border rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-sage"
+              className="w-28 bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs text-gray-900 outline-none focus:border-sage"
             />
 
             {/* "Needs Location" toggle — finds comps where lat/lng failed
@@ -436,7 +436,7 @@ export default function VaultPage() {
               className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-colors ${
                 needsLocationOnly
                   ? 'border-amber-400 bg-amber-400/10 text-amber-400'
-                  : 'border-border text-slate-400 hover:text-white hover:border-slate-500'
+                  : 'border-gray-200 text-gray-600 hover:text-gray-900 hover:border-slate-500'
               }`}
             >
               {needsLocationOnly ? '✓ ' : ''}Needs Location
@@ -476,7 +476,7 @@ export default function VaultPage() {
 
             <button
               onClick={() => setFilters(defaultFilters)}
-              className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-border rounded-lg"
+              className="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-900 border border-gray-200 rounded-lg"
             >
               Clear
             </button>
@@ -492,17 +492,17 @@ export default function VaultPage() {
           </div>
         ) : comps.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
-            <div className="w-12 h-12 rounded-xl bg-card border border-border flex items-center justify-center mb-3">
-              <FileText size={20} className="text-slate-500" />
+            <div className="w-12 h-12 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center mb-3">
+              <FileText size={20} className="text-gray-500" />
             </div>
-            <p className="text-sm font-semibold text-slate-300 mb-1">No comps yet</p>
-            <p className="text-xs text-slate-500 mb-4">
+            <p className="text-sm font-semibold text-gray-700 mb-1">No comps yet</p>
+            <p className="text-xs text-gray-500 mb-4">
               Add your first comp or import from a PDF
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => setShowQuickCapture(true)}
-                className="px-4 py-2 bg-card border border-border text-xs font-bold text-white rounded-lg hover:border-sage transition-colors"
+                className="px-4 py-2 bg-gray-50 border border-gray-200 text-xs font-bold text-gray-900 rounded-lg hover:border-sage transition-colors"
               >
                 Quick Add
               </button>
@@ -592,7 +592,7 @@ export default function VaultPage() {
             const SortHeader = ({ k, label, align = 'left' }: { k: SortKey; label: string; align?: 'left' | 'right' | 'center' }) => (
               <th
                 onClick={() => toggleSort(k)}
-                className={`py-2.5 px-3 text-${align} text-[10px] font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-slate-200 transition-colors select-none`}
+                className={`py-2.5 px-3 text-${align} text-[10px] font-bold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-800 transition-colors select-none`}
               >
                 <span className="inline-flex items-center gap-1">
                   {label}
@@ -607,7 +607,7 @@ export default function VaultPage() {
               if (icon === 'red') return <MapPinOff className={`${cls} text-red-400`} />;
               if (icon === 'amber') return <AlertTriangle className={`${cls} text-amber-400`} />;
               if (icon === 'sky') return <ShieldQuestion className={`${cls} text-sky-400`} />;
-              return <Clock className={`${cls} text-slate-400`} />;
+              return <Clock className={`${cls} text-gray-600`} />;
             };
             return (
               <>
@@ -619,22 +619,22 @@ export default function VaultPage() {
                     immediately. Click any row to open the per-comp
                     review page. */}
                 {reviewComps.length > 0 && (
-                  <div className="bg-panel border border-border rounded-xl mb-3 overflow-hidden">
+                  <div className="bg-white border border-gray-200 rounded-xl mb-3 overflow-hidden">
                     <button
                       onClick={() => setNeedsReviewOpen((v) => !v)}
-                      className="w-full flex items-center justify-between px-4 py-3 hover:bg-night/30 transition-colors"
+                      className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-100 transition-colors"
                       aria-expanded={needsReviewOpen}
                     >
                       <div className="flex items-center gap-2">
                         <AlertTriangle size={14} className="text-amber-400" />
-                        <span className="text-sm font-bold text-white">
+                        <span className="text-sm font-bold text-gray-900">
                           {reviewComps.length} {reviewComps.length === 1 ? 'property needs' : 'properties need'} review
                         </span>
                       </div>
-                      {needsReviewOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                      {needsReviewOpen ? <ChevronUp size={16} className="text-gray-600" /> : <ChevronDown size={16} className="text-gray-600" />}
                     </button>
                     {needsReviewOpen && (
-                      <div className="border-t border-border">
+                      <div className="border-t border-gray-200">
                         <table className="w-full">
                           <tbody>
                             {reviewComps.map((c) => {
@@ -645,21 +645,21 @@ export default function VaultPage() {
                                 <tr
                                   key={c.id}
                                   onClick={() => router.push(`/dashboard/review/${c.id}`)}
-                                  className="border-b border-border last:border-b-0 hover:bg-amber-500/5 cursor-pointer transition-colors"
+                                  className="border-b border-gray-200 last:border-b-0 hover:bg-amber-50 cursor-pointer transition-colors"
                                 >
                                   <td className="py-2.5 px-4 w-7">
                                     {reviewIcon(r.icon)}
                                   </td>
-                                  <td className="py-2.5 px-2 text-sm text-white font-bold">
+                                  <td className="py-2.5 px-2 text-sm text-gray-900 font-bold">
                                     {c.property_name || `${compCounty} comp`}
                                   </td>
-                                  <td className="py-2.5 px-2 text-xs text-slate-400 whitespace-nowrap">
+                                  <td className="py-2.5 px-2 text-xs text-gray-600 whitespace-nowrap">
                                     {c.county || '—'} {c.acres ? `· ${formatAcres(c.acres)}` : ''}
                                   </td>
-                                  <td className="py-2.5 px-2 text-xs text-slate-300 whitespace-nowrap">
+                                  <td className="py-2.5 px-2 text-xs text-gray-700 whitespace-nowrap">
                                     {r.label}
                                   </td>
-                                  <td className="py-2.5 px-4 text-right text-[10px] text-slate-500 whitespace-nowrap">
+                                  <td className="py-2.5 px-4 text-right text-[10px] text-gray-500 whitespace-nowrap">
                                     {c.created_at ? new Date(c.created_at).toLocaleDateString() : ''}
                                   </td>
                                 </tr>
@@ -672,10 +672,10 @@ export default function VaultPage() {
                   </div>
                 )}
 
-              <div className="bg-panel border border-border rounded-xl overflow-hidden">
+              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full">
-                    <thead className="bg-night/40 border-b border-border sticky top-0 z-10">
+                    <thead className="bg-white/40 border-b border-gray-200 sticky top-0 z-10">
                       <tr>
                         <SortHeader k="county" label="County" />
                         <SortHeader k="city" label="City" />
@@ -712,7 +712,7 @@ export default function VaultPage() {
                               setEditingComp(comp);
                               setShowAddModal(true);
                             }}
-                            className="border-b border-border last:border-b-0 hover:bg-sage/5 cursor-pointer group transition-colors"
+                            className="border-b border-gray-200 last:border-b-0 hover:bg-sage/10 cursor-pointer group transition-colors"
                           >
                             {/* County (with property name as subtext if set).
                                 Three possible badges, any combination:
@@ -732,7 +732,7 @@ export default function VaultPage() {
                                 you literally cannot show this comp on a map
                                 until someone places it. */}
                             <td className="py-2.5 px-3">
-                              <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                              <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
                                 {(comp.latitude == null || comp.longitude == null) && (
                                   <span
                                     title="No map location set. Open this comp to place a pin manually via the location picker."
@@ -756,13 +756,13 @@ export default function VaultPage() {
                                     title="Location wasn't visually verified at import. Open this comp to confirm the pin is on the correct parcel."
                                     className="inline-flex items-center"
                                   >
-                                    <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                    <Clock className="w-3.5 h-3.5 text-gray-600" />
                                   </span>
                                 )}
                                 <span>{displayCounty}</span>
                                 {alsoIn.length > 0 && (
                                   <span
-                                    className="text-[9px] uppercase tracking-wide text-slate-500 bg-slate-500/15 border border-slate-500/30 rounded px-1 py-px"
+                                    className="text-[9px] uppercase tracking-wide text-gray-500 bg-gray-100 border border-gray-300 rounded px-1 py-px"
                                     title={`This comp spans multiple counties. Also in: ${alsoIn.join(', ')}`}
                                   >
                                     +{alsoIn.length}
@@ -770,37 +770,37 @@ export default function VaultPage() {
                                 )}
                               </div>
                               {comp.property_name && (
-                                <div className="text-[10px] text-slate-500 truncate max-w-[180px]">
+                                <div className="text-[10px] text-gray-500 truncate max-w-[180px]">
                                   {comp.property_name}
                                 </div>
                               )}
                               {alsoIn.length > 0 && (
-                                <div className="text-[9px] text-slate-600 mt-0.5">
+                                <div className="text-[9px] text-gray-400 mt-0.5">
                                   Also in {alsoIn.join(', ')}
                                 </div>
                               )}
                             </td>
                             {/* City */}
-                            <td className="py-2.5 px-3 text-sm text-slate-300">
-                              {city || <span className="text-slate-600">—</span>}
+                            <td className="py-2.5 px-3 text-sm text-gray-700">
+                              {city || <span className="text-gray-400">—</span>}
                               {comp.state && city && (
-                                <span className="text-[10px] text-slate-500 ml-1">{comp.state}</span>
+                                <span className="text-[10px] text-gray-500 ml-1">{comp.state}</span>
                               )}
                             </td>
                             {/* Acres */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-white">
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-gray-900">
                               {formatAcres(comp.acres)}
                             </td>
                             {/* Total Price */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-white font-bold">
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-gray-900 font-bold">
                               {formatCurrency(comp.sale_price)}
                             </td>
                             {/* Total Per Acre — emerald */}
-                            <td className="py-2.5 px-3 text-right text-sm font-mono text-emerald-400 font-bold">
+                            <td className="py-2.5 px-3 text-right text-sm font-mono text-emerald-600 font-bold">
                               {totalPpa > 0 ? formatPPA(totalPpa) : '—'}
                             </td>
                             {/* Adjusted Per Acre — amber, or em-dash when no adjustment */}
-                            <td className={`py-2.5 px-3 text-right text-sm font-mono font-bold ${hasAdjustment ? 'text-amber-300' : 'text-slate-600'}`}>
+                            <td className={`py-2.5 px-3 text-right text-sm font-mono font-bold ${hasAdjustment ? 'text-amber-700' : 'text-gray-400'}`}>
                               {hasAdjustment ? formatPPA(adjustedPpa) : '—'}
                             </td>
                             {/* Improved badge */}
@@ -823,7 +823,7 @@ export default function VaultPage() {
                                     setShowAddModal(true);
                                   }}
                                   title="Edit"
-                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-white/5"
+                                  className="p-1 rounded text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                                 >
                                   <Edit size={12} />
                                 </button>
@@ -833,7 +833,7 @@ export default function VaultPage() {
                                     handleDeleteComp(comp.id);
                                   }}
                                   title="Delete"
-                                  className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-red-400/10"
+                                  className="p-1 rounded text-gray-600 hover:text-red-400 hover:bg-red-400/10"
                                 >
                                   <Trash2 size={12} />
                                 </button>
