@@ -315,45 +315,51 @@ export default function VaultPage() {
           identity (title, total count, primary CTAs). Second row is
           the working surface (search, filters, view mode). Sticky on
           scroll with a subtle shadow when not at top. */}
-      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 pt-6 pb-4 shadow-sm">
-        {/* Row 1 — page title + primary actions. Title gets its own
-            line so it reads like a real page header instead of being
-            crowded by stats. Stats moved to dedicated KPI tiles below
-            the header (Google Analytics / QuickBooks / Stripe pattern). */}
+      <div className="flex-shrink-0 bg-white border-b border-gray-200/80 px-8 pt-7 pb-5">
+        {/* Row 1 — page title + primary actions. Restrained typography:
+            font-semibold (not bold), tracking-tight for premium feel,
+            text-2xl as the upper limit for page titles in a B2B tool.
+            Subtitle is text-[13px] in gray-500 — Apple/Stripe convention.
+            More horizontal padding (px-8) so the header has room to breathe. */}
         <div className="flex items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900 tracking-tight leading-tight">
+            <h1 className="text-2xl font-semibold text-gray-900 tracking-tight leading-none">
               Comp Vault
             </h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Land sales database across {stats.total === 1 ? '1 property' : `${stats.total} properties`}
+            <p className="text-[13px] text-gray-500 mt-2 font-normal">
+              {stats.total === 1
+                ? 'One property in your land sales database.'
+                : `${stats.total.toLocaleString()} properties in your land sales database.`}
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* Secondary actions: subtle white with thin gray border.
+                Apple/Stripe convention — secondaries should NOT compete
+                with primary. font-medium not font-semibold. */}
             <button
               onClick={() => {
-                // Export — placeholder; ships as CSV download next pass.
-                // Inert for now so the affordance exists at design level.
                 toast('Export coming soon — CSV / PDF support', { icon: '📤' });
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-200 rounded-lg text-[13px] font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
               title="Export comps as CSV or PDF"
             >
-              <FileText size={14} />
+              <FileText size={13} />
               Export
             </button>
             <button
               onClick={() => setShowQuickCapture(true)}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-gray-200 rounded-lg text-[13px] font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
             >
-              <Plus size={14} />
+              <Plus size={13} />
               Quick
             </button>
+            {/* Primary action: solid emerald, white text, slightly more
+                padding. Subtle shadow for elevation. */}
             <button
               onClick={() => setShowAddModal(true)}
-              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[13px] font-medium transition-all shadow-sm hover:shadow"
             >
-              <Plus size={14} />
+              <Plus size={13} />
               Add Comp
             </button>
           </div>
@@ -543,48 +549,53 @@ export default function VaultPage() {
               - Subtle subtitle for context
             Grid: 4 cols on desktop, 2x2 on tablet, 1-col on mobile. */}
         {stats.sold > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+            {/* KPI tiles — Apple/Stripe convention. Restrained weights:
+                font-medium label, font-semibold number (NOT font-bold —
+                bold reads as "shouting" in big sizes). Tabular figures.
+                Subtle border (gray-200/60), no shadow on rest, faint
+                hover lift. Generous interior padding for premium feel. */}
+            <div className="bg-white border border-gray-200/60 rounded-xl p-5 transition-all hover:border-gray-300/80 hover:shadow-sm">
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
                 Total Volume
               </div>
-              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+              <div className="text-[28px] font-semibold text-gray-900 tabular-nums leading-tight mt-2">
                 {formatCurrency(stats.totalVolume)}
               </div>
-              <div className="text-xs text-gray-500 mt-1">
+              <div className="text-xs text-gray-500 mt-1.5 font-normal">
                 across {stats.sold} {stats.sold === 1 ? 'sale' : 'sales'}
               </div>
             </div>
-            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+            <div className="bg-white border border-gray-200/60 rounded-xl p-5 transition-all hover:border-gray-300/80 hover:shadow-sm">
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
                 Avg Price / Acre
               </div>
-              <div className="text-2xl font-bold text-emerald-700 tabular-nums">
+              <div className="text-[28px] font-semibold text-emerald-700 tabular-nums leading-tight mt-2">
                 {formatPPA(stats.avgPPA)}
               </div>
-              <div className="text-xs text-gray-500 mt-1">
+              <div className="text-xs text-gray-500 mt-1.5 font-normal">
                 portfolio-wide average
               </div>
             </div>
-            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+            <div className="bg-white border border-gray-200/60 rounded-xl p-5 transition-all hover:border-gray-300/80 hover:shadow-sm">
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
                 Avg Property Size
               </div>
-              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+              <div className="text-[28px] font-semibold text-gray-900 tabular-nums leading-tight mt-2">
                 {formatAcres(stats.avgAcres)}
               </div>
-              <div className="text-xs text-gray-500 mt-1">
+              <div className="text-xs text-gray-500 mt-1.5 font-normal">
                 acres per sale
               </div>
             </div>
-            <div className="bg-white border border-gray-200 rounded-xl px-5 py-4 shadow-sm hover:shadow-md transition-shadow">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+            <div className="bg-white border border-gray-200/60 rounded-xl p-5 transition-all hover:border-gray-300/80 hover:shadow-sm">
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500">
                 Recent Activity
               </div>
-              <div className="text-2xl font-bold text-gray-900 tabular-nums">
+              <div className="text-[28px] font-semibold text-gray-900 tabular-nums leading-tight mt-2">
                 {stats.recentSales}
               </div>
-              <div className="text-xs text-gray-500 mt-1">
+              <div className="text-xs text-gray-500 mt-1.5 font-normal">
                 {stats.recentSales === 1 ? 'sale' : 'sales'} in last 90 days
               </div>
             </div>
@@ -693,10 +704,14 @@ export default function VaultPage() {
               }
               return splitRows;
             })();
+            // Column headers: medium weight, looser tracking — feels
+            // like an Excel/CoStar data tool. NOT all caps tracking-wider
+            // (that's old-school); use mixed-case font-medium for that
+            // calm professional vibe.
             const SortHeader = ({ k, label, align = 'left' }: { k: SortKey; label: string; align?: 'left' | 'right' | 'center' }) => (
               <th
                 onClick={() => toggleSort(k)}
-                className={`py-2.5 px-3 text-${align} text-[10px] font-bold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-800 transition-colors select-none`}
+                className={`py-3 px-3 text-${align} text-[11px] font-medium text-gray-500 uppercase tracking-[0.06em] cursor-pointer hover:text-gray-700 transition-colors select-none`}
               >
                 <span className="inline-flex items-center gap-1">
                   {label}
@@ -782,10 +797,10 @@ export default function VaultPage() {
                   </div>
                 )}
 
-              <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+              <div className="bg-white border border-gray-200/60 rounded-xl overflow-hidden shadow-sm">
                 <div className="overflow-x-auto">
                   <table className="w-full">
-                    <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
+                    <thead className="bg-gray-50/50 border-b border-gray-200/80 sticky top-0 z-10">
                       <tr>
                         <SortHeader k="county" label="County" />
                         <SortHeader k="city" label="City" />
@@ -822,7 +837,7 @@ export default function VaultPage() {
                               setEditingComp(comp);
                               setShowAddModal(true);
                             }}
-                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 cursor-pointer group transition-colors"
+                            className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50/70 cursor-pointer group transition-colors"
                           >
                             {/* County (with property name as subtext if set).
                                 Three possible badges, any combination:
