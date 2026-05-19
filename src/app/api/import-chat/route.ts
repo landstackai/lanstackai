@@ -326,6 +326,43 @@ export async function POST(request: NextRequest) {
         const price = Number(c?.sale_price);
         const ppa = Number(c?.price_per_acre);
         const acres = Number(c?.acres);
+
+        // ─── SANITY-CHECK TIER (fires when full math gate can't) ────
+        // The full math gate requires sale_price + price_per_acre +
+        // acres all to be extracted. But sometimes the AI doesn't pull
+        // price_per_acre (the doc may not state it explicitly), and
+        // then the gate silently skips even when acres × price gives an
+        // absurd $/ac. The Eatwell River Ranch failure: acres=9,
+        // price=$10M → implied $1.1M/ac, which is impossible for TX
+        // rural land. Math gate didn't fire because ppa was null.
+        //
+        // This tier sanity-checks the implied $/ac against a plausible
+        // range for TX rural land ($500-$200k/ac). Anything outside
+        // the band flags needs_extraction_review = true. Doesn't auto-
+        // correct (we don't know which field is wrong) — surfaces it
+        // for broker fix on the review page.
+        const PLAUSIBLE_PPA_MIN = 500;
+        const PLAUSIBLE_PPA_MAX = 200_000;
+        if (price > 0 && acres > 0 && !(ppa > 0)) {
+          const implied = price / acres;
+          if (implied < PLAUSIBLE_PPA_MIN || implied > PLAUSIBLE_PPA_MAX) {
+            console.warn(
+              `[math-gate-sanity] ${c.property_name || 'unnamed'}: ` +
+              `${acres} ac × $${price.toLocaleString()} = $${implied.toFixed(0)}/ac ` +
+              `(outside plausible range $${PLAUSIBLE_PPA_MIN}-$${PLAUSIBLE_PPA_MAX}/ac). ` +
+              `price_per_acre not extracted so full gate can't run. ` +
+              `Flagging needs_extraction_review=true.`
+            );
+            c.needs_extraction_review = true;
+            if (c.confidence && typeof c.confidence === 'object') {
+              c.confidence.overall = Math.min(
+                Number(c.confidence.overall) || 40,
+                40
+              );
+            }
+          }
+        }
+
         if (price > 0 && ppa > 0 && acres > 0) {
           const impliedAcres = price / ppa;
           const delta = Math.abs(impliedAcres - acres) / acres;
@@ -519,13 +556,26 @@ export async function POST(request: NextRequest) {
 // $4,750 ≠ $5.6M, Δ86%) but the damage was already done — the row saved
 // with 8,820 acres flagged for broker review.
 //
-// New strategy: collect ALL acreage mentions, then pick the one whose
-// surrounding context (±60 chars) most strongly implies "sold tract":
-// "sale", "subject", "tract", "comprising", "totaling", "consist(s)(ing)".
-// Falls back to the LAST mention if no contextual cue — sold-tract size
-// is typically restated near the end of the prose summary (e.g. "The
-// property totaling 1,179.115 acres is offered for sale at..."), while
-// parent-tract mentions front-load the description.
+// Strategy (refined after Eatwell River Ranch failure):
+//   1. Find every "NNN acre/ac" mention.
+//   2. Look for a SALE_CUE (sale/subject/tract/comprising/totaling/
+//      consisting) near each one. If exactly one match has a cue, take
+//      it. That's the strongest signal of "this is THE sold tract".
+//   3. Otherwise, strip out NEG_CUE matches (parent/holdings/larger/
+//      portion of/adjoining/surrounding — explicitly NOT the sold
+//      tract) and pick the LARGEST remaining number.
+//
+// Why "largest" instead of "last":
+//   - L&D had parent FIRST + sold LAST (8,820 → 1,179)
+//     → both survive NEG_CUE filter? No — "8,820-acre Cooper Ranch
+//       holdings" trips the "holdings" NEG_CUE, gets stripped, leaves
+//       just 1,179. ✓
+//   - Eatwell had property total FIRST (±796-acre headline) +
+//     sub-feature LATER (e.g., "9-acre lake")
+//     → both survive NEG_CUE filter; old "pick last" wrongly chose 9
+//     → new "pick largest" correctly chooses 796 ✓
+//   - Property totals are reliably the BIGGEST acreage in a description;
+//     sub-features (lakes, ponds, pastures, fields) are smaller.
 function extractAcresFromDescription(desc: any): number | null {
   if (typeof desc !== 'string' || !desc) return null;
   // Array.from() rather than spread — the project's tsconfig.json doesn't
@@ -543,9 +593,9 @@ function extractAcresFromDescription(desc: any): number | null {
     return SALE_CUE.test(window);
   });
 
-  // Negative cue — explicitly NOT the sold tract. Strip these from the pool
-  // before the fallback so the last-mention heuristic doesn't pick a parent.
-  const NEG_CUE = /\b(parent|holdings?|larger|portion of|adjoining|surrounding)\b/i;
+  // Negative cue — explicitly NOT the sold tract. Strip these from the
+  // pool before falling back to magnitude.
+  const NEG_CUE = /\b(parent|holdings?|larger|portion of|adjoining|surrounding|abuts|neighbor)\b/i;
   const candidates = preferred
     ? [preferred]
     : all.filter((m) => {
@@ -554,9 +604,20 @@ function extractAcresFromDescription(desc: any): number | null {
         return !NEG_CUE.test(window);
       });
 
-  const chosen = candidates[candidates.length - 1] || all[all.length - 1];
-  const v = parseFloat(chosen[1].replace(/,/g, ''));
-  return Number.isFinite(v) ? v : null;
+  if (candidates.length === 0) return null;
+
+  // Pick the LARGEST acreage in the candidate pool. See block comment
+  // above for rationale.
+  let best = candidates[0];
+  let bestVal = parseFloat(best[1].replace(/,/g, ''));
+  for (let i = 1; i < candidates.length; i++) {
+    const v = parseFloat(candidates[i][1].replace(/,/g, ''));
+    if (Number.isFinite(v) && v > bestVal) {
+      best = candidates[i];
+      bestVal = v;
+    }
+  }
+  return Number.isFinite(bestVal) ? bestVal : null;
 }
 
 async function enrichWithHolding(comp: any): Promise<any> {
