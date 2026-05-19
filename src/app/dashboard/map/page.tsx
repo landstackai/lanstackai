@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2 } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -64,6 +64,18 @@ export default function MapPage() {
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
+
+  // ─── Listing URL state for Comp Detail panel ───────────────────────
+  // Same find/paste/save flow as the review page Source block, scoped
+  // to whichever comp is currently selected. Cleared when selectedComp
+  // changes (via effect below). Handlers live further down — supabase
+  // client is initialized later in the file so the handlers need to
+  // sit below that point.
+  const [findingListing, setFindingListing] = useState(false);
+  const [listingCandidate, setListingCandidate] = useState<{ url: string | null; reason: string | null } | null>(null);
+  const [pasteUrlMode, setPasteUrlMode] = useState(false);
+  const [pasteUrlInput, setPasteUrlInput] = useState('');
+  const [savingListing, setSavingListing] = useState(false);
   // Map style options. Dark was removed per broker feedback (rarely used,
   // wasted real estate). Both remaining options use the same satellite
   // base imagery — "Terrain" is satellite WITH contour lines overlaid
@@ -206,6 +218,16 @@ export default function MapPage() {
   // Reset expansion whenever a different comp is selected
   useEffect(() => { setDescriptionExpanded(false); }, [selectedComp?.id]);
 
+  // Reset Find Listing state whenever a different comp is selected.
+  // Otherwise a candidate found for comp A would appear when opening
+  // comp B, which is confusing and a possible save-to-wrong-comp bug.
+  useEffect(() => {
+    setListingCandidate(null);
+    setPasteUrlMode(false);
+    setPasteUrlInput('');
+    setFindingListing(false);
+  }, [selectedComp?.id]);
+
   // Rule: description's acreage is authoritative. When viewing a comp the
   // current user owns, if the description names a different acreage than
   // what's saved (beyond rounding), reconcile silently — write the
@@ -238,6 +260,88 @@ export default function MapPage() {
   const supabase = createClient();
   const searchParams = useSearchParams();
   const router = useRouter();
+
+  // ─── Find Listing handlers (defined after `supabase` is initialized) ──
+  // Trigger AI find-listing for the currently-selected comp. Returns one
+  // URL or null (the endpoint is conservative — a missing link is
+  // better than a wrong one).
+  const handleFindListing = useCallback(async () => {
+    if (!selectedComp || findingListing) return;
+    setFindingListing(true);
+    setListingCandidate(null);
+    try {
+      const res = await fetch(`/api/comp/${selectedComp.id}/find-listing`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data?.error || 'Find listing failed');
+        return;
+      }
+      setListingCandidate({ url: data?.url ?? null, reason: data?.reason ?? null });
+    } catch (e: any) {
+      toast.error(e?.message || 'Find listing failed');
+    } finally {
+      setFindingListing(false);
+    }
+  }, [selectedComp, findingListing]);
+
+  // Persist a URL (from AI find or manual paste) to comp.source_url.
+  const handleSaveListingUrl = useCallback(async (url: string) => {
+    if (!selectedComp || savingListing) return;
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    try {
+      const u = new URL(trimmed);
+      if (!u.protocol.startsWith('http')) throw new Error('not http');
+    } catch {
+      toast.error("That doesn't look like a valid URL");
+      return;
+    }
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: trimmed })
+        .eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL saved');
+      setSelectedComp({ ...selectedComp, source_url: trimmed } as Comp);
+      setComps((prev) =>
+        prev.map((c) => (c.id === selectedComp.id ? { ...c, source_url: trimmed } : c))
+      );
+      setListingCandidate(null);
+      setPasteUrlMode(false);
+      setPasteUrlInput('');
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
+
+  // Clear the saved listing URL (set to null on the comp).
+  const handleRemoveListingUrl = useCallback(async () => {
+    if (!selectedComp || savingListing) return;
+    if (!confirm('Remove the saved listing URL?')) return;
+    setSavingListing(true);
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: null })
+        .eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Remove failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing URL removed');
+      setSelectedComp({ ...selectedComp, source_url: null } as Comp);
+      setComps((prev) =>
+        prev.map((c) => (c.id === selectedComp.id ? { ...c, source_url: null } : c))
+      );
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4669,6 +4773,189 @@ export default function MapPage() {
                 </div>
               )}
             </div>
+
+            {/* ─── Source + Listing URL ──────────────────────────────
+                AI find + manual paste. Same flow as the review page
+                side panel — broker hits "Find listing online", AI
+                searches Lands of America / LandWatch / Land.com /
+                Realtor / Zillow, returns one URL or null, broker
+                reviews + Save. Manual paste fallback always available.
+
+                Only shown to the comp's owner (created_by) — the
+                /api/comp/[id]/find-listing endpoint enforces this on
+                the server side too. */}
+            {selectedComp.created_by === currentUserId && (
+            <div className="border-t border-border pt-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-wide text-slate-500">Listing</div>
+                {(selectedComp as any).source_type && (
+                  <div className="text-[10px] text-slate-400">
+                    {(selectedComp as any).source_type === 'listing_url' ? 'From listing' : 'From PDF'}
+                  </div>
+                )}
+              </div>
+
+              {/* SAVED state */}
+              {selectedComp.source_url && !listingCandidate && !pasteUrlMode && (
+                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                  <a
+                    href={selectedComp.source_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  >
+                    <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                    <span>{selectedComp.source_url}</span>
+                  </a>
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <button
+                      onClick={handleFindListing}
+                      disabled={findingListing}
+                      className="text-[10px] text-slate-500 hover:text-sage underline disabled:opacity-50"
+                      title="Re-run AI find to look for a better match"
+                    >
+                      {findingListing ? 'Searching…' : 'Find a better match'}
+                    </button>
+                    <button
+                      onClick={handleRemoveListingUrl}
+                      disabled={savingListing}
+                      className="text-[10px] text-slate-500 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                      title="Remove the saved listing URL"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* AI FOUND state */}
+              {listingCandidate && listingCandidate.url && (
+                <div className="bg-sage/10 border border-sage/40 rounded-lg p-2.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-sage text-[10px] font-bold uppercase tracking-wide">
+                    <Sparkles size={11} />
+                    AI found a match
+                  </div>
+                  <a
+                    href={listingCandidate.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  >
+                    <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                    <span>{listingCandidate.url}</span>
+                  </a>
+                  {listingCandidate.reason && (
+                    <p className="text-[10px] text-slate-300 leading-relaxed">{listingCandidate.reason}</p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <button
+                      onClick={() => setListingCandidate(null)}
+                      disabled={savingListing}
+                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    >
+                      <X size={10} />
+                      Not a match
+                    </button>
+                    <button
+                      onClick={() => handleSaveListingUrl(listingCandidate.url!)}
+                      disabled={savingListing}
+                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                    >
+                      {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                      {savingListing ? 'Saving…' : 'Save as listing'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* AI EMPTY state */}
+              {listingCandidate && !listingCandidate.url && (
+                <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-2.5 space-y-1.5">
+                  <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wide">
+                    No confident match
+                  </div>
+                  {listingCandidate.reason && (
+                    <p className="text-[10px] text-slate-400 leading-relaxed">{listingCandidate.reason}</p>
+                  )}
+                  <p className="text-[10px] text-slate-500">Try again later or paste a URL manually below.</p>
+                  <button
+                    onClick={() => setListingCandidate(null)}
+                    className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* MANUAL PASTE state */}
+              {pasteUrlMode && (
+                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                  <input
+                    type="url"
+                    value={pasteUrlInput}
+                    onChange={(e) => setPasteUrlInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && pasteUrlInput.trim()) {
+                        e.preventDefault();
+                        handleSaveListingUrl(pasteUrlInput);
+                      }
+                      if (e.key === 'Escape') setPasteUrlMode(false);
+                    }}
+                    placeholder="https://landsofamerica.com/property/…"
+                    autoFocus
+                    className="w-full bg-night/60 border border-border focus:border-sage rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 outline-none"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => { setPasteUrlMode(false); setPasteUrlInput(''); }}
+                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => handleSaveListingUrl(pasteUrlInput)}
+                      disabled={savingListing || pasteUrlInput.trim().length < 5}
+                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+                      Save URL
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* DEFAULT state */}
+              {!selectedComp.source_url && !listingCandidate && !pasteUrlMode && (
+                <div className="space-y-1.5">
+                  <button
+                    onClick={handleFindListing}
+                    disabled={findingListing}
+                    className="w-full py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
+                  >
+                    {findingListing ? (
+                      <>
+                        <Loader2 size={12} className="animate-spin" />
+                        Searching listing sites…
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={12} />
+                        Find listing online
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setPasteUrlMode(true)}
+                    className="w-full py-1 text-[10px] text-slate-500 hover:text-slate-300 underline flex items-center justify-center gap-1"
+                  >
+                    <LinkIcon size={10} />
+                    or paste URL manually
+                  </button>
+                </div>
+              )}
+            </div>
+            )}
 
             {/* Land character grid — Water · Road · Dev · Irrigation.
                 Strong tiers light emerald. Same chips as every other surface. */}
