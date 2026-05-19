@@ -3241,11 +3241,19 @@ export default function MapPage() {
               <SlidersHorizontal size={11} />
               Filters
             </button>
+            {/* iMessage-blue "Ask" send button. Same color as the vault's
+                Ask button — both surfaces are conversational ("ask me
+                something"), so they share the universal iOS chat blue.
+                Brokers don't have to learn what color = chat; their
+                phones have already taught them. The purple sparkle on
+                the left and purple result message below stay — they
+                signal "AI parsing", which is distinct from the send
+                action. Color split = action vs system. */}
             <button
               onClick={askAi}
               disabled={askingAi || !searchQuery.trim()}
               title="Ask AI"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-purple-500/25 hover:bg-purple-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-purple-400/40 hover:border-purple-400 rounded-lg text-[11px] font-bold text-purple-100 transition-colors flex items-center gap-1"
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-[11px] font-semibold text-white transition-colors flex items-center gap-1 shadow-sm"
             >
               <Sparkles size={11} />
               {askingAi ? '…' : 'Ask'}

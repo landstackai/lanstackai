@@ -512,14 +512,18 @@ export default function VaultPage() {
                 <X size={13} />
               </button>
             )}
-            {/* Ask button — primary action, anchored inside the input.
-                Loading state shows a spinner without changing button
-                width (avoids layout shift). */}
+            {/* Ask button — primary "send to AI" action, anchored inside
+                the input. Uses iMessage blue (Apple system #007AFF)
+                because brokers have hit this color thousands of times on
+                their phones — universal "send chat" affordance. Olive
+                stays for creation/state (Add Comp, filter chips); blue
+                is reserved for the conversational action. Leading
+                Sparkle stays olive — it's the AI "badge," not the CTA. */}
             <button
               type="button"
               onClick={askAi}
               disabled={askingAi || !(aiQuery || filters.search).trim()}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-olive hover:bg-olive-2 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[12px] font-medium rounded-md transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[12px] font-medium rounded-md transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
             >
               {askingAi ? (
                 <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />

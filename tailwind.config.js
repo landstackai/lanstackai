@@ -39,6 +39,13 @@ module.exports = {
         'olive-border': '#D4DAB8',// chip border (sits inside olive-tint)
         'slate-blue': '#4A6FA5',  // secondary accent (links, info badges)
         'slate-blue-2': '#3A5A8A',// darker slate blue for hover
+        // iMessage blue — exact Apple system blue (#007AFF). Reserved for
+        // chat-like "send" actions (the AI search "Ask" button across vault
+        // + map). Universal affordance: brokers have hit this color
+        // thousands of times on their phones, so they instinctively know
+        // "tap this to send a message."
+        imsg: '#007AFF',
+        'imsg-2': '#0066D9',      // darker for hover / pressed
       },
       fontFamily: {
         sans: ['Syne', 'sans-serif'],
