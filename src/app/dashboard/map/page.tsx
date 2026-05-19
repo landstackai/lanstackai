@@ -4642,49 +4642,51 @@ export default function MapPage() {
         // (creation/state) and iMessage blue (chat send) so each color
         // carries one meaning.
         const confStyle =
-          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-slate-blue-2', ring: 'border-slate-blue/30 bg-slate-blue/10' }
-          : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-600', ring: 'border-amber-400/30 bg-amber-50' }
+          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-slate-blue-2', ring: 'border-slate-blue/20 bg-slate-blue/10' }
+          : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-800', ring: 'border-amber-200 bg-amber-50' }
           : { Icon: ShieldQuestion, color: 'text-ink-2', ring: 'border-beige bg-cream' };
 
         return (
         <div className="hidden md:flex w-80 bg-white border-l border-beige flex-col overflow-y-auto">
+          {/* Header bar — vault-style restraint: font-semibold not bold,
+              subtle text size, calm proportions. Matches the "Comp Vault"
+              title treatment in the main vault page. */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
-            <span className="font-bold text-sm">Comp Detail</span>
+            <span className="text-[13px] font-semibold text-ink tracking-tight">Comp Detail</span>
             <button onClick={() => setSelectedComp(null)} className="text-ink-3 hover:text-ink">
               <X size={16} />
             </button>
           </div>
           <div className="p-4 space-y-3">
-            {/* Header */}
+            {/* Property name + subtitle. Same typography hierarchy the
+                vault uses for its h1: font-semibold, tracking-tight,
+                muted subtitle in text-ink-2. */}
             <div>
-              <h2 className="text-lg font-bold leading-tight">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
-              <p className="text-xs text-ink-2 mt-0.5">{selectedComp.county}, {selectedComp.state}</p>
+              <h2 className="text-base font-semibold text-ink tracking-tight leading-tight">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
+              <p className="text-[12px] text-ink-2 mt-1">{selectedComp.county}, {selectedComp.state}</p>
             </div>
 
-            {/* Confidence badge + IMPROVED + Agent-Verified indicators */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border ${confStyle.ring}`}>
-                <confStyle.Icon size={12} className={confStyle.color} />
-                <span className={`text-[10px] font-bold uppercase tracking-wider ${confStyle.color}`}>{conf}</span>
-              </div>
+            {/* Status badges — vault pill style (rounded-full, tighter
+                padding, subtle borders). Vault's "Improved" table pill is
+                the reference. Calm, restrained, single accent per badge. */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border ${confStyle.ring}`}>
+                <confStyle.Icon size={11} className={confStyle.color} />
+                <span className={`text-[10px] font-semibold ${confStyle.color}`}>{conf}</span>
+              </span>
               {selectedComp.has_improvements && (
-                // Improved badge = slate-blue. Matches the vault table's
-                // Improved pill so the broker learns "blue badge = building
-                // value on the land" across every surface.
-                <span className="text-[10px] font-bold px-2 py-1 bg-slate-blue/10 border border-slate-blue/30 text-slate-blue-2 rounded-md uppercase tracking-wider">
+                <span className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-slate-blue/10 text-slate-blue-2 border border-slate-blue/20 rounded-full">
                   Improved
                 </span>
               )}
               {(selectedComp as any).irrigation === 'Strong' && (
-                <span className="text-[10px] font-bold px-2 py-1 bg-olive-tint border border-olive-border text-olive rounded-md uppercase tracking-wider">
+                <span className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-olive-tint text-olive-2 border border-olive-border rounded-full">
                   Irrigation
                 </span>
               )}
               {selectedComp.improvement_source === 'agent_verified' && (
-                // Agent-Verified = darker slate-blue (verification chain).
-                // Reinforces that blue across the panel = "trust / status".
                 <span
-                  className="text-[10px] font-bold px-2 py-1 bg-slate-blue/15 border border-slate-blue/40 text-slate-blue-2 rounded-md uppercase tracking-wider"
+                  className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-slate-blue/15 text-slate-blue-2 border border-slate-blue/30 rounded-full"
                   title="An agent involved in this transaction verified the improvement value."
                 >
                   Agent-Verified
@@ -4706,39 +4708,48 @@ export default function MapPage() {
               // (improvement_value). The DB-computed ppa_land_only is the
               // single source of truth for "something was backed out."
               const hasAdjustment = landOnly > 0 && allIn > 0 && Math.abs(allIn - landOnly) > 1;
+              // Vault-style KPI tile pattern: white cards on cream, single
+              // olive accent on the HEADLINE metric ($/Acre — what the
+              // broker is actually evaluating). Everything else is calm
+              // ink on white. Same typography stack as the vault's KPI
+              // dashboard above the table so the system reads as one app.
               return (
                 <div className="space-y-2">
-                  <div className="bg-olive-tint border border-olive-border rounded-xl px-3 py-2 flex items-baseline justify-between">
-                    <p className="text-[10px] font-bold text-olive-2 uppercase tracking-wider">Acres</p>
-                    <p className="text-base font-bold text-olive-2 font-mono leading-tight">
+                  <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Acres</p>
+                    <p className="text-base font-semibold text-ink tabular-nums leading-tight">
                       {formatAcres(selectedComp.acres)}
                     </p>
                   </div>
-                  <div className="bg-cream border border-beige rounded-xl px-3 py-2 flex items-baseline justify-between">
-                    <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Total Price</p>
-                    <p className="text-base font-bold text-ink font-mono leading-tight">
+                  <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Price</p>
+                    <p className="text-base font-semibold text-ink tabular-nums leading-tight">
                       {formatCurrency(selectedComp.sale_price)}
                     </p>
                   </div>
                   {hasAdjustment ? (
                     <>
-                      <div className="bg-olive-tint border border-olive-border rounded-xl px-3 py-2 flex items-baseline justify-between">
-                        <p className="text-[10px] font-bold text-olive-2 uppercase tracking-wider">Total $/Ac</p>
-                        <p className="text-base font-bold text-olive-2 font-mono leading-tight">
+                      <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total $/Ac</p>
+                        <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
                           {formatPPA(allIn)}
                         </p>
                       </div>
-                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                        <p className="text-[10px] font-bold text-amber-800/80 uppercase tracking-wider">Adjusted $/Ac</p>
-                        <p className="text-base font-bold text-amber-800 font-mono leading-tight">
+                      {/* Adjusted = the "story" metric — subtle amber accent
+                          on the number only, white card to match the others.
+                          No tinted background; the color cue is in the
+                          numeral alone, which is what vault does. */}
+                      <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Adjusted $/Ac</p>
+                        <p className="text-base font-semibold text-amber-800 tabular-nums leading-tight">
                           {formatPPA(landOnly)}
                         </p>
                       </div>
                     </>
                   ) : (
-                    <div className="bg-olive-tint border border-olive-border rounded-xl px-3 py-2 flex items-baseline justify-between">
-                      <p className="text-[10px] font-bold text-olive-2 uppercase tracking-wider">Total Price Per Acre</p>
-                      <p className="text-base font-bold text-olive-2 font-mono leading-tight">
+                    <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Price Per Acre</p>
+                      <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
                         {formatPPA(selectedComp.ppa_land_only || selectedComp.price_per_acre || 0)}
                       </p>
                     </div>
