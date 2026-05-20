@@ -475,6 +475,22 @@ export default function ClientReport({ params }: ClientReportProps) {
             const opinionLumpSum = Number.isFinite(lumpNum) && lumpNum > 0 ? lumpNum : 0;
             const opinionBreakdownTotal = opinionLand + opinionImprovement;
 
+            // Optional house itemization under Improvement Value. When the
+            // broker filled in House SQFT × $/SQFT (and/or additional vertical),
+            // the share report shows the itemization beneath the Improvement
+            // Value line. Otherwise just the lump improvement.
+            const houseSqftRaw = (cma as any).broker_opinion_house_sqft;
+            const housePpsfRaw = (cma as any).broker_opinion_house_ppsf;
+            const addlVertRaw = (cma as any).broker_opinion_additional_vertical;
+            const houseSqftN = houseSqftRaw != null ? Number(houseSqftRaw) : NaN;
+            const housePpsfN = housePpsfRaw != null ? Number(housePpsfRaw) : NaN;
+            const addlVertN = addlVertRaw != null ? Number(addlVertRaw) : NaN;
+            const houseSqftVal = Number.isFinite(houseSqftN) && houseSqftN > 0 ? houseSqftN : 0;
+            const housePpsfVal = Number.isFinite(housePpsfN) && housePpsfN > 0 ? housePpsfN : 0;
+            const additionalVerticalVal = Number.isFinite(addlVertN) && addlVertN > 0 ? addlVertN : 0;
+            const houseValue = (houseSqftVal > 0 && housePpsfVal > 0) ? houseSqftVal * housePpsfVal : 0;
+            const hasHouseItemization = houseValue > 0 || additionalVerticalVal > 0;
+
             const computedPpa = usingLandOnly ? lMid : aMid;
             const suggestedValue = isBreakdown
               ? opinionBreakdownTotal
@@ -628,8 +644,10 @@ export default function ClientReport({ params }: ClientReportProps) {
                     </p>
 
                     {isBreakdown ? (
-                      // Itemized: Land Value + Improvement Value = Total. Each row is plain
-                      // ink; only the final TOTAL gets the olive accent to anchor the eye.
+                      // Itemized: Land Value + Improvement Value = Total.
+                      // When house itemization is present (SQFT × $/SQFT and/or
+                      // additional vertical), show the breakdown nested under
+                      // Improvement Value so the client sees how it was derived.
                       <div className="space-y-2.5">
                         <div className="flex items-baseline justify-between gap-3">
                           <div>
@@ -645,11 +663,38 @@ export default function ClientReport({ params }: ClientReportProps) {
                           </p>
                         </div>
                         {opinionImprovement > 0 && (
-                          <div className="flex items-baseline justify-between gap-3">
-                            <p className="text-[12px] font-medium text-ink">Improvement Value</p>
-                            <p className="text-base font-semibold text-ink font-mono tabular-nums">
-                              {formatCurrency(opinionImprovement)}
-                            </p>
+                          <div className="space-y-1.5">
+                            <div className="flex items-baseline justify-between gap-3">
+                              <p className="text-[12px] font-medium text-ink">Improvement Value</p>
+                              <p className="text-base font-semibold text-ink font-mono tabular-nums">
+                                {formatCurrency(opinionImprovement)}
+                              </p>
+                            </div>
+                            {hasHouseItemization && (
+                              // Nested itemization under Improvement Value.
+                              // Indented with a left bar so the client visually
+                              // groups these rows under their parent total.
+                              <div className="ml-3 pl-3 border-l-2 border-beige space-y-1">
+                                {houseValue > 0 && (
+                                  <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[11px] text-ink-2">
+                                      House <span className="text-ink-3 font-mono tabular-nums">· {houseSqftVal.toLocaleString()} sqft × ${housePpsfVal.toLocaleString()}/sqft</span>
+                                    </p>
+                                    <p className="text-[11px] font-mono tabular-nums text-ink-2">
+                                      {formatCurrency(houseValue)}
+                                    </p>
+                                  </div>
+                                )}
+                                {additionalVerticalVal > 0 && (
+                                  <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[11px] text-ink-2">Additional vertical improvements</p>
+                                    <p className="text-[11px] font-mono tabular-nums text-ink-2">
+                                      {formatCurrency(additionalVerticalVal)}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )}
                         <div className="border-t border-beige pt-2.5 flex items-baseline justify-between gap-3">

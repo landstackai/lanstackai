@@ -208,6 +208,16 @@ export default function MapPage() {
   const [bovLandPpaInput, setBovLandPpaInput] = useState<string>('');
   const [bovLandTotalInput, setBovLandTotalInput] = useState<string>('');
   const [bovImprovementInput, setBovImprovementInput] = useState<string>('');
+  // Improvement breakdown — optional house itemization (SQFT × $/SQFT)
+  // + additional vertical improvements lump. When ANY of these are set,
+  // the bovImprovementInput becomes a computed sum: (sqft × ppsf) + addl.
+  // Horizontal improvements (fencing, ponds, wells) get baked into the
+  // Land $/Acre judgment per real-estate convention.
+  const [bovHouseSqftInput, setBovHouseSqftInput] = useState<string>('');
+  const [bovHousePpsfInput, setBovHousePpsfInput] = useState<string>('');
+  const [bovAddlVerticalInput, setBovAddlVerticalInput] = useState<string>('');
+  // UI toggle for the optional house-breakdown expander.
+  const [bovHouseBreakdownOpen, setBovHouseBreakdownOpen] = useState(false);
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -1938,6 +1948,24 @@ export default function MapPage() {
     }
     const impNum = improvement != null ? Number(improvement) : NaN;
     setBovImprovementInput(Number.isFinite(impNum) && impNum > 0 ? String(Math.round(impNum)) : '');
+
+    // Improvement breakdown sub-fields (house SQFT + Additional Vertical)
+    const houseSqft = cma?.broker_opinion_house_sqft;
+    const housePpsf = cma?.broker_opinion_house_ppsf;
+    const addlVert = cma?.broker_opinion_additional_vertical;
+    const sqftNum = houseSqft != null ? Number(houseSqft) : NaN;
+    const ppsfNum = housePpsf != null ? Number(housePpsf) : NaN;
+    const addlNum = addlVert != null ? Number(addlVert) : NaN;
+    setBovHouseSqftInput(Number.isFinite(sqftNum) && sqftNum > 0 ? String(Math.round(sqftNum)) : '');
+    setBovHousePpsfInput(Number.isFinite(ppsfNum) && ppsfNum > 0 ? String(Math.round(ppsfNum)) : '');
+    setBovAddlVerticalInput(Number.isFinite(addlNum) && addlNum > 0 ? String(Math.round(addlNum)) : '');
+    // Auto-open the house-breakdown expander when any of the itemization
+    // fields are populated — broker shouldn't have to click to see their
+    // own data on next load.
+    const hasItemization = (Number.isFinite(sqftNum) && sqftNum > 0)
+      || (Number.isFinite(ppsfNum) && ppsfNum > 0)
+      || (Number.isFinite(addlNum) && addlNum > 0);
+    setBovHouseBreakdownOpen(hasItemization);
 
     // Mode resolution: explicit > inferred > default
     if (storedMode === 'lump_sum' || storedMode === 'breakdown') {
@@ -4169,45 +4197,61 @@ export default function MapPage() {
               {(() => {
                 // Save helper — writes all relevant columns for the active mode
                 // and clears the inactive-mode columns. Optimistic local update
-                // so the right-panel re-renders instantly.
+                // so the right-panel re-renders instantly. Now also handles the
+                // optional house-breakdown columns (sqft, ppsf, additional vertical).
                 const saveBov = async (patch: {
                   mode: BovMode | null;
                   total: number | null;
                   landValue: number | null;
                   improvementValue: number | null;
+                  houseSqft?: number | null;
+                  housePpsf?: number | null;
+                  additionalVertical?: number | null;
                 }) => {
-                  setViewingCMA((prev: any) => prev ? ({
-                    ...prev,
+                  const fields: any = {
                     broker_opinion_mode: patch.mode,
                     broker_opinion_value: patch.total,
                     broker_opinion_land_value: patch.landValue,
                     broker_opinion_improvement_value: patch.improvementValue,
-                  }) : prev);
+                  };
+                  // Only include house-breakdown columns if explicitly passed.
+                  // Lump-sum mode writes them as null; breakdown writes
+                  // whatever value the broker has typed.
+                  if ('houseSqft' in patch) fields.broker_opinion_house_sqft = patch.houseSqft;
+                  if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
+                  if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
+
+                  setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
                   const { error } = await supabase
                     .from('cmas')
-                    .update({
-                      broker_opinion_mode: patch.mode,
-                      broker_opinion_value: patch.total,
-                      broker_opinion_land_value: patch.landValue,
-                      broker_opinion_improvement_value: patch.improvementValue,
-                    })
+                    .update(fields)
                     .eq('id', viewingCMA.id);
                   if (error) toast.error(error.message);
                 };
 
                 // ─── LUMP SUM handlers ───
+                // Lump-sum mode clears ALL breakdown fields including the
+                // optional house itemization (passing null for each).
+                const lumpClear = {
+                  mode: 'lump_sum' as BovMode | null,
+                  landValue: null,
+                  improvementValue: null,
+                  houseSqft: null,
+                  housePpsf: null,
+                  additionalVertical: null,
+                };
                 const onPpaChange = (raw: string) => {
                   setBovPpaInput(raw);
                   const ppa = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(ppa) || ppa <= 0) {
                     setBovTotalInput('');
-                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
+                    saveBov({ ...lumpClear, total: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const total = ppa * subjAcres;
                     setBovTotalInput(String(Math.round(total)));
-                    saveBov({ mode: 'lump_sum', total, landValue: null, improvementValue: null });
+                    saveBov({ ...lumpClear, total });
                   }
                 };
                 const onTotalChange = (raw: string) => {
@@ -4215,44 +4259,93 @@ export default function MapPage() {
                   const total = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(total) || total <= 0) {
                     setBovPpaInput('');
-                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
+                    saveBov({ ...lumpClear, total: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const ppa = total / subjAcres;
                     setBovPpaInput(String(Math.round(ppa)));
                   }
-                  saveBov({ mode: 'lump_sum', total, landValue: null, improvementValue: null });
+                  saveBov({ ...lumpClear, total });
                 };
 
                 // ─── BREAKDOWN handlers ───
-                // commitBreakdown(landValue, improvement) writes both fields
-                // and a computed `total` for read-side backwards compat.
-                const commitBreakdown = (landValue: number | null, improvement: number | null) => {
+                // Improvement breakdown helpers: derived improvement = (sqft × ppsf)
+                // + additional vertical. When any of those three are set, they
+                // become the source of truth; bovImprovementInput is computed.
+                const parsePos = (s: string): number => {
+                  const n = s === '' ? NaN : Number(s);
+                  return Number.isFinite(n) && n > 0 ? n : 0;
+                };
+                const computedImprovementFromItems = (
+                  sqft: number, ppsf: number, addl: number
+                ): number => {
+                  const house = (sqft > 0 && ppsf > 0) ? sqft * ppsf : 0;
+                  return house + addl;
+                };
+                const hasItemizationFlag = (sqft: string, ppsf: string, addl: string): boolean => {
+                  return parsePos(sqft) > 0 || parsePos(ppsf) > 0 || parsePos(addl) > 0;
+                };
+
+                // commitBreakdown unified — writes land, improvement total, AND
+                // the optional house-breakdown columns. The improvement total
+                // is either:
+                //   - the broker's typed-direct lump (when no itemization), OR
+                //   - the computed sum (house_sqft × ppsf) + additional_vertical
+                const commitBreakdown = (
+                  landValue: number | null,
+                  improvementOverride: number | null,
+                  itemization: { sqft: number; ppsf: number; addl: number } | null,
+                ) => {
                   const land = landValue || 0;
-                  const imp = improvement || 0;
-                  const total = (land + imp) > 0 ? (land + imp) : null;
+                  // Resolve improvement: itemization wins when present
+                  const itemized = itemization
+                    ? computedImprovementFromItems(itemization.sqft, itemization.ppsf, itemization.addl)
+                    : 0;
+                  const improvement = itemization && itemized > 0
+                    ? itemized
+                    : (improvementOverride && improvementOverride > 0 ? improvementOverride : 0);
+                  const total = (land + improvement) > 0 ? (land + improvement) : null;
+
                   saveBov({
                     mode: 'breakdown',
                     total,
                     landValue: landValue,
-                    improvementValue: improvement,
+                    improvementValue: improvement > 0 ? improvement : null,
+                    houseSqft: itemization && itemization.sqft > 0 ? itemization.sqft : null,
+                    housePpsf: itemization && itemization.ppsf > 0 ? itemization.ppsf : null,
+                    additionalVertical: itemization && itemization.addl > 0 ? itemization.addl : null,
                   });
                 };
+                // Helper to collect current itemization state from inputs
+                const currentItemization = (sqft?: string, ppsf?: string, addl?: string) => {
+                  const s = parsePos(sqft ?? bovHouseSqftInput);
+                  const p = parsePos(ppsf ?? bovHousePpsfInput);
+                  const a = parsePos(addl ?? bovAddlVerticalInput);
+                  const has = s > 0 || p > 0 || a > 0;
+                  return has ? { sqft: s, ppsf: p, addl: a } : null;
+                };
+                const currentLand = () => {
+                  const v = parsePos(bovLandTotalInput);
+                  return v > 0 ? v : null;
+                };
+                const currentImpLump = () => {
+                  const v = parsePos(bovImprovementInput);
+                  return v > 0 ? v : null;
+                };
+
                 const onLandPpaChange = (raw: string) => {
                   setBovLandPpaInput(raw);
                   const ppa = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(ppa) || ppa <= 0) {
                     setBovLandTotalInput('');
-                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
-                    commitBreakdown(null, Number.isFinite(imp as number) ? imp : null);
+                    commitBreakdown(null, currentImpLump(), currentItemization());
                     return;
                   }
                   if (subjAcres > 0) {
                     const landValue = ppa * subjAcres;
                     setBovLandTotalInput(String(Math.round(landValue)));
-                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
-                    commitBreakdown(landValue, Number.isFinite(imp as number) ? imp : null);
+                    commitBreakdown(landValue, currentImpLump(), currentItemization());
                   }
                 };
                 const onLandTotalChange = (raw: string) => {
@@ -4260,52 +4353,97 @@ export default function MapPage() {
                   const landValue = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(landValue) || landValue <= 0) {
                     setBovLandPpaInput('');
-                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
-                    commitBreakdown(null, Number.isFinite(imp as number) ? imp : null);
+                    commitBreakdown(null, currentImpLump(), currentItemization());
                     return;
                   }
                   if (subjAcres > 0) {
                     const ppa = landValue / subjAcres;
                     setBovLandPpaInput(String(Math.round(ppa)));
                   }
-                  const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
-                  commitBreakdown(landValue, Number.isFinite(imp as number) ? imp : null);
+                  commitBreakdown(landValue, currentImpLump(), currentItemization());
                 };
+                // Direct Improvement Value input — only used when itemization
+                // is NOT active. When itemized, this field is computed/read-only.
                 const onImprovementChange = (raw: string) => {
                   setBovImprovementInput(raw);
-                  const imp = raw === '' ? NaN : Number(raw);
-                  const land = bovLandTotalInput === '' ? null : Number(bovLandTotalInput);
-                  commitBreakdown(
-                    Number.isFinite(land as number) ? land : null,
-                    Number.isFinite(imp) ? imp : null,
-                  );
+                  // If broker types directly in Improvement Value, clear any
+                  // existing itemization (they're going lump mode within the
+                  // breakdown). Carries over land value.
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  const imp = parsePos(raw);
+                  commitBreakdown(currentLand(), imp > 0 ? imp : null, null);
+                };
+                // House SQFT input — recomputes improvement from items
+                const onHouseSqftChange = (raw: string) => {
+                  setBovHouseSqftInput(raw);
+                  const items = currentItemization(raw, undefined, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onHousePpsfChange = (raw: string) => {
+                  setBovHousePpsfInput(raw);
+                  const items = currentItemization(undefined, raw, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onAddlVerticalChange = (raw: string) => {
+                  setBovAddlVerticalInput(raw);
+                  const items = currentItemization(undefined, undefined, raw);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
                 };
 
                 // ─── Mode switching — preserve values across switches ───
                 const switchToLumpSum = () => {
                   // If broker had Land + Improvement values, sum them to the lump total
-                  const land = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
-                  const imp = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
-                  const combined = (Number.isFinite(land) ? land : 0) + (Number.isFinite(imp) ? imp : 0);
+                  const land = parsePos(bovLandTotalInput);
+                  const imp = parsePos(bovImprovementInput);
+                  const combined = land + imp;
                   setBovMode('lump_sum');
+                  // Clear the house-breakdown UI state on mode flip
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  setBovHouseBreakdownOpen(false);
                   if (combined > 0) {
                     setBovTotalInput(String(Math.round(combined)));
                     if (subjAcres > 0) setBovPpaInput(String(Math.round(combined / subjAcres)));
-                    saveBov({ mode: 'lump_sum', total: combined, landValue: null, improvementValue: null });
+                    saveBov({ ...lumpClear, total: combined });
                   } else {
-                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
+                    saveBov({ ...lumpClear, total: null });
                   }
                 };
                 const switchToBreakdown = () => {
                   // If broker had a lump total, transfer it to Land Value (assume no improvement yet)
-                  const lump = bovTotalInput === '' ? 0 : Number(bovTotalInput);
+                  const lump = parsePos(bovTotalInput);
                   setBovMode('breakdown');
                   if (lump > 0) {
                     setBovLandTotalInput(String(Math.round(lump)));
                     if (subjAcres > 0) setBovLandPpaInput(String(Math.round(lump / subjAcres)));
-                    saveBov({ mode: 'breakdown', total: lump, landValue: lump, improvementValue: null });
+                    saveBov({
+                      mode: 'breakdown',
+                      total: lump,
+                      landValue: lump,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
                   } else {
-                    saveBov({ mode: 'breakdown', total: null, landValue: null, improvementValue: null });
+                    saveBov({
+                      mode: 'breakdown',
+                      total: null,
+                      landValue: null,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
                   }
                 };
 
@@ -4406,13 +4544,94 @@ export default function MapPage() {
                           </p>
                         </div>
 
-                        {/* Improvement Value */}
+                        {/* Improvement Value
+                            When the house-breakdown sub-fields are filled in,
+                            this becomes a computed total: (sqft × ppsf) + additional.
+                            When the broker types directly here, the itemization
+                            sub-fields are cleared. */}
                         <div className="space-y-1.5">
-                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
+                          <div className="flex items-center justify-between">
+                            <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
+                            <button
+                              type="button"
+                              onClick={() => setBovHouseBreakdownOpen((v) => !v)}
+                              className="text-[10px] text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1"
+                            >
+                              {bovHouseBreakdownOpen ? <><ChevronUp size={11} /> Hide house breakdown</> : <><ChevronDown size={11} /> Break out house</>}
+                            </button>
+                          </div>
                           <div className="relative">
                             <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                            <input type="number" placeholder="0" value={bovImprovementInput} onChange={(e) => onImprovementChange(e.target.value)} className={inputCls} />
+                            <input
+                              type="number"
+                              placeholder="0"
+                              value={bovImprovementInput}
+                              onChange={(e) => onImprovementChange(e.target.value)}
+                              disabled={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput)}
+                              className={`${inputCls} ${hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'opacity-70 cursor-not-allowed' : ''}`}
+                              title={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'Computed from the house breakdown below. Clear those fields to edit directly.' : ''}
+                            />
                           </div>
+                          {/* Optional house-breakdown expander */}
+                          {bovHouseBreakdownOpen && (
+                            <div className="bg-cream border border-beige rounded-lg p-2.5 space-y-3 mt-1">
+                              {/* HOUSE — SQFT × $/SQFT */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">House</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">SQFT</p>
+                                    <input
+                                      type="number"
+                                      placeholder="4,000"
+                                      value={bovHouseSqftInput}
+                                      onChange={(e) => onHouseSqftChange(e.target.value)}
+                                      className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md px-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">$/SQFT</p>
+                                    <div className="relative">
+                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                      <input
+                                        type="number"
+                                        placeholder="200"
+                                        value={bovHousePpsfInput}
+                                        onChange={(e) => onHousePpsfChange(e.target.value)}
+                                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                                {/* Live line total */}
+                                {(parsePos(bovHouseSqftInput) > 0 && parsePos(bovHousePpsfInput) > 0) && (
+                                  <p className="text-[10px] text-ink-3 font-mono tabular-nums">
+                                    {parsePos(bovHouseSqftInput).toLocaleString()} sqft × ${parsePos(bovHousePpsfInput).toLocaleString()}/sqft
+                                    <span className="text-ink-2"> = </span>
+                                    <span className="text-olive-2 font-semibold">{formatCurrency(parsePos(bovHouseSqftInput) * parsePos(bovHousePpsfInput))}</span>
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* ADDITIONAL VERTICAL IMPROVEMENTS — lump */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">Additional Vertical Improvements</p>
+                                <div className="relative">
+                                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder="0"
+                                    value={bovAddlVerticalInput}
+                                    onChange={(e) => onAddlVerticalChange(e.target.value)}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                                <p className="text-[9px] text-ink-3 leading-relaxed">
+                                  Barns, shops, sheds, equipment buildings, guest houses, etc. Horizontal improvements (fencing, ponds, wells) typically get baked into Land $/Acre above.
+                                </p>
+                              </div>
+                            </div>
+                          )}
                         </div>
 
                         {/* Total Opinion — computed sum */}
