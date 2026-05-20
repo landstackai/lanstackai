@@ -21,12 +21,26 @@ import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
+// Comp-pin accent palette. The pin BASE is always a warm dark surface
+// (matches our chrome/overlay system) with a cream-1 text color and a
+// thin colored ring per status. The ring color is the only thing that
+// varies — so the eye reads "color = status" once and never again.
+//
+// Status colors moved off the old neon emerald/cyan/orange. Now uses
+// the same olive/slate-blue/amber-warm/cream-3 palette as the rest of
+// the app — single coherent system across UI chrome + map data.
 const STATUS_COLORS: Record<string, string> = {
-  Sold: '#34d399',
-  Active: '#3b82f6',
-  Pending: '#f59e0b',
-  Withdrawn: '#6b7280',
+  Sold: '#A8B57A',      // olive-light — primary "land transaction" color
+  Active: '#7B9FCE',    // slate-blue-light — on-market listings
+  Pending: '#E8B872',   // amber-warm — under contract
+  Withdrawn: '#75716A', // cream-3-text — muted "off-market"
 };
+
+// Subject property — warm brick red, distinct from comp pins so it
+// reads as "the protagonist." Same convention as Apple Maps drop pins,
+// Zillow / Realtor / every real-estate platform.
+const SUBJECT_RED = '#C8503F';
+const SUBJECT_RED_SOFT = 'rgba(200, 80, 63, 0.35)';
 
 type MapMode = 'view' | 'parcel_select';
 type SheetMode = 'none' | 'parcel' | 'selecting' | 'boundary_created';
@@ -572,18 +586,22 @@ export default function MapPage() {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       });
+      // Subject boundary uses the warm brick red SUBJECT_RED so it
+      // matches the subject pin marker — broker reads "red = the one
+      // we're evaluating" across the boundary, the pin, the right-panel
+      // badge. Single visual identity.
       map.current!.addLayer({
         id: 'cma-subject-fill',
         type: 'fill',
         source: 'cma-subject',
-        paint: { 'fill-color': '#facc15', 'fill-opacity': 0.18 },
+        paint: { 'fill-color': '#C8503F', 'fill-opacity': 0.18 },
       });
       map.current!.addLayer({
         id: 'cma-subject-halo',
         type: 'line',
         source: 'cma-subject',
         paint: {
-          'line-color': '#facc15',
+          'line-color': '#C8503F',
           'line-width': 7,
           'line-opacity': 0.35,
           'line-blur': 1.5,
@@ -593,7 +611,7 @@ export default function MapPage() {
         id: 'cma-subject-line',
         type: 'line',
         source: 'cma-subject',
-        paint: { 'line-color': '#facc15', 'line-width': 3, 'line-opacity': 1 },
+        paint: { 'line-color': '#C8503F', 'line-width': 3, 'line-opacity': 1 },
       });
 
       // Saved comp boundaries (rendered from comps.boundary_geojson)
@@ -2063,7 +2081,10 @@ export default function MapPage() {
     return () => { cancelled = true; };
   }, [viewingCMA, comps, supabase]);
 
-  // Subject marker (yellow pin) in workspace view
+  // Subject marker — warm brick red, the protagonist of the map. Real-
+  // estate convention (Zillow / Realtor / Apple Maps drop pin) trained
+  // brokers to read "red = the one we're evaluating." A subtle pulse
+  // ring keeps the eye anchored when the broker scrolls away and back.
   const subjectMarkerRef = useRef<mapboxgl.Marker | null>(null);
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
@@ -2074,9 +2095,13 @@ export default function MapPage() {
     if (!viewingCMA?.subject_latitude || !viewingCMA?.subject_longitude) return;
     const el = document.createElement('div');
     el.style.cssText = `
-      background:#facc15;border:3px solid #0b0f14;border-radius:50%;
-      width:18px;height:18px;cursor:pointer;
-      box-shadow:0 0 0 3px #facc15aa, 0 4px 14px rgba(0,0,0,.6);
+      position:relative;
+      background:${SUBJECT_RED};
+      border:3px solid #F5F1E8;
+      border-radius:50%;
+      width:20px;height:20px;cursor:pointer;
+      box-shadow:0 0 0 4px ${SUBJECT_RED_SOFT}, 0 6px 18px rgba(0,0,0,.5);
+      animation:subjectPulse 2.4s ease-in-out infinite;
     `;
     el.title = viewingCMA.subject_name || 'Subject';
     subjectMarkerRef.current = new mapboxgl.Marker({ element: el })
@@ -2823,12 +2848,19 @@ export default function MapPage() {
       el.dataset.compId = comp.id;
       el.dataset.baseColor = baseColor;
       el.dataset.isCmaSelected = String(isCmaSelected);
+      // Pin treatment:
+      //   - Warm dark base (matches popup + sidebar surface system)
+      //   - Cream-1 number text (reads on ANY satellite color)
+      //   - Status-colored ring (subtle, brand-cohesive)
+      //   - CMA-selected: brighter olive ring + soft glow
       el.style.cssText = `
-        background:${isCmaSelected ? '#1e3a5f' : '#0b0f14'};border:2px solid ${color};border-radius:20px;
+        background:${isCmaSelected ? '#332E29' : '#1A1815'};
+        border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
+        border-radius:20px;
         padding:4px 9px;font-family:'DM Mono',monospace;font-size:11px;
-        font-weight:700;color:${color};white-space:nowrap;cursor:pointer;
-        box-shadow:${isCmaSelected ? '0 0 0 3px #60a5fa33, ' : ''}0 2px 8px rgba(0,0,0,.5);
-        transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s;
+        font-weight:700;color:#F5F1E8;white-space:nowrap;cursor:pointer;
+        box-shadow:${isCmaSelected ? '0 0 0 3px rgba(196,206,150,0.25), ' : ''}0 2px 10px rgba(0,0,0,.4);
+        transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s, transform .15s;
       `;
       const total = comp.sale_price || 0;
       const formatPinAmount = (n: number) => {
@@ -2950,28 +2982,35 @@ export default function MapPage() {
       const isAiHighlighted = aiHighlightedCompIds?.has(id) ?? null;
       const isAiDimmed = aiHighlightedCompIds != null && !aiHighlightedCompIds.has(id);
 
-      // Hide non-matching pins entirely when an AI filter is active
+      // Hide non-matching pins entirely when an AI filter is active.
+      // Hover / AI-highlight states use our brand palette: olive-light
+      // for hover (primary brand glow) and a slate-blue-light ring for
+      // AI-highlighted (matches the AI accent elsewhere). The pin TEXT
+      // always stays warm cream — only borders/glow change.
       el.style.display = isAiDimmed ? 'none' : '';
       if (isHovered) {
-        el.style.boxShadow = '0 0 0 5px #60a5fa55, 0 6px 18px rgba(0,0,0,.7)';
-        el.style.borderColor = '#60a5fa';
-        el.style.color = '#60a5fa';
+        el.style.boxShadow = '0 0 0 4px rgba(168,181,122,0.40), 0 8px 22px rgba(0,0,0,.55)';
+        el.style.borderColor = '#C4CE96';
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '10';
         el.style.opacity = '1';
+        el.style.transform = 'scale(1.04)';
       } else if (isAiHighlighted) {
-        el.style.boxShadow = '0 0 0 4px #c084fc55, 0 4px 14px rgba(0,0,0,.6)';
-        el.style.borderColor = '#c084fc';
-        el.style.color = '#c084fc';
+        el.style.boxShadow = '0 0 0 4px rgba(123,159,206,0.32), 0 4px 14px rgba(0,0,0,.5)';
+        el.style.borderColor = '#7B9FCE';
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '5';
         el.style.opacity = '1';
+        el.style.transform = 'scale(1)';
       } else {
         el.style.boxShadow = isCmaSelected
-          ? '0 0 0 3px #60a5fa33, 0 2px 8px rgba(0,0,0,.5)'
-          : '0 2px 8px rgba(0,0,0,.5)';
-        el.style.borderColor = isCmaSelected ? '#60a5fa' : baseColor;
-        el.style.color = isCmaSelected ? '#60a5fa' : baseColor;
+          ? '0 0 0 3px rgba(196,206,150,0.25), 0 2px 10px rgba(0,0,0,.4)'
+          : '0 2px 10px rgba(0,0,0,.4)';
+        el.style.borderColor = isCmaSelected ? '#C4CE96' : baseColor;
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '1';
         el.style.opacity = '1';
+        el.style.transform = 'scale(1)';
       }
     });
   }, [hoveredCompId, aiHighlightedCompIds]);
@@ -3968,14 +4007,16 @@ export default function MapPage() {
             </div>
 
             <div className="p-4 space-y-4">
-              {/* Subject summary */}
-              <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-xl p-3 space-y-1">
+              {/* Subject summary — warm brick red to match the map pin
+                  + boundary. Same visual identity across all three
+                  surfaces: pin on map, boundary on map, badge here. */}
+              <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                 <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 ring-2 ring-yellow-400/40" />
-                  <p className="text-[10px] font-bold text-yellow-300/90 uppercase tracking-wider">Subject</p>
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
                 </div>
-                <p className="text-sm font-bold text-ink">{viewingCMA.subject_name}</p>
-                <p className="text-xs text-ink-2 font-mono">
+                <p className="text-sm font-semibold text-ink">{viewingCMA.subject_name}</p>
+                <p className="text-xs text-ink-2 font-mono tabular-nums">
                   {viewingCMA.subject_county}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
                 </p>
               </div>
@@ -3985,14 +4026,15 @@ export default function MapPage() {
                 {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
                   <button
                     onClick={startMapSubjectForCMA}
-                    className="col-span-2 py-2 border border-yellow-400/40 bg-yellow-400/15 hover:bg-yellow-400/25 text-xs font-bold text-yellow-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                    className="col-span-2 py-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                    style={{ background: 'rgba(200,80,63,0.08)', borderColor: 'rgba(200,80,63,0.40)', color: '#C8503F' }}
                   >
                     <MapPin size={12} /> Map Subject Tract
                   </button>
                 ) : null}
                 <button
                   onClick={editCmaComps}
-                  className="py-2 border border-slate-blue/40 bg-blue-500/15 hover:bg-blue-500/25 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Pencil size={12} /> Edit / Add Comps
                 </button>
@@ -4022,34 +4064,38 @@ export default function MapPage() {
               </div>
 
               {/* All-in average */}
+              {/* CMA averages — vault tile pattern. White cards on cream,
+                  ink labels, ONE colored numeral on the Mid row to tell
+                  the story (olive for the headline $/Ac, amber for the
+                  land-only adjustment). No tinted backgrounds; the color
+                  cue is in the numeral alone. */}
               {allInPpas.length > 0 && (
-                <div className="bg-cream border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige bg-cream/40 flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Average Total Price Per Acre</p>
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
                     <p className="text-[9px] text-ink-3 font-mono">{cmaComps.length} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(allInLow * subjAcres)}</td></tr>
-                      <tr className="bg-olive-tint border-t border-beige"><td className="px-3 py-2 text-olive-2 font-bold">Mid</td><td className="text-right px-3 py-2 text-olive-2 font-bold">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-olive-2 font-bold">{formatCurrency(allInValue)}</td></tr>
-                      <tr className="border-t border-beige"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(allInHigh * subjAcres)}</td></tr>
+                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInLow * subjAcres)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-olive-2 font-semibold">Mid</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(allInValue)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInHigh * subjAcres)}</td></tr>
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {/* Land-only average — only shown if at least one comp has an improvement value */}
               {landOnlyPpas.length > 0 && (
-                <div className="bg-cream border border-amber-200 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-amber-200 bg-amber-50 flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
-                    <p className="text-[9px] text-ink-2 font-mono">Based on {landOnlySampleSize} of {cmaComps.length} comps</p>
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
+                    <p className="text-[9px] text-ink-3 font-mono">{landOnlySampleSize} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(landLow * subjAcres)}</td></tr>
-                      <tr className="bg-amber-50 border-t border-amber-200/60"><td className="px-3 py-2 text-amber-800 font-bold">Mid</td><td className="text-right px-3 py-2 text-amber-800 font-bold">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-800 font-bold">{formatCurrency(landOnlyValue)}</td></tr>
-                      <tr className="border-t border-amber-200/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink">{formatCurrency(landHigh * subjAcres)}</td></tr>
+                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landLow * subjAcres)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-amber-800 font-semibold">Mid</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(landOnlyValue)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landHigh * subjAcres)}</td></tr>
                     </tbody>
                   </table>
                 </div>

@@ -150,6 +150,23 @@ html, body {
   50% { opacity: 0.35; }
 }
 
+/* Subject pin pulse — a faint warm-red halo that fades in/out on the
+   map subject marker. Quiet (not loud) so the broker's eye knows
+   where "home" is when scrolling away and back. Tied to the
+   SUBJECT_RED rgba value in map/page.tsx. */
+@keyframes subjectPulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 4px rgba(200, 80, 63, 0.35),
+      0 6px 18px rgba(0,0,0,.5);
+  }
+  50% {
+    box-shadow:
+      0 0 0 10px rgba(200, 80, 63, 0.10),
+      0 6px 18px rgba(0,0,0,.5);
+  }
+}
+
 @keyframes slideUp {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }

@@ -510,27 +510,27 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* ============ SECTION 2 — TOTAL PRICE PER ACRE (mirrors broker All-In) ============ */}
                 {allIn.length > 0 && (
                   <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-cream border border-beige rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-beige bg-cream-2 flex items-center justify-between">
-                        <p className="text-[10px] font-bold text-ink-2 uppercase tracking-wider">Average Total Price Per Acre</p>
+                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
                         <p className="text-[9px] text-ink-3 font-mono">{allIn.length} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
                             <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatPPA(aLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatCurrency(aLow * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aLow)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aLow * subjAcres)}</td>
                           </tr>
-                          <tr className="bg-olive-tint border-t border-beige">
-                            <td className="px-3 py-2 text-olive-2 font-bold">Mid</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-bold">{formatPPA(aMid)}</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-bold">{formatCurrency(aMid * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-2 text-olive-2 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(aMid)}</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(aMid * subjAcres)}</td>
                           </tr>
-                          <tr className="border-t border-beige">
+                          <tr className="border-t border-beige/60">
                             <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatPPA(aHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatCurrency(aHigh * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aHigh)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aHigh * subjAcres)}</td>
                           </tr>
                         </tbody>
                       </table>
@@ -544,27 +544,27 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* ============ SECTION 3 — ADJUSTED PRICE PER ACRE (LAND ONLY) ============ */}
                 {landOnly.length > 0 && hasAnyAdjustedComp && (
                   <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-cream border border-amber-400/30 rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-amber-400/20 bg-amber-50 flex items-center justify-between">
-                        <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
-                        <p className="text-[9px] text-ink-2 font-mono">{landOnly.length} of {comps.length} comps</p>
+                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
+                        <p className="text-[9px] text-ink-3 font-mono">{landOnly.length} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
                             <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatPPA(lLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatCurrency(lLow * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lLow)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lLow * subjAcres)}</td>
                           </tr>
-                          <tr className="bg-amber-50 border-t border-amber-400/15">
-                            <td className="px-3 py-2 text-amber-700 font-bold">Mid</td>
-                            <td className="text-right px-3 py-2 text-amber-700 font-bold">{formatPPA(lMid)}</td>
-                            <td className="text-right px-3 py-2 text-amber-700 font-bold">{formatCurrency(lMid * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-2 text-amber-800 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(lMid)}</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(lMid * subjAcres)}</td>
                           </tr>
-                          <tr className="border-t border-amber-400/15">
+                          <tr className="border-t border-beige/60">
                             <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatPPA(lHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink">{formatCurrency(lHigh * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lHigh)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lHigh * subjAcres)}</td>
                           </tr>
                         </tbody>
                       </table>
