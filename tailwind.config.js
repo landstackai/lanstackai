@@ -17,6 +17,64 @@ module.exports = {
         'sage-2': '#10b981',
         'sage-3': '#059669',
         gold: '#f59e0b',
+        // ─── Light-theme palette (vault page) ───────────────────────────
+        // Warm, editorial palette inspired by Claude.ai's cream + accent
+        // restraint. Single-source token system so palette tweaks (shade,
+        // saturation) edit one file — not every className across the app.
+        //
+        // The pairing of cream + olive is intentional for a land brokerage
+        // tool: cream reads "expensive notebook / Italian luxury"; olive
+        // reads "rangeland / agriculture / patient capital." Together they
+        // signal seriousness without resorting to corporate blue-and-gray.
+        cream: '#FAF8F2',         // page background — warm off-white
+        'cream-2': '#F3EFE3',     // optional secondary surface (header zones)
+        ink: '#1F1F1C',           // primary text — warm black, not pure black
+        'ink-2': '#6B6960',       // secondary text — labels, subtitles
+        'ink-3': '#9C9A8F',       // tertiary text — placeholders, em-dash fills
+        beige: '#E8E5DD',         // hairline borders
+        'beige-2': '#DAD5C7',     // stronger borders / dividers
+        olive: '#6B7B3F',         // primary accent — pale dusty olive
+        'olive-2': '#5C6B33',     // darker (hover, pressed)
+        'olive-tint': '#EFF1E3',  // chip + soft fill background
+        'olive-border': '#D4DAB8',// chip border (sits inside olive-tint)
+        'slate-blue': '#4A6FA5',  // secondary accent (links, info badges)
+        'slate-blue-2': '#3A5A8A',// darker slate blue for hover
+        // iMessage blue — exact Apple system blue (#007AFF). Reserved for
+        // chat-like "send" actions (the AI search "Ask" button across vault
+        // + map). Universal affordance: brokers have hit this color
+        // thousands of times on their phones, so they instinctively know
+        // "tap this to send a message."
+        imsg: '#007AFF',
+        'imsg-2': '#0066D9',      // darker for hover / pressed
+        // ─── Branded warm dark (overlay/chrome surfaces) ────────────────
+        // The "second surface" of the design system. Used for elements
+        // that FLOAT or NAVIGATE — sidebar nav, map popups, floating
+        // map buttons, tooltips. Light surfaces remain for content the
+        // user works with (vault, modals, panels, forms).
+        //
+        // Why warm dark, not cool black: pure black + cool grays feel
+        // generic (Windows, GitHub default). Warm dark with a brown
+        // undertone pairs with the cream surfaces — same color family,
+        // different luminance. Apple does this with the Dock/Menubar
+        // over wallpapers: a dark surface that feels coordinated with
+        // the warm content below.
+        //
+        // Accent colors get a "light" variant for dark surfaces — same
+        // color identity, brighter so it pops against the dark bg.
+        // iMessage blue is the exception: it's bright enough to work
+        // unchanged on both surfaces (iOS does this too).
+        'ink-deep': '#1A1815',    // base surface — deep espresso
+        'ink-elev': '#26221E',    // elevated surface (cards on dark)
+        'ink-elev-2': '#332E29',  // higher elevation / hover state
+        'ink-line': '#3A342E',    // hairline border on dark
+        'ink-line-2': '#4A4239',  // stronger divider on dark
+        'cream-1': '#F5F1E8',     // primary text on dark (warm off-white)
+        'cream-2-text': '#A8A296',// secondary text on dark (warm mid-gray)
+        'cream-3-text': '#75716A',// muted text on dark (warm dark-gray)
+        'olive-light': '#A8B57A', // olive variant for dark bg — glows
+        'olive-light-2': '#C4CE96',// even brighter olive for hover on dark
+        'slate-blue-light': '#7B9FCE', // slate-blue for dark bg
+        'amber-warm': '#E8B872',  // amber for dark bg (warm dusty)
       },
       fontFamily: {
         sans: ['Syne', 'sans-serif'],

@@ -21,12 +21,26 @@ import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
+// Comp-pin accent palette. The pin BASE is always a warm dark surface
+// (matches our chrome/overlay system) with a cream-1 text color and a
+// thin colored ring per status. The ring color is the only thing that
+// varies — so the eye reads "color = status" once and never again.
+//
+// Status colors moved off the old neon emerald/cyan/orange. Now uses
+// the same olive/slate-blue/amber-warm/cream-3 palette as the rest of
+// the app — single coherent system across UI chrome + map data.
 const STATUS_COLORS: Record<string, string> = {
-  Sold: '#34d399',
-  Active: '#3b82f6',
-  Pending: '#f59e0b',
-  Withdrawn: '#6b7280',
+  Sold: '#A8B57A',      // olive-light — primary "land transaction" color
+  Active: '#7B9FCE',    // slate-blue-light — on-market listings
+  Pending: '#E8B872',   // amber-warm — under contract
+  Withdrawn: '#75716A', // cream-3-text — muted "off-market"
 };
+
+// Subject property — warm brick red, distinct from comp pins so it
+// reads as "the protagonist." Same convention as Apple Maps drop pins,
+// Zillow / Realtor / every real-estate platform.
+const SUBJECT_RED = '#C8503F';
+const SUBJECT_RED_SOFT = 'rgba(200, 80, 63, 0.35)';
 
 type MapMode = 'view' | 'parcel_select';
 type SheetMode = 'none' | 'parcel' | 'selecting' | 'boundary_created';
@@ -170,12 +184,40 @@ export default function MapPage() {
   // Per-comp expand-description toggle (CMA workspace expanded view)
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
 
-  // Broker Opinion of Value: dual-input (per-acre + total) with bidirectional
-  // calculation. Stored as a single broker_opinion_value (total) on the CMA.
-  // We hold local string inputs so the user's typing isn't clobbered by the
-  // optimistic state round-trip.
+  // Broker Opinion of Value — supports TWO modes:
+  //
+  //   'lump_sum' (default) — broker enters a single number for the
+  //     property's value via $/Acre OR Total. The two are linked: edit
+  //     either, the other auto-calculates from subject acres. Stored
+  //     in cmas.broker_opinion_value (total $).
+  //
+  //   'breakdown' — broker breaks the value into Land + Improvement.
+  //     Inputs: Land $/Acre (or Land Total — linked), and a separate
+  //     Improvement Value lump sum. Total = Land + Improvement (auto).
+  //     Stored in cmas.broker_opinion_land_value (land total $) +
+  //     cmas.broker_opinion_improvement_value (improvement $).
+  //
+  // Flipping modes preserves entered values where possible so brokers
+  // don't lose work mid-CMA.
+  type BovMode = 'lump_sum' | 'breakdown';
+  const [bovMode, setBovMode] = useState<BovMode>('lump_sum');
+  // Lump-sum mode inputs (legacy fields, kept for that mode)
   const [bovPpaInput, setBovPpaInput] = useState<string>('');
   const [bovTotalInput, setBovTotalInput] = useState<string>('');
+  // Breakdown-mode inputs
+  const [bovLandPpaInput, setBovLandPpaInput] = useState<string>('');
+  const [bovLandTotalInput, setBovLandTotalInput] = useState<string>('');
+  const [bovImprovementInput, setBovImprovementInput] = useState<string>('');
+  // Improvement breakdown — optional house itemization (SQFT × $/SQFT)
+  // + additional vertical improvements lump. When ANY of these are set,
+  // the bovImprovementInput becomes a computed sum: (sqft × ppsf) + addl.
+  // Horizontal improvements (fencing, ponds, wells) get baked into the
+  // Land $/Acre judgment per real-estate convention.
+  const [bovHouseSqftInput, setBovHouseSqftInput] = useState<string>('');
+  const [bovHousePpsfInput, setBovHousePpsfInput] = useState<string>('');
+  const [bovAddlVerticalInput, setBovAddlVerticalInput] = useState<string>('');
+  // UI toggle for the optional house-breakdown expander.
+  const [bovHouseBreakdownOpen, setBovHouseBreakdownOpen] = useState(false);
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -572,18 +614,22 @@ export default function MapPage() {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       });
+      // Subject boundary uses the warm brick red SUBJECT_RED so it
+      // matches the subject pin marker — broker reads "red = the one
+      // we're evaluating" across the boundary, the pin, the right-panel
+      // badge. Single visual identity.
       map.current!.addLayer({
         id: 'cma-subject-fill',
         type: 'fill',
         source: 'cma-subject',
-        paint: { 'fill-color': '#facc15', 'fill-opacity': 0.18 },
+        paint: { 'fill-color': '#C8503F', 'fill-opacity': 0.18 },
       });
       map.current!.addLayer({
         id: 'cma-subject-halo',
         type: 'line',
         source: 'cma-subject',
         paint: {
-          'line-color': '#facc15',
+          'line-color': '#C8503F',
           'line-width': 7,
           'line-opacity': 0.35,
           'line-blur': 1.5,
@@ -593,7 +639,7 @@ export default function MapPage() {
         id: 'cma-subject-line',
         type: 'line',
         source: 'cma-subject',
-        paint: { 'line-color': '#facc15', 'line-width': 3, 'line-opacity': 1 },
+        paint: { 'line-color': '#C8503F', 'line-width': 3, 'line-opacity': 1 },
       });
 
       // Saved comp boundaries (rendered from comps.boundary_geojson)
@@ -1867,19 +1913,67 @@ export default function MapPage() {
     );
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync the dual BOV inputs when a different CMA loads. We bind to id only
-  // (not broker_opinion_value) so live typing isn't overwritten by the
-  // optimistic state round-trip during keystrokes.
+  // Sync ALL BOV inputs when a different CMA loads. Mode is inferred from
+  // which columns are populated:
+  //   broker_opinion_land_value set → breakdown mode
+  //   else → lump_sum mode (existing column, default)
+  // Bind to id only so live typing isn't clobbered by optimistic state
+  // round-trips during keystrokes.
   useEffect(() => {
-    const total = (viewingCMA as any)?.broker_opinion_value;
-    const acres = Number(viewingCMA?.subject_acres) || 0;
-    const totalNum = total != null ? Number(total) : NaN;
-    if (Number.isFinite(totalNum) && totalNum > 0) {
-      setBovTotalInput(String(Math.round(totalNum)));
-      setBovPpaInput(acres > 0 ? String(Math.round(totalNum / acres)) : '');
+    const cma: any = viewingCMA;
+    const acres = Number(cma?.subject_acres) || 0;
+    const lumpTotal = cma?.broker_opinion_value;
+    const landTotal = cma?.broker_opinion_land_value;
+    const improvement = cma?.broker_opinion_improvement_value;
+    const storedMode = cma?.broker_opinion_mode as BovMode | null | undefined;
+
+    // Lump-sum fields
+    const lumpNum = lumpTotal != null ? Number(lumpTotal) : NaN;
+    if (Number.isFinite(lumpNum) && lumpNum > 0) {
+      setBovTotalInput(String(Math.round(lumpNum)));
+      setBovPpaInput(acres > 0 ? String(Math.round(lumpNum / acres)) : '');
     } else {
       setBovTotalInput('');
       setBovPpaInput('');
+    }
+
+    // Breakdown fields
+    const landNum = landTotal != null ? Number(landTotal) : NaN;
+    if (Number.isFinite(landNum) && landNum > 0) {
+      setBovLandTotalInput(String(Math.round(landNum)));
+      setBovLandPpaInput(acres > 0 ? String(Math.round(landNum / acres)) : '');
+    } else {
+      setBovLandTotalInput('');
+      setBovLandPpaInput('');
+    }
+    const impNum = improvement != null ? Number(improvement) : NaN;
+    setBovImprovementInput(Number.isFinite(impNum) && impNum > 0 ? String(Math.round(impNum)) : '');
+
+    // Improvement breakdown sub-fields (house SQFT + Additional Vertical)
+    const houseSqft = cma?.broker_opinion_house_sqft;
+    const housePpsf = cma?.broker_opinion_house_ppsf;
+    const addlVert = cma?.broker_opinion_additional_vertical;
+    const sqftNum = houseSqft != null ? Number(houseSqft) : NaN;
+    const ppsfNum = housePpsf != null ? Number(housePpsf) : NaN;
+    const addlNum = addlVert != null ? Number(addlVert) : NaN;
+    setBovHouseSqftInput(Number.isFinite(sqftNum) && sqftNum > 0 ? String(Math.round(sqftNum)) : '');
+    setBovHousePpsfInput(Number.isFinite(ppsfNum) && ppsfNum > 0 ? String(Math.round(ppsfNum)) : '');
+    setBovAddlVerticalInput(Number.isFinite(addlNum) && addlNum > 0 ? String(Math.round(addlNum)) : '');
+    // Auto-open the house-breakdown expander when any of the itemization
+    // fields are populated — broker shouldn't have to click to see their
+    // own data on next load.
+    const hasItemization = (Number.isFinite(sqftNum) && sqftNum > 0)
+      || (Number.isFinite(ppsfNum) && ppsfNum > 0)
+      || (Number.isFinite(addlNum) && addlNum > 0);
+    setBovHouseBreakdownOpen(hasItemization);
+
+    // Mode resolution: explicit > inferred > default
+    if (storedMode === 'lump_sum' || storedMode === 'breakdown') {
+      setBovMode(storedMode);
+    } else if (Number.isFinite(landNum) && landNum > 0) {
+      setBovMode('breakdown');
+    } else {
+      setBovMode('lump_sum');
     }
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2063,7 +2157,10 @@ export default function MapPage() {
     return () => { cancelled = true; };
   }, [viewingCMA, comps, supabase]);
 
-  // Subject marker (yellow pin) in workspace view
+  // Subject marker — warm brick red, the protagonist of the map. Real-
+  // estate convention (Zillow / Realtor / Apple Maps drop pin) trained
+  // brokers to read "red = the one we're evaluating." A subtle pulse
+  // ring keeps the eye anchored when the broker scrolls away and back.
   const subjectMarkerRef = useRef<mapboxgl.Marker | null>(null);
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
@@ -2074,9 +2171,13 @@ export default function MapPage() {
     if (!viewingCMA?.subject_latitude || !viewingCMA?.subject_longitude) return;
     const el = document.createElement('div');
     el.style.cssText = `
-      background:#facc15;border:3px solid #0b0f14;border-radius:50%;
-      width:18px;height:18px;cursor:pointer;
-      box-shadow:0 0 0 3px #facc15aa, 0 4px 14px rgba(0,0,0,.6);
+      position:relative;
+      background:${SUBJECT_RED};
+      border:3px solid #F5F1E8;
+      border-radius:50%;
+      width:20px;height:20px;cursor:pointer;
+      box-shadow:0 0 0 4px ${SUBJECT_RED_SOFT}, 0 6px 18px rgba(0,0,0,.5);
+      animation:subjectPulse 2.4s ease-in-out infinite;
     `;
     el.title = viewingCMA.subject_name || 'Subject';
     subjectMarkerRef.current = new mapboxgl.Marker({ element: el })
@@ -2823,11 +2924,24 @@ export default function MapPage() {
       el.dataset.compId = comp.id;
       el.dataset.baseColor = baseColor;
       el.dataset.isCmaSelected = String(isCmaSelected);
+      // Pin treatment:
+      //   - Warm dark base (matches popup + sidebar surface system)
+      //   - Cream-1 number text (reads on ANY satellite color)
+      //   - Status-colored ring (subtle, brand-cohesive)
+      //   - CMA-selected: brighter olive ring + soft glow
+      //
+      // NOTE: do NOT use `transform` in transitions or on hover — Mapbox
+      // owns the `transform` CSS property on marker DOM (it positions
+      // markers via translate). Setting transform: scale() wipes Mapbox's
+      // translate and the pin jumps to (0,0) for a frame. Hover affordance
+      // comes from border-color + box-shadow only.
       el.style.cssText = `
-        background:${isCmaSelected ? '#1e3a5f' : '#0b0f14'};border:2px solid ${color};border-radius:20px;
+        background:${isCmaSelected ? '#332E29' : '#1A1815'};
+        border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
+        border-radius:20px;
         padding:4px 9px;font-family:'DM Mono',monospace;font-size:11px;
-        font-weight:700;color:${color};white-space:nowrap;cursor:pointer;
-        box-shadow:${isCmaSelected ? '0 0 0 3px #60a5fa33, ' : ''}0 2px 8px rgba(0,0,0,.5);
+        font-weight:700;color:#F5F1E8;white-space:nowrap;cursor:pointer;
+        box-shadow:${isCmaSelected ? '0 0 0 3px rgba(196,206,150,0.25), ' : ''}0 2px 10px rgba(0,0,0,.4);
         transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s;
       `;
       const total = comp.sale_price || 0;
@@ -2850,35 +2964,43 @@ export default function MapPage() {
       const isStrongIrrigation = (comp as any).irrigation === 'Strong';
       const isAgentVerified = comp.improvement_source === 'agent_verified';
       const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
-      const purplePill = (label: string) =>
-        `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(192,132,252,0.1);color:#c084fc;border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
-      const improvedBadge = isImproved ? purplePill('IMPROVED') : '';
-      const irrigationBadge = isStrongIrrigation ? purplePill('IRRIGATION') : '';
+      // Branded warm dark popup — floats over satellite map with frosted
+      // blur (CSS in globals.css). Accent colors use their "light"
+      // variants so they glow against the warm dark surface:
+      //   olive-light  (#A8B57A) for the headline $/Ac
+      //   amber-warm   (#E8B872) for the adjusted delta
+      //   slate-blue-light (#7B9FCE) for status badges
+      //   cream-1 (#F5F1E8)        primary text
+      //   cream-2-text (#A8A296)   muted labels
+      const bluePill = (label: string) =>
+        `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.15);color:#7B9FCE;border:1px solid rgba(123,159,206,0.35);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+      const improvedBadge = isImproved ? bluePill('IMPROVED') : '';
+      const irrigationBadge = isStrongIrrigation ? bluePill('IRRIGATION') : '';
       const adjBadge = hasAdjustment
-        ? `<span style="font-size:9px;color:#fbbf24;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+        ? `<span style="font-size:9px;color:#E8B872;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
         : '';
       const agentBadge = isAgentVerified
-        ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(52,211,153,0.1);color:#6ee7b7;border:1px solid rgba(52,211,153,0.3);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+        ? `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.18);color:#7B9FCE;border:1px solid rgba(123,159,206,0.40);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
         : '';
-      const adjustedColor = hasAdjustment ? '#fcd34d' : 'rgba(253,230,138,0.45)';
+      const adjustedColor = hasAdjustment ? '#E8B872' : 'rgba(232,184,114,0.45)';
       const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
       const popupHtml = `
         <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-            <span style="font-weight:700;font-size:12px;color:#fff;letter-spacing:-0.01em;">${propertyName}</span>
+            <span style="font-weight:600;font-size:12px;color:#F5F1E8;letter-spacing:-0.01em;">${propertyName}</span>
             ${improvedBadge}
             ${irrigationBadge}
             ${adjBadge}
             ${agentBadge}
           </div>
           <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
-            <div style="color:#64748b;">Acres</div>
-            <div style="color:#64748b;">Total</div>
-            <div style="color:#64748b;">Total $/Ac</div>
-            <div style="color:#64748b;">Adjusted $/Ac</div>
-            <div style="color:#fff;font-weight:700;">${formatAcres(comp.acres)}</div>
-            <div style="color:#fff;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
-            <div style="color:#34d399;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+            <div style="color:#A8A296;">Acres</div>
+            <div style="color:#A8A296;">Total</div>
+            <div style="color:#A8A296;">Total $/Ac</div>
+            <div style="color:#A8A296;">Adjusted $/Ac</div>
+            <div style="color:#F5F1E8;font-weight:700;">${formatAcres(comp.acres)}</div>
+            <div style="color:#F5F1E8;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+            <div style="color:#A8B57A;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
             <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
           </div>
         </div>
@@ -2942,26 +3064,30 @@ export default function MapPage() {
       const isAiHighlighted = aiHighlightedCompIds?.has(id) ?? null;
       const isAiDimmed = aiHighlightedCompIds != null && !aiHighlightedCompIds.has(id);
 
-      // Hide non-matching pins entirely when an AI filter is active
+      // Hide non-matching pins entirely when an AI filter is active.
+      // Hover / AI-highlight states use box-shadow + border-color only.
+      // DO NOT touch el.style.transform — Mapbox uses it for positioning
+      // the marker (translate). Setting transform here would wipe the
+      // translate and snap the pin to (0,0) for a frame.
       el.style.display = isAiDimmed ? 'none' : '';
       if (isHovered) {
-        el.style.boxShadow = '0 0 0 5px #60a5fa55, 0 6px 18px rgba(0,0,0,.7)';
-        el.style.borderColor = '#60a5fa';
-        el.style.color = '#60a5fa';
+        el.style.boxShadow = '0 0 0 4px rgba(168,181,122,0.40), 0 8px 22px rgba(0,0,0,.55)';
+        el.style.borderColor = '#C4CE96';
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '10';
         el.style.opacity = '1';
       } else if (isAiHighlighted) {
-        el.style.boxShadow = '0 0 0 4px #c084fc55, 0 4px 14px rgba(0,0,0,.6)';
-        el.style.borderColor = '#c084fc';
-        el.style.color = '#c084fc';
+        el.style.boxShadow = '0 0 0 4px rgba(123,159,206,0.32), 0 4px 14px rgba(0,0,0,.5)';
+        el.style.borderColor = '#7B9FCE';
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '5';
         el.style.opacity = '1';
       } else {
         el.style.boxShadow = isCmaSelected
-          ? '0 0 0 3px #60a5fa33, 0 2px 8px rgba(0,0,0,.5)'
-          : '0 2px 8px rgba(0,0,0,.5)';
-        el.style.borderColor = isCmaSelected ? '#60a5fa' : baseColor;
-        el.style.color = isCmaSelected ? '#60a5fa' : baseColor;
+          ? '0 0 0 3px rgba(196,206,150,0.25), 0 2px 10px rgba(0,0,0,.4)'
+          : '0 2px 10px rgba(0,0,0,.4)';
+        el.style.borderColor = isCmaSelected ? '#C4CE96' : baseColor;
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '1';
         el.style.opacity = '1';
       }
@@ -3158,7 +3284,7 @@ export default function MapPage() {
   const allParcels = selectedParcels.length > 0 ? selectedParcels : tappedParcel ? [tappedParcel] : [];
 
   return (
-    <div className="flex h-full bg-night">
+    <div className="flex h-full bg-cream">
       <div className="flex-1 relative">
         <div
           ref={mapContainer}
@@ -3169,22 +3295,22 @@ export default function MapPage() {
         {/* Edit Boundary toolbar — appears when actively editing a saved boundary */}
         {editingBoundaryComp && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30">
-            <div className="bg-amber-500/15 backdrop-blur-md border border-amber-500/40 rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2">
-              <Pencil size={14} className="text-amber-400" />
-              <span className="text-xs font-bold text-amber-200 mr-1">
+            <div className="bg-amber-500/15 backdrop-blur-md border border-amber-300 rounded-xl shadow-2xl px-3 py-2 flex items-center gap-2">
+              <Pencil size={14} className="text-amber-600" />
+              <span className="text-xs font-bold text-amber-800 mr-1">
                 Editing: {editingBoundaryComp.property_name || `${editingBoundaryComp.county} comp`}
               </span>
               <button
                 onClick={cancelEditBoundary}
                 disabled={savingBoundary}
-                className="px-3 py-1.5 border border-border bg-panel/70 hover:border-red-400 hover:text-red-400 text-xs font-bold text-slate-300 rounded-lg transition-colors"
+                className="px-3 py-1.5 border border-beige bg-white/70 hover:border-red-400 hover:text-red-500 text-xs font-bold text-ink-2 rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={saveEditedBoundary}
                 disabled={savingBoundary}
-                className="px-3 py-1.5 bg-sage hover:bg-sage2 text-black text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 bg-olive hover:bg-olive-2 text-white text-xs font-bold rounded-lg transition-colors disabled:opacity-50"
               >
                 {savingBoundary ? 'Saving…' : 'Save Boundary'}
               </button>
@@ -3193,13 +3319,15 @@ export default function MapPage() {
         )}
 
         {/* Search bar — single input that drives the AI search (filter +
-            location + place). Owner search and scope filter live in the
-            advanced-filters popover opened by the sliders button to the
-            right of the input. Consolidates what used to be two stacked
-            bars into one row of map chrome. */}
+            location + place). Matched to the vault's search bar exactly
+            (per broker request): solid white background, beige-2 border,
+            olive sparkle on the left, iMessage-blue Ask button on the
+            right. Floating shadow keeps it elevated over the satellite.
+            Filters button is integrated inline (the map has a popover
+            anchored to it, which doesn't exist on the vault).  */}
         <div className="absolute top-3 left-3 right-3 md:left-1/2 md:right-auto md:-translate-x-1/2 md:w-[36rem] z-20">
           <div className="relative">
-            <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-300 pointer-events-none" />
+            <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-olive pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
@@ -3213,49 +3341,51 @@ export default function MapPage() {
                 }
               }}
               placeholder="Ask: show me all 400+ acre comps in Real County"
-              className="w-full bg-panel/95 backdrop-blur-sm border border-border focus:border-purple-400 rounded-xl pl-9 pr-32 py-2.5 text-sm text-white placeholder-slate-400 outline-none focus:ring-1 focus:ring-purple-400/30 transition-colors shadow-lg"
+              className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10"
             />
             {searchQuery && (
               <button
                 onClick={() => { setSearchQuery(''); clearAiSearch(); }}
                 title="Clear"
-                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                className="absolute right-[8.5rem] top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink p-1"
               >
                 <X size={12} />
               </button>
             )}
-            {/* Filters button — opens the advanced-filter popover. Highlights
-                gold when any filter inside is active (owner search has
-                results, OR scope ≠ All) so brokers see at a glance that
-                they have a non-default filter on. */}
+            {/* Filters button — opens the advanced-filter popover. Sits
+                INSIDE the search bar (the map's popover is anchored to
+                this button). When any filter is active, olive-tint
+                indicates the non-default state. */}
             <button
               onClick={() => setFiltersOpen((v) => !v)}
               title="Advanced filters"
               aria-expanded={filtersOpen}
-              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-lg text-[11px] font-bold transition-colors flex items-center gap-1 ${
+              className={`absolute right-[5.25rem] top-1/2 -translate-y-1/2 px-2.5 py-1 border rounded-md text-[11px] font-semibold transition-colors flex items-center gap-1 ${
                 ownerSearchCount !== null || mapScope !== 'all' || countyFilter.size > 0
-                  ? 'bg-sage/20 hover:bg-sage/30 border-sage/40 text-sage'
-                  : 'bg-slate-500/10 hover:bg-slate-500/20 border-border text-slate-300 hover:text-white'
+                  ? 'bg-olive-tint border-olive-border text-olive-2'
+                  : 'bg-cream border-beige text-ink-2 hover:text-ink hover:border-beige-2'
               }`}
             >
               <SlidersHorizontal size={11} />
               Filters
             </button>
+            {/* iMessage-blue "Ask" send button — identical to the vault's
+                Ask button. Universal "send a chat message" affordance. */}
             <button
               onClick={askAi}
               disabled={askingAi || !searchQuery.trim()}
               title="Ask AI"
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-purple-500/25 hover:bg-purple-500/35 disabled:opacity-40 disabled:cursor-not-allowed border border-purple-400/40 hover:border-purple-400 rounded-lg text-[11px] font-bold text-purple-100 transition-colors flex items-center gap-1"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed rounded-md text-[12px] font-medium text-white transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
             >
               <Sparkles size={11} />
               {askingAi ? '…' : 'Ask'}
             </button>
             {aiResultMessage && (
-              <div className="absolute top-full mt-1 left-0 right-0 bg-purple-500/15 backdrop-blur-sm border border-purple-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
-                <p className="text-[11px] text-purple-200 truncate">{aiResultMessage}</p>
+              <div className="absolute top-full mt-1 left-0 right-0 bg-white border border-beige-2 rounded-lg px-3 py-2 flex items-center justify-between gap-2 shadow-md shadow-black/10">
+                <p className="text-[11px] text-ink-2 truncate">{aiResultMessage}</p>
                 <button
                   onClick={clearAiSearch}
-                  className="text-purple-300/80 hover:text-purple-200 flex-shrink-0"
+                  className="text-olive hover:text-ink-2 flex-shrink-0"
                   title="Clear filter"
                 >
                   <X size={12} />
@@ -3263,20 +3393,20 @@ export default function MapPage() {
               </div>
             )}
             {/* Owner-search result chip — lives below the bar same as the
-                AI result chip. Distinct fuchsia tint so brokers can tell
-                which kind of filter is active when both happen to be set. */}
+                AI result chip. Slate-blue tint distinguishes it from
+                the AI result chip (olive) while staying in our palette. */}
             {ownerSearchCount !== null && (
-              <div className={`absolute left-0 right-0 bg-fuchsia-500/15 backdrop-blur-sm border border-fuchsia-400/30 rounded-xl px-3 py-2 flex items-center justify-between gap-2 ${
+              <div className={`absolute left-0 right-0 bg-slate-blue/10 backdrop-blur-sm border border-slate-blue/30 rounded-lg px-3 py-2 flex items-center justify-between gap-2 shadow-md shadow-black/10 ${
                 aiResultMessage ? 'top-[calc(100%+2.5rem)]' : 'top-full mt-1'
               }`}>
-                <p className="text-[11px] text-fuchsia-200 truncate">
+                <p className="text-[11px] text-slate-blue-2 truncate">
                   {ownerSearchCount === 0
                     ? `No owner matches for "${ownerSearchQuery}"`
                     : `${ownerSearchCount} parcel${ownerSearchCount === 1 ? '' : 's'} matched "${ownerSearchQuery}"${ownerSearchTruncated ? ' (first 200)' : ''}`}
                 </p>
                 <button
                   onClick={clearOwnerSearch}
-                  className="text-fuchsia-300/80 hover:text-fuchsia-200 flex-shrink-0"
+                  className="text-slate-blue hover:text-slate-blue-2 flex-shrink-0"
                   title="Clear owner search"
                 >
                   <X size={12} />
@@ -3292,15 +3422,15 @@ export default function MapPage() {
               range, county multi-select, sold-after date, etc.) without
               re-introducing always-visible chrome. */}
           {filtersOpen && (
-            <div className="absolute top-full mt-2 left-0 right-0 bg-panel/95 backdrop-blur-md border border-border rounded-xl shadow-2xl p-3 z-30 space-y-3">
+            <div className="absolute top-full mt-2 left-0 right-0 bg-white/95 backdrop-blur-md border border-beige rounded-xl shadow-2xl p-3 z-30 space-y-3">
               <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                <div className="text-[10px] uppercase tracking-wide text-ink-3 flex items-center gap-1.5">
                   <SlidersHorizontal size={11} />
                   Filters
                 </div>
                 <button
                   onClick={() => setFiltersOpen(false)}
-                  className="text-slate-500 hover:text-white"
+                  className="text-ink-3 hover:text-ink"
                   title="Close filters"
                   aria-label="Close filters"
                 >
@@ -3313,7 +3443,7 @@ export default function MapPage() {
                   source (TxGIO parcels statewide, not the comps table)
                   and a separate code path. */}
               <div>
-                <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 flex items-center gap-1.5">
+                <label className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5 flex items-center gap-1.5">
                   <Search size={10} />
                   Search by owner
                 </label>
@@ -3332,13 +3462,13 @@ export default function MapPage() {
                     }}
                     placeholder="e.g. Grundhoefer Farms"
                     disabled={ownerSearching}
-                    className="w-full bg-night/60 border border-border focus:border-fuchsia-400 rounded-lg px-2.5 py-1.5 pr-20 text-xs text-white placeholder-slate-500 outline-none disabled:opacity-50"
+                    className="w-full bg-cream/60 border border-beige focus:border-fuchsia-400 rounded-lg px-2.5 py-1.5 pr-20 text-xs text-ink placeholder-ink-3 outline-none disabled:opacity-50"
                   />
                   {(ownerSearchQuery || ownerSearchCount !== null) && (
                     <button
                       onClick={clearOwnerSearch}
                       title="Clear owner search"
-                      className="absolute right-[4.25rem] top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                      className="absolute right-[4.25rem] top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink"
                     >
                       <X size={11} />
                     </button>
@@ -3364,26 +3494,26 @@ export default function MapPage() {
               {availableCounties.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-[10px] uppercase tracking-wide text-slate-500">
+                    <label className="text-[10px] uppercase tracking-wide text-ink-3">
                       County
                     </label>
                     {countyFilter.size > 0 && (
                       <button
                         onClick={() => setCountyFilter(new Set())}
-                        className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                        className="text-[10px] text-ink-3 hover:text-ink-2 underline"
                         title="Show comps in all counties"
                       >
                         clear
                       </button>
                     )}
                   </div>
-                  <div className="bg-night/60 border border-border rounded-lg max-h-40 overflow-y-auto p-1.5 space-y-0.5">
+                  <div className="bg-cream/60 border border-beige rounded-lg max-h-40 overflow-y-auto p-1.5 space-y-0.5">
                     {availableCounties.map((c) => {
                       const checked = countyFilter.has(c.norm);
                       return (
                         <label
                           key={c.norm}
-                          className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-slate-500/10 cursor-pointer"
+                          className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-cream cursor-pointer"
                         >
                           <input
                             type="checkbox"
@@ -3396,16 +3526,16 @@ export default function MapPage() {
                                 return next;
                               });
                             }}
-                            className="w-3 h-3 accent-emerald-400"
+                            className="w-3 h-3 accent-olive"
                           />
-                          <span className={`text-[11px] flex-1 ${checked ? 'text-emerald-300 font-bold' : 'text-slate-300'}`}>
+                          <span className={`text-[11px] flex-1 ${checked ? 'text-olive-2 font-bold' : 'text-ink-2'}`}>
                             {c.display}
                           </span>
                           {/* Comp count — helps brokers see where their
                               working data actually lives. Multi-county
                               comps are counted in each of their counties
                               (so totals can exceed comps.length). */}
-                          <span className="text-[10px] text-slate-500 font-mono">
+                          <span className="text-[10px] text-ink-3 font-mono">
                             {c.count}
                           </span>
                         </label>
@@ -3413,7 +3543,7 @@ export default function MapPage() {
                     })}
                   </div>
                   {countyFilter.size > 0 && (
-                    <div className="text-[10px] text-slate-500 mt-1">
+                    <div className="text-[10px] text-ink-3 mt-1">
                       {countyFilter.size} of {availableCounties.length} selected
                     </div>
                   )}
@@ -3426,14 +3556,14 @@ export default function MapPage() {
                   switch between scopes frequently. */}
               {!viewingCMA && (
                 <div>
-                  <label className="text-[10px] uppercase tracking-wide text-slate-500 mb-1.5 block">
+                  <label className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5 block">
                     Scope
                   </label>
-                  <div className="bg-night/60 border border-border rounded-lg overflow-hidden grid grid-cols-3">
+                  <div className="bg-cream/60 border border-beige rounded-lg overflow-hidden grid grid-cols-3">
                     <button
                       onClick={() => setMapScope('all')}
                       className={`py-1.5 text-[11px] font-bold transition-colors ${
-                        mapScope === 'all' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                        mapScope === 'all' ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
                       }`}
                       title="Show every comp you have access to"
                     >
@@ -3442,7 +3572,7 @@ export default function MapPage() {
                     <button
                       onClick={() => setMapScope('company')}
                       className={`py-1.5 text-[11px] font-bold transition-colors ${
-                        mapScope === 'company' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                        mapScope === 'company' ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
                       }`}
                       title="Only comps marked as Company Transaction"
                     >
@@ -3451,7 +3581,7 @@ export default function MapPage() {
                     <button
                       onClick={() => setMapScope('mine')}
                       className={`py-1.5 text-[11px] font-bold transition-colors ${
-                        mapScope === 'mine' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+                        mapScope === 'mine' ? 'bg-olive-tint text-olive-2' : 'text-ink-2 hover:text-ink'
                       }`}
                       title="Only deals you personally closed"
                     >
@@ -3466,13 +3596,15 @@ export default function MapPage() {
 
         {/* Map controls */}
         <div className="absolute top-16 left-3 z-10 flex flex-col gap-2">
-          {/* Style switcher — Satellite (aerial only) vs Terrain (aerial
-              + contour line overlay). Dark removed per broker feedback. */}
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden flex">
+          {/* Style switcher — branded warm dark with frosted blur. All
+              floating chrome over the satellite map shares this surface
+              treatment (same as sidebar + popups). Olive-light glows for
+              active state. */}
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden flex shadow-lg shadow-black/20">
             {(['satellite', 'terrain'] as const).map(s => (
               <button key={s} onClick={() => changeStyle(s)}
-                className={`px-3 py-2 text-xs font-bold capitalize transition-colors ${
-                  mapStyle === s ? 'bg-sage/20 text-sage' : 'text-slate-400 hover:text-white'
+                className={`px-3 py-2 text-xs font-semibold capitalize transition-colors ${
+                  mapStyle === s ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
                 }`}
                 title={s === 'terrain' ? 'Satellite imagery with contour lines' : 'Satellite imagery'}
               >{s}</button>
@@ -3480,11 +3612,11 @@ export default function MapPage() {
           </div>
 
           {/* Pin label toggle — $/Ac vs Total Price */}
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden grid grid-cols-2 w-[10rem]">
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden grid grid-cols-2 w-[10rem] shadow-lg shadow-black/20">
             <button
               onClick={() => setPinLabelMode('ppa')}
-              className={`py-2 text-xs font-bold transition-colors text-center ${
-                pinLabelMode === 'ppa' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+              className={`py-2 text-xs font-semibold transition-colors text-center ${
+                pinLabelMode === 'ppa' ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title="Show price per acre on pins"
             >
@@ -3492,8 +3624,8 @@ export default function MapPage() {
             </button>
             <button
               onClick={() => setPinLabelMode('total')}
-              className={`py-2 text-xs font-bold transition-colors text-center ${
-                pinLabelMode === 'total' ? 'bg-emerald-400/20 text-emerald-300' : 'text-slate-400 hover:text-white'
+              className={`py-2 text-xs font-semibold transition-colors text-center ${
+                pinLabelMode === 'total' ? 'bg-olive-light/15 text-olive-light' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title="Show total sale price on pins"
             >
@@ -3501,15 +3633,12 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Flood toggle — FEMA NFHL hazard zones. Counties always
-              render as structural reference (no toggle). Standalone pill
-              now that Counties was removed; visually matches the other
-              control pills in this column. */}
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl overflow-hidden w-[10rem]">
+          {/* Flood toggle */}
+          <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden w-[10rem] shadow-lg shadow-black/20">
             <button
               onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
-              className={`w-full py-2 px-2 text-xs font-bold transition-colors text-center flex items-center justify-center gap-1.5 ${
-                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-slate-400 hover:text-white'
+              className={`w-full py-2 px-2 text-xs font-semibold transition-colors text-center flex items-center justify-center gap-1.5 ${
+                overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-cream-2-text hover:text-cream-1'
               }`}
               title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
               aria-pressed={overlays.floodplain}
@@ -3544,7 +3673,7 @@ export default function MapPage() {
                 setTappedParcel(null);
                 toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
               }}
-              className="bg-panel/90 backdrop-blur-sm border border-border hover:border-sage rounded-xl px-3 py-2 text-xs font-bold text-slate-300 hover:text-sage transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <MousePointer size={12} />
               Select Parcels
@@ -3552,7 +3681,7 @@ export default function MapPage() {
           )}
 
           {mapMode === 'parcel_select' && (
-            <div className={`${settingSubjectForCma ? 'bg-yellow-400/10 border-yellow-400/30 text-yellow-300' : 'bg-sage/10 border-sage/30 text-sage'} border rounded-xl px-3 py-2 text-xs font-bold flex items-center gap-1.5`}>
+            <div className={`${settingSubjectForCma ? 'bg-amber-warm/15 border-amber-warm/40 text-amber-warm' : 'bg-olive-light/15 border-olive-light/40 text-olive-light'} backdrop-blur-md border rounded-xl px-3 py-2 text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-black/20`}>
               <MousePointer size={12} />
               {settingSubjectForCma
                 ? `Mapping subject for "${viewingCMA?.subject_name || 'CMA'}"`
@@ -3566,7 +3695,7 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && (
             <button
               onClick={startDrawing}
-              className="bg-panel/90 backdrop-blur-sm border border-border hover:border-sage rounded-xl px-3 py-2 text-xs font-bold text-slate-300 hover:text-sage transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <Pencil size={12} />
               Draw Boundary
@@ -3575,28 +3704,28 @@ export default function MapPage() {
 
           {drawingActive && (
             <div className="flex gap-1.5 items-stretch">
-              <div className="bg-amber-500/15 border border-amber-500/40 rounded-xl px-3 py-2 flex items-center gap-2.5">
-                <Pencil size={14} className="text-amber-400 shrink-0" />
+              <div className="bg-ink-deep/85 backdrop-blur-md border border-amber-warm/40 rounded-xl px-3 py-2 flex items-center gap-2.5 shadow-lg shadow-black/20">
+                <Pencil size={14} className="text-amber-warm shrink-0" />
                 <div className="flex flex-col leading-tight">
-                  <span className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">
+                  <span className="text-[10px] font-semibold text-amber-warm uppercase tracking-wider">
                     {drawVertexCount === 0
                       ? 'Click the first corner of the property'
                       : drawVertexCount < 3
                       ? `Keep clicking corners (${drawVertexCount} placed, need at least 3)`
                       : `${drawVertexCount} corners placed — click Finish or double-click to close`}
                   </span>
-                  <span className="text-[9px] text-amber-300/60">
-                    Press <kbd className="font-mono px-0.5 bg-amber-500/20 rounded">Backspace</kbd> to remove last corner
+                  <span className="text-[9px] text-cream-2-text">
+                    Press <kbd className="font-mono px-0.5 bg-ink-elev text-cream-1 rounded">Backspace</kbd> to remove last corner
                   </span>
                 </div>
               </div>
               <button
                 onClick={finishDrawing}
                 disabled={drawVertexCount < 3}
-                className={`rounded-xl px-3 py-2 text-xs font-bold transition-colors flex items-center gap-1.5 border ${
+                className={`backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold transition-colors flex items-center gap-1.5 border shadow-lg shadow-black/20 ${
                   drawVertexCount >= 3
-                    ? 'bg-sage/15 border-sage/40 text-sage hover:bg-sage/25 hover:border-sage cursor-pointer'
-                    : 'bg-panel/40 border-border/40 text-slate-500 cursor-not-allowed'
+                    ? 'bg-olive-light/15 border-olive-light/40 text-olive-light hover:bg-olive-light/20 hover:border-olive-light/60 cursor-pointer'
+                    : 'bg-ink-deep/60 border-ink-line/40 text-cream-3-text cursor-not-allowed'
                 }`}
                 title={drawVertexCount < 3 ? 'Place at least 3 corners first' : 'Close the polygon'}
               >
@@ -3605,14 +3734,14 @@ export default function MapPage() {
               </button>
               <button
                 onClick={startOverDrawing}
-                className="bg-panel/90 border border-border hover:border-amber-400 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-400 hover:text-amber-400 transition-colors"
+                className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-amber-warm/50 rounded-xl px-2.5 py-2 text-xs font-semibold text-cream-2-text hover:text-amber-warm transition-colors shadow-lg shadow-black/20"
                 title="Discard and start over"
               >
                 Start Over
               </button>
               <button
                 onClick={stopDrawing}
-                className="bg-panel/90 border border-border hover:border-red-400 rounded-xl px-2 text-xs font-bold text-slate-400 hover:text-red-400 transition-colors"
+                className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-red-400/50 rounded-xl px-2 text-xs font-semibold text-cream-2-text hover:text-red-300 transition-colors shadow-lg shadow-black/20"
                 title="Cancel drawing (discards everything)"
               >
                 <X size={12} />
@@ -3624,7 +3753,7 @@ export default function MapPage() {
           {mapMode === 'view' && !drawingActive && !cmaMode && (
             <button
               onClick={startCMA}
-              className="bg-panel/90 backdrop-blur-sm border border-border hover:border-blue-400 rounded-xl px-3 py-2 text-xs font-bold text-slate-300 hover:text-blue-400 transition-colors flex items-center gap-1.5"
+              className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-slate-blue-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-slate-blue-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
               <FileText size={12} />
               Build CMA
@@ -3632,7 +3761,7 @@ export default function MapPage() {
           )}
 
           {cmaMode && (
-            <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl px-3 py-2 text-xs font-bold text-blue-400 flex items-center gap-1.5">
+            <div className="bg-slate-blue/10 border border-slate-blue/30 rounded-xl px-3 py-2 text-xs font-bold text-slate-blue-2 flex items-center gap-1.5">
               <FileText size={12} />
               {cmaPhase === 'subject' ? 'CMA · Tap subject parcels' : 'CMA · Tap comp pins'}
             </div>
@@ -3643,14 +3772,14 @@ export default function MapPage() {
             <div className="flex gap-1.5">
               <button
                 onClick={combineAll}
-                className="bg-sage/10 backdrop-blur-sm border border-sage/30 hover:border-sage hover:bg-sage/20 rounded-xl px-3 py-2 text-xs font-bold text-sage transition-colors flex items-center gap-1.5"
+                className="bg-olive-tint backdrop-blur-sm border border-olive-border hover:border-olive hover:bg-olive-tint rounded-xl px-3 py-2 text-xs font-bold text-olive-2 transition-colors flex items-center gap-1.5"
               >
                 <Combine size={12} />
                 Combine ({drawnCount + selectedParcels.length})
               </button>
               <button
                 onClick={clearDrawings}
-                className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+                className="bg-red-50 backdrop-blur-sm border border-red-200 hover:border-red-300 hover:bg-red-100 rounded-xl px-3 py-2 text-xs font-bold text-red-700 hover:text-red-800 transition-colors flex items-center gap-1.5"
                 title="Discard everything and start over"
               >
                 <Trash2 size={12} />
@@ -3664,7 +3793,7 @@ export default function MapPage() {
           {sheetMode === 'none' && mergedAcres > 0 && !drawingActive && (
             <button
               onClick={clearDrawings}
-              className="bg-red-500/10 backdrop-blur-sm border border-red-500/30 hover:border-red-400 hover:bg-red-500/20 rounded-xl px-3 py-2 text-xs font-bold text-red-300 hover:text-red-200 transition-colors flex items-center gap-1.5"
+              className="bg-red-50 backdrop-blur-sm border border-red-200 hover:border-red-300 hover:bg-red-100 rounded-xl px-3 py-2 text-xs font-bold text-red-700 hover:text-red-800 transition-colors flex items-center gap-1.5"
               title="Remove the boundary preview from the map"
             >
               <Trash2 size={12} />
@@ -3675,16 +3804,16 @@ export default function MapPage() {
 
         {/* Stats bar */}
         <div className="absolute bottom-8 left-3 z-10">
-          <div className="bg-panel/90 backdrop-blur-sm border border-border rounded-xl px-3 py-2 flex gap-4">
+          <div className="bg-white/90 backdrop-blur-sm border border-beige rounded-xl px-3 py-2 flex gap-4">
             <div>
-              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">On Map</p>
-              <p className="text-sm font-bold text-sage font-mono">
+              <p className="text-[9px] font-bold text-ink-3 uppercase tracking-wider">On Map</p>
+              <p className="text-sm font-bold text-olive-2 font-mono">
                 {comps.filter(c => c.latitude && c.longitude).length}
               </p>
             </div>
             <div>
-              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">Total Comps</p>
-              <p className="text-sm font-bold text-white font-mono">{comps.length}</p>
+              <p className="text-[9px] font-bold text-ink-3 uppercase tracking-wider">Total Comps</p>
+              <p className="text-sm font-bold text-ink font-mono">{comps.length}</p>
             </div>
           </div>
         </div>
@@ -3702,42 +3831,42 @@ export default function MapPage() {
         const ppaHigh = ppas.length ? Math.max(...ppas) : 0;
 
         return (
-          <div className="hidden md:flex w-80 bg-panel border-l border-border flex-col overflow-y-auto">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+          <div className="hidden md:flex w-80 bg-white border-l border-beige flex-col overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
               <div className="flex items-center gap-2">
-                <FileText size={14} className="text-blue-400" />
+                <FileText size={14} className="text-slate-blue-2" />
                 <span className="font-bold text-sm">Build CMA</span>
               </div>
-              <button onClick={cancelCMA} className="text-slate-500 hover:text-white">
+              <button onClick={cancelCMA} className="text-ink-3 hover:text-ink">
                 <X size={16} />
               </button>
             </div>
             <div className="p-4 space-y-3">
               {/* Subject */}
-              <div className="bg-card border border-border rounded-xl p-3 space-y-2">
+              <div className="bg-cream border border-beige rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">
                     {cmaEditingId ? 'Subject Tract (locked)' : 'Subject Tract'}
                   </p>
                   {cmaSubjectParcels.length > 0 && (
-                    <span className="text-[10px] font-bold text-blue-400 font-mono">
+                    <span className="text-[10px] font-bold text-slate-blue-2 font-mono">
                       {cmaSubjectParcels.length} parcel{cmaSubjectParcels.length === 1 ? '' : 's'} · {acres.toFixed(1)} ac
                     </span>
                   )}
                 </div>
                 {cmaEditingId ? (
                   <div className="space-y-1">
-                    <p className="text-sm font-bold text-white">{cmaSubjectMeta.name}</p>
-                    <p className="text-[11px] text-slate-400">
+                    <p className="text-sm font-bold text-ink">{cmaSubjectMeta.name}</p>
+                    <p className="text-[11px] text-ink-2">
                       {cmaSubjectMeta.county}, {cmaSubjectMeta.state}
                       {viewingCMA?.subject_acres != null && ` · ${viewingCMA.subject_acres} ac`}
                     </p>
-                    <p className="text-[10px] text-slate-500 italic mt-1">
+                    <p className="text-[10px] text-ink-3 italic mt-1">
                       Subject is locked. Editing comp selection only.
                     </p>
                   </div>
                 ) : cmaSubjectParcels.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">
+                  <p className="text-xs text-ink-2 italic">
                     Tap one or more parcels on the map. Multiple parcels merge into a single subject tract.
                   </p>
                 ) : (
@@ -3746,28 +3875,28 @@ export default function MapPage() {
                       value={cmaSubjectMeta.name}
                       onChange={(e) => setCmaSubjectMeta(m => ({ ...m, name: e.target.value }))}
                       placeholder="Subject name"
-                      className="w-full bg-night border border-border rounded-md px-2 py-1.5 text-xs text-white placeholder-slate-500 outline-none focus:border-blue-400"
+                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-slate-blue"
                     />
                     <input
                       value={cmaSubjectMeta.county}
                       onChange={(e) => setCmaSubjectMeta(m => ({ ...m, county: e.target.value }))}
                       placeholder="County"
-                      className="w-full bg-night border border-border rounded-md px-2 py-1.5 text-xs text-white placeholder-slate-500 outline-none focus:border-blue-400"
+                      className="w-full bg-cream border border-beige rounded-md px-2 py-1.5 text-xs text-ink placeholder-ink-3 outline-none focus:border-slate-blue"
                     />
                     <div className="space-y-1 max-h-32 overflow-y-auto pt-1">
                       {cmaSubjectParcels.map((p, i) => (
-                        <div key={p.parcel_id} className="flex items-center justify-between bg-night border border-border rounded-md px-2 py-1">
+                        <div key={p.parcel_id} className="flex items-center justify-between bg-cream border border-beige rounded-md px-2 py-1">
                           <div className="min-w-0 flex-1 flex items-center gap-1.5">
-                            <span className="text-[9px] font-bold text-blue-400 font-mono">{i + 1}</span>
-                            <span className="text-[11px] text-slate-300 truncate">{p.owner_name || p.parcel_id || 'parcel'}</span>
+                            <span className="text-[9px] font-bold text-slate-blue-2 font-mono">{i + 1}</span>
+                            <span className="text-[11px] text-ink-2 truncate">{p.owner_name || p.parcel_id || 'parcel'}</span>
                           </div>
-                          <span className="text-[10px] text-slate-500 font-mono mr-1.5">
+                          <span className="text-[10px] text-ink-3 font-mono mr-1.5">
                             {p.acres ? p.acres.toFixed(1) + ' ac' : '—'}
                           </span>
                           {cmaPhase === 'subject' && (
                             <button
                               onClick={() => toggleCmaSubjectParcel(p)}
-                              className="text-slate-500 hover:text-red-400"
+                              className="text-ink-3 hover:text-red-500"
                               title="Remove"
                             >
                               <X size={10} />
@@ -3779,14 +3908,14 @@ export default function MapPage() {
                     {cmaPhase === 'subject' ? (
                       <button
                         onClick={lockSubjectTract}
-                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-400/40 hover:border-blue-400 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-slate-blue/40 hover:border-slate-blue text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                       >
                         <Combine size={12} /> Lock Subject Tract → Pick Comps
                       </button>
                     ) : (
                       <button
                         onClick={unlockSubjectTract}
-                        className="w-full mt-1 py-1.5 bg-card border border-border hover:border-blue-400 text-[11px] font-bold text-slate-400 hover:text-blue-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full mt-1 py-1.5 bg-cream border border-beige hover:border-slate-blue text-[11px] font-bold text-ink-2 hover:text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                       >
                         <Pencil size={11} /> Edit Subject Parcels
                       </button>
@@ -3800,7 +3929,7 @@ export default function MapPage() {
                 <button
                   onClick={suggestComps}
                   disabled={suggestingComps}
-                  className="w-full py-2.5 bg-gradient-to-r from-purple-500/20 to-blue-500/20 hover:from-purple-500/30 hover:to-blue-500/30 border border-purple-400/40 hover:border-purple-400 text-xs font-bold text-purple-200 rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  className="w-full py-2.5 bg-gradient-to-r from-olive-tint to-blue-500/20 hover:from-olive-tint hover:to-blue-500/30 border border-olive-border hover:border-olive text-xs font-bold text-ink-2 rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <Sparkles size={12} />
                   {suggestingComps ? 'Finding similar comps…' : 'Suggest Best Comps'}
@@ -3808,26 +3937,26 @@ export default function MapPage() {
               )}
 
               {/* Comp picker */}
-              <div className="bg-card border border-border rounded-xl p-3">
+              <div className="bg-cream border border-beige rounded-xl p-3">
                 <div className="flex items-center justify-between mb-2">
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Selected Comps</p>
-                  <span className="text-[10px] font-bold text-blue-400 font-mono">{cmaCompIds.length}</span>
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Selected Comps</p>
+                  <span className="text-[10px] font-bold text-slate-blue-2 font-mono">{cmaCompIds.length}</span>
                 </div>
                 {cmaCompIds.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic">Click comp pins on the map to add them.</p>
+                  <p className="text-xs text-ink-2 italic">Click comp pins on the map to add them.</p>
                 ) : (
                   <div className="space-y-1.5">
                     {selectedComps.map(c => (
-                      <div key={c.id} className="flex items-center justify-between bg-night border border-border rounded-md px-2 py-1.5">
+                      <div key={c.id} className="flex items-center justify-between bg-cream border border-beige rounded-md px-2 py-1.5">
                         <div className="min-w-0 flex-1">
-                          <p className="text-[11px] font-bold text-white truncate">{c.property_name || `${c.county} County`}</p>
-                          <p className="text-[10px] text-slate-500 font-mono">
+                          <p className="text-[11px] font-bold text-ink truncate">{c.property_name || `${c.county} County`}</p>
+                          <p className="text-[10px] text-ink-3 font-mono">
                             {formatAcres(c.acres)} · {formatPPA(c.ppa_land_only || c.price_per_acre || 0)}
                           </p>
                         </div>
                         <button
                           onClick={() => toggleCmaComp(c.id)}
-                          className="text-slate-500 hover:text-red-400 ml-2"
+                          className="text-ink-3 hover:text-red-500 ml-2"
                           title="Remove"
                         >
                           <X size={11} />
@@ -3840,21 +3969,21 @@ export default function MapPage() {
 
               {/* Value range */}
               {ppas.length > 0 && acres > 0 && (
-                <div className="bg-blue-400/10 border border-blue-400/30 rounded-xl p-3 space-y-1">
-                  <p className="text-[10px] font-bold text-blue-300/80 uppercase tracking-wider mb-1">Estimated Value</p>
+                <div className="bg-slate-blue/10 border border-slate-blue/30 rounded-xl p-3 space-y-1">
+                  <p className="text-[10px] font-bold text-slate-blue-2/80 uppercase tracking-wider mb-1">Estimated Value</p>
                   <div className="flex justify-between text-xs">
-                    <span className="text-slate-400">Low</span>
-                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaLow * acres)}</span>
+                    <span className="text-ink-2">Low</span>
+                    <span className="font-mono font-bold text-slate-blue-2">{formatCurrency(ppaLow * acres)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-slate-200 font-bold">Mid</span>
+                    <span className="text-ink font-bold">Mid</span>
                     <span className="font-mono font-bold text-blue-200">{formatCurrency(ppaMid * acres)}</span>
                   </div>
                   <div className="flex justify-between text-xs">
-                    <span className="text-slate-400">High</span>
-                    <span className="font-mono font-bold text-blue-300">{formatCurrency(ppaHigh * acres)}</span>
+                    <span className="text-ink-2">High</span>
+                    <span className="font-mono font-bold text-slate-blue-2">{formatCurrency(ppaHigh * acres)}</span>
                   </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-1.5 pt-1.5 border-t border-blue-400/20">
+                  <p className="text-[10px] text-ink-3 font-mono mt-1.5 pt-1.5 border-t border-slate-blue/20">
                     Range from {formatPPA(ppaLow)} to {formatPPA(ppaHigh)} · {acres.toFixed(0)} ac
                   </p>
                 </div>
@@ -3871,7 +4000,7 @@ export default function MapPage() {
               </button>
               <button
                 onClick={cancelCMA}
-                className="w-full py-2 text-xs text-slate-500 hover:text-white transition-colors"
+                className="w-full py-2 text-xs text-ink-3 hover:text-ink transition-colors"
               >
                 Cancel
               </button>
@@ -3945,26 +4074,28 @@ export default function MapPage() {
         };
 
         return (
-          <div className="hidden md:flex w-96 bg-panel border-l border-border flex-col overflow-y-auto">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+          <div className="hidden md:flex w-96 bg-white border-l border-beige flex-col overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
               <div className="flex items-center gap-2 min-w-0">
-                <FileText size={14} className="text-blue-400 flex-shrink-0" />
+                <FileText size={14} className="text-slate-blue-2 flex-shrink-0" />
                 <span className="font-bold text-sm truncate">{viewingCMA.subject_name}</span>
               </div>
-              <button onClick={exitCmaWorkspace} className="text-slate-500 hover:text-white flex-shrink-0">
+              <button onClick={exitCmaWorkspace} className="text-ink-3 hover:text-ink flex-shrink-0">
                 <X size={16} />
               </button>
             </div>
 
             <div className="p-4 space-y-4">
-              {/* Subject summary */}
-              <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-xl p-3 space-y-1">
+              {/* Subject summary — warm brick red to match the map pin
+                  + boundary. Same visual identity across all three
+                  surfaces: pin on map, boundary on map, badge here. */}
+              <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                 <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 ring-2 ring-yellow-400/40" />
-                  <p className="text-[10px] font-bold text-yellow-300/90 uppercase tracking-wider">Subject</p>
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
                 </div>
-                <p className="text-sm font-bold text-white">{viewingCMA.subject_name}</p>
-                <p className="text-xs text-slate-400 font-mono">
+                <p className="text-sm font-semibold text-ink">{viewingCMA.subject_name}</p>
+                <p className="text-xs text-ink-2 font-mono tabular-nums">
                   {viewingCMA.subject_county}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
                 </p>
               </div>
@@ -3974,14 +4105,15 @@ export default function MapPage() {
                 {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
                   <button
                     onClick={startMapSubjectForCMA}
-                    className="col-span-2 py-2 border border-yellow-400/40 bg-yellow-400/15 hover:bg-yellow-400/25 text-xs font-bold text-yellow-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                    className="col-span-2 py-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                    style={{ background: 'rgba(200,80,63,0.08)', borderColor: 'rgba(200,80,63,0.40)', color: '#C8503F' }}
                   >
                     <MapPin size={12} /> Map Subject Tract
                   </button>
                 ) : null}
                 <button
                   onClick={editCmaComps}
-                  className="py-2 border border-blue-400/40 bg-blue-500/15 hover:bg-blue-500/25 text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Pencil size={12} /> Edit / Add Comps
                 </button>
@@ -3989,164 +4121,535 @@ export default function MapPage() {
                   onClick={copyShareLink}
                   className={`py-2 border text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
                     shareCopied
-                      ? 'border-sage bg-sage/20 text-sage'
-                      : 'border-sage/40 bg-sage/15 hover:bg-sage/25 text-sage'
+                      ? 'border-olive bg-olive-tint text-olive-2'
+                      : 'border-olive-border bg-olive-tint hover:bg-olive-tint text-olive-2'
                   }`}
                 >
                   {shareCopied ? <><Check size={12} /> Copied</> : <><Share2 size={12} /> Share Report</>}
                 </button>
                 <button
                   onClick={openCollaboratorModal}
-                  className="py-2 border border-purple-400/40 bg-purple-500/15 hover:bg-purple-500/25 text-xs font-bold text-purple-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                  className="py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-xs font-bold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Users size={12} />
                   Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
                 </button>
                 <button
                   onClick={exitCmaWorkspace}
-                  className="col-span-2 py-2 border border-border bg-card hover:border-slate-400 text-xs font-bold text-slate-300 rounded-lg transition-colors"
+                  className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 text-xs font-bold text-ink-2 rounded-lg transition-colors"
                 >
                   Exit Report
                 </button>
               </div>
 
               {/* All-in average */}
+              {/* CMA averages — vault tile pattern. White cards on cream,
+                  ink labels, ONE colored numeral on the Mid row to tell
+                  the story (olive for the headline $/Ac, amber for the
+                  land-only adjustment). No tinted backgrounds; the color
+                  cue is in the numeral alone. */}
               {allInPpas.length > 0 && (
-                <div className="bg-card border border-border rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-border bg-night/40 flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Average Total Price Per Acre</p>
-                    <p className="text-[9px] text-slate-500 font-mono">{cmaComps.length} of {cmaComps.length} comps</p>
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaComps.length} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-slate-400">Low</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(allInLow * subjAcres)}</td></tr>
-                      <tr className="bg-emerald-400/5 border-t border-border"><td className="px-3 py-2 text-emerald-300 font-bold">Mid</td><td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatCurrency(allInValue)}</td></tr>
-                      <tr className="border-t border-border"><td className="px-3 py-1.5 text-slate-400">High</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(allInHigh * subjAcres)}</td></tr>
+                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInLow * subjAcres)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-olive-2 font-semibold">Mid</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(allInValue)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInHigh * subjAcres)}</td></tr>
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {/* Land-only average — only shown if at least one comp has an improvement value */}
               {landOnlyPpas.length > 0 && (
-                <div className="bg-card border border-amber-400/30 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-amber-400/20 bg-amber-400/5 flex items-center justify-between">
-                    <p className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
-                    <p className="text-[9px] text-slate-400 font-mono">Based on {landOnlySampleSize} of {cmaComps.length} comps</p>
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
+                    <p className="text-[9px] text-ink-3 font-mono">{landOnlySampleSize} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-slate-400">Low</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(landLow * subjAcres)}</td></tr>
-                      <tr className="bg-amber-400/5 border-t border-amber-400/15"><td className="px-3 py-2 text-amber-200 font-bold">Mid</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-200 font-bold">{formatCurrency(landOnlyValue)}</td></tr>
-                      <tr className="border-t border-amber-400/15"><td className="px-3 py-1.5 text-slate-400">High</td><td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(landHigh * subjAcres)}</td></tr>
+                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landLow * subjAcres)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-amber-800 font-semibold">Mid</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(landOnlyValue)}</td></tr>
+                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landHigh * subjAcres)}</td></tr>
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {/* Broker Opinion of Value — dual input.
-                  Edit either field; the partner field auto-calculates from
-                  the subject acreage. The total ($) is what gets persisted to
-                  cmas.broker_opinion_value, which the share report reads. */}
+              {/* ─── Broker Opinion of Value ──────────────────────────
+                  Two modes, broker picks which way they're thinking about
+                  the property:
+
+                    Lump Sum (default):    single $/Acre OR Total number
+                    Land + Improvements:   Land $/Ac + Improvement lump
+
+                  Lump sum saves to broker_opinion_value (total $).
+                  Breakdown saves to broker_opinion_land_value +
+                  broker_opinion_improvement_value, plus
+                  broker_opinion_value as the computed sum (backwards
+                  compatibility for read paths). broker_opinion_mode
+                  stores the active mode so the share report knows
+                  which way to render. */}
               {(() => {
-                const saveBov = async (total: number | null) => {
-                  setViewingCMA((prev: any) => (prev ? { ...prev, broker_opinion_value: total } : prev));
+                // Save helper — writes all relevant columns for the active mode
+                // and clears the inactive-mode columns. Optimistic local update
+                // so the right-panel re-renders instantly. Now also handles the
+                // optional house-breakdown columns (sqft, ppsf, additional vertical).
+                const saveBov = async (patch: {
+                  mode: BovMode | null;
+                  total: number | null;
+                  landValue: number | null;
+                  improvementValue: number | null;
+                  houseSqft?: number | null;
+                  housePpsf?: number | null;
+                  additionalVertical?: number | null;
+                }) => {
+                  const fields: any = {
+                    broker_opinion_mode: patch.mode,
+                    broker_opinion_value: patch.total,
+                    broker_opinion_land_value: patch.landValue,
+                    broker_opinion_improvement_value: patch.improvementValue,
+                  };
+                  // Only include house-breakdown columns if explicitly passed.
+                  // Lump-sum mode writes them as null; breakdown writes
+                  // whatever value the broker has typed.
+                  if ('houseSqft' in patch) fields.broker_opinion_house_sqft = patch.houseSqft;
+                  if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
+                  if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
+
+                  setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
                   const { error } = await supabase
                     .from('cmas')
-                    .update({ broker_opinion_value: total })
+                    .update(fields)
                     .eq('id', viewingCMA.id);
                   if (error) toast.error(error.message);
                 };
 
+                // ─── LUMP SUM handlers ───
+                // Lump-sum mode clears ALL breakdown fields including the
+                // optional house itemization (passing null for each).
+                const lumpClear = {
+                  mode: 'lump_sum' as BovMode | null,
+                  landValue: null,
+                  improvementValue: null,
+                  houseSqft: null,
+                  housePpsf: null,
+                  additionalVertical: null,
+                };
                 const onPpaChange = (raw: string) => {
                   setBovPpaInput(raw);
                   const ppa = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(ppa) || ppa <= 0) {
                     setBovTotalInput('');
-                    saveBov(null);
+                    saveBov({ ...lumpClear, total: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const total = ppa * subjAcres;
                     setBovTotalInput(String(Math.round(total)));
-                    saveBov(total);
+                    saveBov({ ...lumpClear, total });
                   }
                 };
-
                 const onTotalChange = (raw: string) => {
                   setBovTotalInput(raw);
                   const total = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(total) || total <= 0) {
                     setBovPpaInput('');
-                    saveBov(null);
+                    saveBov({ ...lumpClear, total: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const ppa = total / subjAcres;
                     setBovPpaInput(String(Math.round(ppa)));
-                    saveBov(total);
+                  }
+                  saveBov({ ...lumpClear, total });
+                };
+
+                // ─── BREAKDOWN handlers ───
+                // Improvement breakdown helpers: derived improvement = (sqft × ppsf)
+                // + additional vertical. When any of those three are set, they
+                // become the source of truth; bovImprovementInput is computed.
+                const parsePos = (s: string): number => {
+                  const n = s === '' ? NaN : Number(s);
+                  return Number.isFinite(n) && n > 0 ? n : 0;
+                };
+                const computedImprovementFromItems = (
+                  sqft: number, ppsf: number, addl: number
+                ): number => {
+                  const house = (sqft > 0 && ppsf > 0) ? sqft * ppsf : 0;
+                  return house + addl;
+                };
+                const hasItemizationFlag = (sqft: string, ppsf: string, addl: string): boolean => {
+                  return parsePos(sqft) > 0 || parsePos(ppsf) > 0 || parsePos(addl) > 0;
+                };
+
+                // commitBreakdown unified — writes land, improvement total, AND
+                // the optional house-breakdown columns. The improvement total
+                // is either:
+                //   - the broker's typed-direct lump (when no itemization), OR
+                //   - the computed sum (house_sqft × ppsf) + additional_vertical
+                const commitBreakdown = (
+                  landValue: number | null,
+                  improvementOverride: number | null,
+                  itemization: { sqft: number; ppsf: number; addl: number } | null,
+                ) => {
+                  const land = landValue || 0;
+                  // Resolve improvement: itemization wins when present
+                  const itemized = itemization
+                    ? computedImprovementFromItems(itemization.sqft, itemization.ppsf, itemization.addl)
+                    : 0;
+                  const improvement = itemization && itemized > 0
+                    ? itemized
+                    : (improvementOverride && improvementOverride > 0 ? improvementOverride : 0);
+                  const total = (land + improvement) > 0 ? (land + improvement) : null;
+
+                  saveBov({
+                    mode: 'breakdown',
+                    total,
+                    landValue: landValue,
+                    improvementValue: improvement > 0 ? improvement : null,
+                    houseSqft: itemization && itemization.sqft > 0 ? itemization.sqft : null,
+                    housePpsf: itemization && itemization.ppsf > 0 ? itemization.ppsf : null,
+                    additionalVertical: itemization && itemization.addl > 0 ? itemization.addl : null,
+                  });
+                };
+                // Helper to collect current itemization state from inputs
+                const currentItemization = (sqft?: string, ppsf?: string, addl?: string) => {
+                  const s = parsePos(sqft ?? bovHouseSqftInput);
+                  const p = parsePos(ppsf ?? bovHousePpsfInput);
+                  const a = parsePos(addl ?? bovAddlVerticalInput);
+                  const has = s > 0 || p > 0 || a > 0;
+                  return has ? { sqft: s, ppsf: p, addl: a } : null;
+                };
+                const currentLand = () => {
+                  const v = parsePos(bovLandTotalInput);
+                  return v > 0 ? v : null;
+                };
+                const currentImpLump = () => {
+                  const v = parsePos(bovImprovementInput);
+                  return v > 0 ? v : null;
+                };
+
+                const onLandPpaChange = (raw: string) => {
+                  setBovLandPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovLandTotalInput('');
+                    commitBreakdown(null, currentImpLump(), currentItemization());
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const landValue = ppa * subjAcres;
+                    setBovLandTotalInput(String(Math.round(landValue)));
+                    commitBreakdown(landValue, currentImpLump(), currentItemization());
+                  }
+                };
+                const onLandTotalChange = (raw: string) => {
+                  setBovLandTotalInput(raw);
+                  const landValue = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(landValue) || landValue <= 0) {
+                    setBovLandPpaInput('');
+                    commitBreakdown(null, currentImpLump(), currentItemization());
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const ppa = landValue / subjAcres;
+                    setBovLandPpaInput(String(Math.round(ppa)));
+                  }
+                  commitBreakdown(landValue, currentImpLump(), currentItemization());
+                };
+                // Direct Improvement Value input — only used when itemization
+                // is NOT active. When itemized, this field is computed/read-only.
+                const onImprovementChange = (raw: string) => {
+                  setBovImprovementInput(raw);
+                  // If broker types directly in Improvement Value, clear any
+                  // existing itemization (they're going lump mode within the
+                  // breakdown). Carries over land value.
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  const imp = parsePos(raw);
+                  commitBreakdown(currentLand(), imp > 0 ? imp : null, null);
+                };
+                // House SQFT input — recomputes improvement from items
+                const onHouseSqftChange = (raw: string) => {
+                  setBovHouseSqftInput(raw);
+                  const items = currentItemization(raw, undefined, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onHousePpsfChange = (raw: string) => {
+                  setBovHousePpsfInput(raw);
+                  const items = currentItemization(undefined, raw, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onAddlVerticalChange = (raw: string) => {
+                  setBovAddlVerticalInput(raw);
+                  const items = currentItemization(undefined, undefined, raw);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+
+                // ─── Mode switching — preserve values across switches ───
+                const switchToLumpSum = () => {
+                  // If broker had Land + Improvement values, sum them to the lump total
+                  const land = parsePos(bovLandTotalInput);
+                  const imp = parsePos(bovImprovementInput);
+                  const combined = land + imp;
+                  setBovMode('lump_sum');
+                  // Clear the house-breakdown UI state on mode flip
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  setBovHouseBreakdownOpen(false);
+                  if (combined > 0) {
+                    setBovTotalInput(String(Math.round(combined)));
+                    if (subjAcres > 0) setBovPpaInput(String(Math.round(combined / subjAcres)));
+                    saveBov({ ...lumpClear, total: combined });
                   } else {
-                    saveBov(total);
+                    saveBov({ ...lumpClear, total: null });
+                  }
+                };
+                const switchToBreakdown = () => {
+                  // If broker had a lump total, transfer it to Land Value (assume no improvement yet)
+                  const lump = parsePos(bovTotalInput);
+                  setBovMode('breakdown');
+                  if (lump > 0) {
+                    setBovLandTotalInput(String(Math.round(lump)));
+                    if (subjAcres > 0) setBovLandPpaInput(String(Math.round(lump / subjAcres)));
+                    saveBov({
+                      mode: 'breakdown',
+                      total: lump,
+                      landValue: lump,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
+                  } else {
+                    saveBov({
+                      mode: 'breakdown',
+                      total: null,
+                      landValue: null,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
                   }
                 };
 
-                const ppaPlaceholder = landMid > 0
-                  ? Math.round(landMid).toString()
-                  : allInMid > 0
-                  ? Math.round(allInMid).toString()
-                  : '';
-                const totalPlaceholder = landOnlyValue > 0
-                  ? Math.round(landOnlyValue).toString()
-                  : allInValue > 0
-                  ? Math.round(allInValue).toString()
-                  : '';
+                // Placeholders pull from CMA averages so the broker sees
+                // suggested numbers if they leave fields blank.
+                const ppaPlaceholder = landMid > 0 ? Math.round(landMid).toString()
+                  : allInMid > 0 ? Math.round(allInMid).toString() : '';
+                const totalPlaceholder = landOnlyValue > 0 ? Math.round(landOnlyValue).toString()
+                  : allInValue > 0 ? Math.round(allInValue).toString() : '';
+
+                // Computed total in breakdown mode (live, from local inputs)
+                const breakdownLandNum = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
+                const breakdownImpNum = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
+                const breakdownTotal = (Number.isFinite(breakdownLandNum) ? breakdownLandNum : 0)
+                                     + (Number.isFinite(breakdownImpNum) ? breakdownImpNum : 0);
+
+                // Shared input class
+                const inputCls = 'w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono tabular-nums outline-none transition-all';
 
                 return (
-                  <div className="bg-card border border-border rounded-xl p-3 space-y-2">
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-bold text-sage uppercase tracking-wider">Your Opinion of Value</p>
-                      <p className="text-[9px] text-slate-500">optional</p>
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
+                      <p className="text-[9px] text-ink-3">optional</p>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {/* $/Acre */}
-                      <div>
-                        <p className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">$/Acre</p>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
-                          <input
-                            type="number"
-                            placeholder={ppaPlaceholder}
-                            value={bovPpaInput}
-                            onChange={(e) => onPpaChange(e.target.value)}
-                            className="w-full bg-night border border-border focus:border-sage rounded-lg pl-6 pr-2 py-2 text-sm text-white font-mono outline-none"
-                          />
-                        </div>
-                      </div>
-                      {/* Total */}
-                      <div>
-                        <p className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Total</p>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
-                          <input
-                            type="number"
-                            placeholder={totalPlaceholder}
-                            value={bovTotalInput}
-                            onChange={(e) => onTotalChange(e.target.value)}
-                            className="w-full bg-night border border-border focus:border-sage rounded-lg pl-6 pr-2 py-2 text-sm text-white font-mono outline-none"
-                          />
-                        </div>
-                      </div>
+
+                    {/* Mode toggle — Lump Sum vs Land + Improvements */}
+                    <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
+                      <button
+                        type="button"
+                        onClick={switchToLumpSum}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'lump_sum'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Lump Sum
+                      </button>
+                      <button
+                        type="button"
+                        onClick={switchToBreakdown}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'breakdown'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Land + Improvements
+                      </button>
                     </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed">
-                      Edit either field — the other auto-calculates from {formatAcres(subjAcres)}. Leave blank to use the computed averages.
-                    </p>
+
+                    {bovMode === 'lump_sum' ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        {/* Land Value group */}
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Land Value</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={ppaPlaceholder} value={bovLandPpaInput} onChange={(e) => onLandPpaChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={totalPlaceholder} value={bovLandTotalInput} onChange={(e) => onLandTotalChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-ink-3 leading-relaxed">
+                            Edit either — auto-calculates from {formatAcres(subjAcres)}.
+                          </p>
+                        </div>
+
+                        {/* Improvement Value
+                            When the house-breakdown sub-fields are filled in,
+                            this becomes a computed total: (sqft × ppsf) + additional.
+                            When the broker types directly here, the itemization
+                            sub-fields are cleared. */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
+                            <button
+                              type="button"
+                              onClick={() => setBovHouseBreakdownOpen((v) => !v)}
+                              className="text-[10px] text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1"
+                            >
+                              {bovHouseBreakdownOpen ? <><ChevronUp size={11} /> Hide house breakdown</> : <><ChevronDown size={11} /> Break out house</>}
+                            </button>
+                          </div>
+                          <div className="relative">
+                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                            <input
+                              type="number"
+                              placeholder="0"
+                              value={bovImprovementInput}
+                              onChange={(e) => onImprovementChange(e.target.value)}
+                              disabled={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput)}
+                              className={`${inputCls} ${hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'opacity-70 cursor-not-allowed' : ''}`}
+                              title={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'Computed from the house breakdown below. Clear those fields to edit directly.' : ''}
+                            />
+                          </div>
+                          {/* Optional house-breakdown expander */}
+                          {bovHouseBreakdownOpen && (
+                            <div className="bg-cream border border-beige rounded-lg p-2.5 space-y-3 mt-1">
+                              {/* HOUSE — SQFT × $/SQFT */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">House</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">SQFT</p>
+                                    <input
+                                      type="number"
+                                      placeholder="4,000"
+                                      value={bovHouseSqftInput}
+                                      onChange={(e) => onHouseSqftChange(e.target.value)}
+                                      className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md px-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">$/SQFT</p>
+                                    <div className="relative">
+                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                      <input
+                                        type="number"
+                                        placeholder="200"
+                                        value={bovHousePpsfInput}
+                                        onChange={(e) => onHousePpsfChange(e.target.value)}
+                                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                                {/* Live line total */}
+                                {(parsePos(bovHouseSqftInput) > 0 && parsePos(bovHousePpsfInput) > 0) && (
+                                  <p className="text-[10px] text-ink-3 font-mono tabular-nums">
+                                    {parsePos(bovHouseSqftInput).toLocaleString()} sqft × ${parsePos(bovHousePpsfInput).toLocaleString()}/sqft
+                                    <span className="text-ink-2"> = </span>
+                                    <span className="text-olive-2 font-semibold">{formatCurrency(parsePos(bovHouseSqftInput) * parsePos(bovHousePpsfInput))}</span>
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* ADDITIONAL VERTICAL IMPROVEMENTS — lump */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">Additional Vertical Improvements</p>
+                                <div className="relative">
+                                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder="0"
+                                    value={bovAddlVerticalInput}
+                                    onChange={(e) => onAddlVerticalChange(e.target.value)}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                                <p className="text-[9px] text-ink-3 leading-relaxed">
+                                  Barns, shops, sheds, equipment buildings, guest houses, etc. Horizontal improvements (fencing, ponds, wells) typically get baked into Land $/Acre above.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Total Opinion — computed sum */}
+                        <div className="border-t border-beige pt-2 flex items-baseline justify-between">
+                          <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Opinion</p>
+                          <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
+                            {breakdownTotal > 0 ? formatCurrency(breakdownTotal) : '—'}
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </div>
                 );
               })()}
 
               {/* Comps list */}
               <div className="space-y-2">
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Comparable Sales</p>
+                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Comparable Sales</p>
                 {cmaComps.map((c) => {
                   const expanded = expandedCompIds.has(c.id);
                   const adj = compAdjustmentsDraft[c.id] || {};
@@ -4162,8 +4665,8 @@ export default function MapPage() {
                       key={c.id}
                       onMouseEnter={() => setHoveredCompId(c.id)}
                       onMouseLeave={() => setHoveredCompId(prev => prev === c.id ? null : prev)}
-                      className={`bg-card border rounded-xl overflow-hidden transition-colors ${
-                        isHovered ? 'border-blue-400 ring-2 ring-blue-400/30' : 'border-border'
+                      className={`bg-cream border rounded-xl overflow-hidden transition-colors ${
+                        isHovered ? 'border-slate-blue ring-2 ring-blue-400/30' : 'border-beige'
                       }`}
                     >
                       <button
@@ -4171,64 +4674,64 @@ export default function MapPage() {
                         className="w-full px-3 py-2 text-left"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-bold text-white truncate flex-1 flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
                             <span className="truncate">{c.property_name || `${c.county} County`}</span>
                             {c.has_improvements && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
                                 IMPROVED
                               </span>
                             )}
                             {(c as any).irrigation === 'Strong' && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
                                 IRRIGATION
                               </span>
                             )}
-                            {isAdjusted && <span className="text-[9px] text-amber-400 font-mono flex-shrink-0">ADJ</span>}
+                            {isAdjusted && <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>}
                             {effSrc === 'agent_verified' && (
                               <span
-                                className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded flex-shrink-0"
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
                                 title="An agent involved in this transaction verified the improvement value."
                               >
                                 Agent-Verified
                               </span>
                             )}
                             {isBrokerEstimated && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-400/15 border border-amber-400/30 text-amber-300 font-bold flex-shrink-0">
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-bold flex-shrink-0">
                                 Broker-estimated
                               </span>
                             )}
                           </p>
-                          {expanded ? <ChevronUp size={12} className="text-slate-500 flex-shrink-0" /> : <ChevronDown size={12} className="text-slate-500 flex-shrink-0" />}
+                          {expanded ? <ChevronUp size={12} className="text-ink-3 flex-shrink-0" /> : <ChevronDown size={12} className="text-ink-3 flex-shrink-0" />}
                         </div>
                         <div className="grid grid-cols-4 gap-2 mt-1.5 text-[10px] font-mono">
                           <div>
-                            <p className="text-slate-500">Acres</p>
-                            <p className="text-white font-bold">{formatAcres(c.acres)}</p>
+                            <p className="text-ink-3">Acres</p>
+                            <p className="text-ink font-bold">{formatAcres(c.acres)}</p>
                           </div>
                           <div>
-                            <p className="text-slate-500">Total</p>
-                            <p className="text-white font-bold">{formatCurrency(c.sale_price)}</p>
+                            <p className="text-ink-3">Total</p>
+                            <p className="text-ink font-bold">{formatCurrency(c.sale_price)}</p>
                           </div>
                           <div>
-                            <p className="text-slate-500">Total $/Ac</p>
-                            <p className="text-emerald-400 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
+                            <p className="text-ink-3">Total $/Ac</p>
+                            <p className="text-olive-2 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
                           </div>
                           <div>
-                            <p className="text-slate-500">Adjusted $/Ac</p>
-                            <p className={`font-bold ${effImp != null ? 'text-amber-300' : 'text-amber-200/70'}`}>
+                            <p className="text-ink-3">Adjusted $/Ac</p>
+                            <p className={`font-bold ${effImp != null ? 'text-amber-800' : 'text-amber-700/60'}`}>
                               {landOnly != null ? formatPPA(landOnly) : '—'}
                             </p>
                           </div>
                         </div>
                       </button>
                       {expanded && (
-                        <div className="border-t border-border bg-night/30 px-3 py-2 space-y-1.5 text-[11px]">
+                        <div className="border-t border-beige bg-cream/30 px-3 py-2 space-y-1.5 text-[11px]">
                           {/* Per-comp broker note — editable textarea at the
                               top of expanded content so the broker drafts the
                               client-facing reasoning first. Mirrors the share
                               report's placement (read-only there). */}
-                          <div className="pb-2 border-b border-border/60 space-y-1">
-                            <p className="text-[10px] font-bold text-blue-400 uppercase tracking-wider">
+                          <div className="pb-2 border-b border-beige/60 space-y-1">
+                            <p className="text-[10px] font-bold text-slate-blue-2 uppercase tracking-wider">
                               Your Note on This Comp
                             </p>
                             <textarea
@@ -4237,35 +4740,35 @@ export default function MapPage() {
                               onClick={(e) => e.stopPropagation()}
                               placeholder="e.g. Most direct comparison — same river frontage and similar improvements."
                               rows={2}
-                              className="w-full bg-night border border-border focus:border-blue-400 rounded px-2 py-1.5 text-[12px] text-white outline-none resize-none"
+                              className="w-full bg-cream border border-beige focus:border-slate-blue rounded px-2 py-1.5 text-[12px] text-ink outline-none resize-none"
                             />
-                            <p className="text-[9px] text-slate-500">Shown to the client in the expanded comp on the share report.</p>
+                            <p className="text-[9px] text-ink-3">Shown to the client in the expanded comp on the share report.</p>
                           </div>
 
                           {/* Key facts — Sale date · Address · Improvements (+notes).
                               Same order as share report + standalone Comp Detail. */}
                           {c.sale_date && (
                             <div className="flex justify-between">
-                              <span className="text-slate-500">Sale date</span>
-                              <span className="text-slate-300 font-mono">{c.sale_date}</span>
+                              <span className="text-ink-3">Sale date</span>
+                              <span className="text-ink-2 font-mono">{c.sale_date}</span>
                             </div>
                           )}
                           {c.address && (
                             <div className="flex justify-between gap-2">
-                              <span className="text-slate-500 flex-shrink-0">Address</span>
-                              <span className="text-slate-300 text-right truncate">{c.address}</span>
+                              <span className="text-ink-3 flex-shrink-0">Address</span>
+                              <span className="text-ink-2 text-right truncate">{c.address}</span>
                             </div>
                           )}
                           {c.has_improvements && c.improvements_value != null && (
                             <div className="flex justify-between">
-                              <span className="text-slate-500">Improvements</span>
-                              <span className="text-blue-300">{formatCurrency(c.improvements_value)} ECV</span>
+                              <span className="text-ink-3">Improvements</span>
+                              <span className="text-slate-blue-2 font-mono">{formatCurrency(c.improvements_value)} ECV</span>
                             </div>
                           )}
                           {c.improvements_notes && (
                             <div className="pt-1">
-                              <p className="text-slate-500 mb-0.5">Improvements notes</p>
-                              <p className="text-slate-300 leading-relaxed">{c.improvements_notes}</p>
+                              <p className="text-ink-3 mb-0.5">Improvements notes</p>
+                              <p className="text-ink-2 leading-relaxed">{c.improvements_notes}</p>
                             </div>
                           )}
 
@@ -4297,9 +4800,9 @@ export default function MapPage() {
                               : (desc.length > previewLen ? desc.slice(0, previewLen) + '…' : desc);
                             const hasMore = preview !== desc && desc.length > preview.length;
                             return (
-                              <div className="pt-1.5 border-t border-border/60">
-                                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description</p>
-                                <p className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                              <div className="pt-1.5 border-t border-beige/60">
+                                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description</p>
+                                <p className="text-[11px] text-ink-2 leading-relaxed whitespace-pre-wrap">
                                   {isExpanded ? desc : preview}
                                 </p>
                                 {hasMore && (
@@ -4312,7 +4815,7 @@ export default function MapPage() {
                                         return next;
                                       });
                                     }}
-                                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-sage hover:text-sage2 transition-colors"
+                                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-olive-2 hover:text-olive-2 transition-colors"
                                   >
                                     {isExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
                                   </button>
@@ -4322,16 +4825,16 @@ export default function MapPage() {
                           })()}
 
                           {/* Improvement adjustment editor */}
-                          <div className="pt-2 border-t border-border/60 space-y-1.5">
+                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
                             <div className="flex items-center justify-between">
-                              <p className="text-[10px] font-bold text-amber-400 uppercase tracking-wider">Improvement Adjustment</p>
+                              <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider">Improvement Adjustment</p>
                               {!editorOpen && effImp == null && (
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
                                   }}
-                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
                                 >
                                   + Add adjustment
                                 </button>
@@ -4342,27 +4845,27 @@ export default function MapPage() {
                                     e.stopPropagation();
                                     setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
                                   }}
-                                  className="text-[10px] text-amber-300 hover:text-amber-200 font-bold underline"
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
                                 >
                                   Edit
                                 </button>
                               )}
                             </div>
                             {effImp != null && !editorOpen && (
-                              <p className="text-[11px] text-slate-300 font-mono">
-                                {formatCurrency(effImp)} <span className="text-slate-500">·</span>{' '}
-                                <span className="text-slate-500">{effSrc === 'broker_estimate' ? 'Broker Estimate' : effSrc === 'appraiser' ? 'Appraiser' : '—'}</span>
+                              <p className="text-[11px] text-ink-2 font-mono">
+                                {formatCurrency(effImp)} <span className="text-ink-3">·</span>{' '}
+                                <span className="text-ink-3">{effSrc === 'broker_estimate' ? 'Broker Estimate' : effSrc === 'appraiser' ? 'Appraiser' : '—'}</span>
                               </p>
                             )}
                             {effImp == null && !editorOpen && (
-                              <p className="text-[11px] text-slate-500 italic">No improvement value set.</p>
+                              <p className="text-[11px] text-ink-3 italic">No improvement value set.</p>
                             )}
                             {editorOpen && (
-                              <div className="space-y-2 bg-night/40 border border-border/60 rounded-lg p-2"
+                              <div className="space-y-2 bg-cream/40 border border-beige/60 rounded-lg p-2"
                                 onClick={(e) => e.stopPropagation()}
                               >
                                 <div>
-                                  <p className="text-[9px] text-slate-500 mb-0.5">Improvement Value ($)</p>
+                                  <p className="text-[9px] text-ink-3 mb-0.5">Improvement Value ($)</p>
                                   <input
                                     type="number"
                                     placeholder="e.g. 350000"
@@ -4371,11 +4874,11 @@ export default function MapPage() {
                                       const v = e.target.value === '' ? null : Number(e.target.value);
                                       updateAdjustment(c.id, { improvement_value: v });
                                     }}
-                                    className="w-full bg-night border border-border focus:border-amber-400 rounded px-2 py-1 text-[12px] text-white font-mono outline-none"
+                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink font-mono outline-none"
                                   />
                                 </div>
                                 <div>
-                                  <p className="text-[9px] text-slate-500 mb-0.5">Source</p>
+                                  <p className="text-[9px] text-ink-3 mb-0.5">Source</p>
                                   <select
                                     value={(adj.improvement_source ?? c.improvement_source ?? '') as string}
                                     onChange={async (e) => {
@@ -4394,7 +4897,7 @@ export default function MapPage() {
                                           .eq('id', c.id);
                                       }
                                     }}
-                                    className="w-full bg-night border border-border focus:border-amber-400 rounded px-2 py-1 text-[12px] text-white outline-none"
+                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink outline-none"
                                   >
                                     <option value="">Select…</option>
                                     <option value="appraiser">Appraiser Report</option>
@@ -4417,7 +4920,7 @@ export default function MapPage() {
                                         if (ok) toast.success('Adjustment saved');
                                       }
                                     }}
-                                    className="flex-1 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded text-[11px] font-bold text-amber-200 transition-colors"
+                                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded text-[11px] font-bold text-amber-800 transition-colors"
                                   >
                                     Save
                                   </button>
@@ -4430,7 +4933,7 @@ export default function MapPage() {
                                         return next;
                                       });
                                     }}
-                                    className="px-3 py-1.5 border border-border hover:border-red-400 rounded text-[11px] font-bold text-slate-400 hover:text-red-400 transition-colors"
+                                    className="px-3 py-1.5 border border-beige hover:border-red-400 rounded text-[11px] font-bold text-ink-2 hover:text-red-500 transition-colors"
                                   >
                                     Clear
                                   </button>
@@ -4440,12 +4943,12 @@ export default function MapPage() {
                           </div>
 
                           {/* Live listing search — not persisted, just shown */}
-                          <div className="pt-2 border-t border-border/60 space-y-1.5">
-                            <p className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Online Listing</p>
+                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
+                            <p className="text-[10px] font-bold text-olive uppercase tracking-wider">Online Listing</p>
                             <button
                               onClick={(e) => { e.stopPropagation(); findListingForComp(c.id); }}
                               disabled={findingListingFor.has(c.id)}
-                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/30 hover:border-purple-400 rounded text-purple-200 font-bold transition-colors disabled:opacity-50"
+                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive rounded text-ink-2 font-bold transition-colors disabled:opacity-50"
                             >
                               <Globe size={10} />
                               {findingListingFor.has(c.id)
@@ -4465,7 +4968,7 @@ export default function MapPage() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     onClick={(e) => e.stopPropagation()}
-                                    className="inline-flex items-center gap-1.5 text-[11px] text-purple-300 hover:text-purple-200 underline break-all"
+                                    className="inline-flex items-center gap-1.5 text-[11px] text-olive hover:text-ink-2 underline break-all"
                                   >
                                     <ExternalLink size={11} />
                                     {liveListings[c.id]!.url!.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)}
@@ -4476,8 +4979,8 @@ export default function MapPage() {
                                     disabled={isSaving}
                                     className={`text-[10px] px-2 py-0.5 rounded font-bold transition-colors disabled:opacity-50 ${
                                       isSaved || isAlreadyPersisted
-                                        ? 'bg-emerald-500/15 border border-emerald-400/40 text-emerald-300'
-                                        : 'bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/30 hover:border-purple-400 text-purple-200'
+                                        ? 'bg-olive-tint border border-olive-border text-olive-2'
+                                        : 'bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive text-ink-2'
                                     }`}
                                   >
                                     {isSaving
@@ -4490,7 +4993,7 @@ export default function MapPage() {
                               );
                             })()}
                             {liveListings[c.id] && !liveListings[c.id]?.url && (
-                              <p className="text-[11px] text-slate-500 italic">{liveListings[c.id]!.reason || 'No matching listing found'}</p>
+                              <p className="text-[11px] text-ink-3 italic">{liveListings[c.id]!.reason || 'No matching listing found'}</p>
                             )}
                           </div>
 
@@ -4501,7 +5004,7 @@ export default function MapPage() {
                                 map.current?.flyTo({ center: [c.longitude, c.latitude], zoom: 14, duration: 800 });
                               }
                             }}
-                            className="text-[10px] text-blue-400 hover:text-blue-300 font-bold mt-1"
+                            className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold mt-1"
                           >
                             Fly to →
                           </button>
@@ -4511,7 +5014,7 @@ export default function MapPage() {
                   );
                 })}
                 {cmaComps.length === 0 && (
-                  <p className="text-xs text-slate-500 italic text-center py-4">
+                  <p className="text-xs text-ink-3 italic text-center py-4">
                     No comps in this CMA yet. Use Edit / Add Comps in the banner.
                   </p>
                 )}
@@ -4525,29 +5028,29 @@ export default function MapPage() {
           can view/edit this CMA. Only renders when invoked from the workspace. */}
       {collabOpen && viewingCMA && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-panel border border-border rounded-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+          <div className="w-full max-w-md bg-white border border-beige rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-beige flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Users size={14} className="text-purple-400" />
+                <Users size={14} className="text-olive" />
                 <div>
-                  <p className="font-bold text-sm text-white">Collaborate on this CMA</p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Selected teammates can view and edit from their dashboard.</p>
+                  <p className="font-bold text-sm text-ink">Collaborate on this CMA</p>
+                  <p className="text-[11px] text-ink-3 mt-0.5">Selected teammates can view and edit from their dashboard.</p>
                 </div>
               </div>
-              <button onClick={() => setCollabOpen(false)} className="text-slate-500 hover:text-white">
+              <button onClick={() => setCollabOpen(false)} className="text-ink-3 hover:text-ink">
                 <X size={16} />
               </button>
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
               {collabLoading ? (
-                <p className="text-center text-xs text-slate-500 py-8">Loading team…</p>
+                <p className="text-center text-xs text-ink-3 py-8">Loading team…</p>
               ) : teamMembers.length === 0 ? (
                 <div className="px-5 py-8 text-center space-y-2">
-                  <p className="text-sm text-slate-400">No teammates found.</p>
-                  <p className="text-[11px] text-slate-500">Add team members in Settings to enable collaboration.</p>
+                  <p className="text-sm text-ink-2">No teammates found.</p>
+                  <p className="text-[11px] text-ink-3">Add team members in Settings to enable collaboration.</p>
                 </div>
               ) : (
-                <ul className="divide-y divide-border">
+                <ul className="divide-y divide-beige">
                   {teamMembers.map((m) => {
                     const isCollab = collaboratorUserIds.has(m.id);
                     const label = m.full_name || m.email || 'Teammate';
@@ -4555,13 +5058,13 @@ export default function MapPage() {
                     return (
                       <li key={m.id} className="px-5 py-3 flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-8 h-8 rounded-full bg-purple-400/10 border border-purple-400/30 flex items-center justify-center flex-shrink-0">
-                            <span className="text-purple-300 font-bold text-xs">{initial}</span>
+                          <div className="w-8 h-8 rounded-full bg-olive-tint border border-olive-border flex items-center justify-center flex-shrink-0">
+                            <span className="text-olive font-bold text-xs">{initial}</span>
                           </div>
                           <div className="min-w-0">
-                            <p className="text-sm font-bold text-white truncate">{label}</p>
+                            <p className="text-sm font-bold text-ink truncate">{label}</p>
                             {m.email && m.full_name && (
-                              <p className="text-[11px] text-slate-500 truncate">{m.email}</p>
+                              <p className="text-[11px] text-ink-3 truncate">{m.email}</p>
                             )}
                           </div>
                         </div>
@@ -4569,8 +5072,8 @@ export default function MapPage() {
                           onClick={() => toggleCollaborator(m.id)}
                           className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex-shrink-0 ${
                             isCollab
-                              ? 'bg-purple-500/20 border border-purple-400/40 text-purple-200 hover:bg-purple-500/30'
-                              : 'bg-card border border-border hover:border-purple-400 text-slate-400 hover:text-purple-300'
+                              ? 'bg-olive-tint border border-olive-border text-ink-2 hover:bg-olive-tint'
+                              : 'bg-cream border border-beige hover:border-olive text-ink-2 hover:text-olive'
                           }`}
                         >
                           {isCollab ? '✓ Editor' : '+ Add'}
@@ -4581,10 +5084,10 @@ export default function MapPage() {
                 </ul>
               )}
             </div>
-            <div className="px-5 py-3 border-t border-border flex items-center justify-end">
+            <div className="px-5 py-3 border-t border-beige flex items-center justify-end">
               <button
                 onClick={() => setCollabOpen(false)}
-                className="px-4 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-xs font-bold transition-colors"
+                className="px-4 py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors"
               >
                 Done
               </button>
@@ -4624,45 +5127,57 @@ export default function MapPage() {
           Math.abs(acresInDesc - savedAcres) > 0.5;
 
         const conf = selectedComp.confidence;
+        // Verified gets the slate-blue treatment — same color the vault uses
+        // for its "Improved" badge. Universal "trust + status" affordance:
+        // slate-blue means "this has been confirmed." Distinct from olive
+        // (creation/state) and iMessage blue (chat send) so each color
+        // carries one meaning.
         const confStyle =
-          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-emerald-400', ring: 'border-emerald-400/30 bg-emerald-400/10' }
-          : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-400', ring: 'border-amber-400/30 bg-amber-400/10' }
-          : { Icon: ShieldQuestion, color: 'text-slate-400', ring: 'border-slate-500/30 bg-slate-500/10' };
+          conf === 'Verified' ? { Icon: ShieldCheck, color: 'text-slate-blue-2', ring: 'border-slate-blue/20 bg-slate-blue/10' }
+          : conf === 'Estimated' ? { Icon: ShieldAlert, color: 'text-amber-800', ring: 'border-amber-200 bg-amber-50' }
+          : { Icon: ShieldQuestion, color: 'text-ink-2', ring: 'border-beige bg-cream' };
 
         return (
-        <div className="hidden md:flex w-80 bg-panel border-l border-border flex-col overflow-y-auto">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
-            <span className="font-bold text-sm">Comp Detail</span>
-            <button onClick={() => setSelectedComp(null)} className="text-slate-500 hover:text-white">
+        <div className="hidden md:flex w-80 bg-white border-l border-beige flex-col overflow-y-auto">
+          {/* Header bar — vault-style restraint: font-semibold not bold,
+              subtle text size, calm proportions. Matches the "Comp Vault"
+              title treatment in the main vault page. */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
+            <span className="text-[13px] font-semibold text-ink tracking-tight">Comp Detail</span>
+            <button onClick={() => setSelectedComp(null)} className="text-ink-3 hover:text-ink">
               <X size={16} />
             </button>
           </div>
           <div className="p-4 space-y-3">
-            {/* Header */}
+            {/* Property name + subtitle. Same typography hierarchy the
+                vault uses for its h1: font-semibold, tracking-tight,
+                muted subtitle in text-ink-2. */}
             <div>
-              <h2 className="text-lg font-bold leading-tight">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
-              <p className="text-xs text-slate-400 mt-0.5">{selectedComp.county}, {selectedComp.state}</p>
+              <h2 className="text-base font-semibold text-ink tracking-tight leading-tight">{selectedComp.property_name || `${selectedComp.county} County`}</h2>
+              <p className="text-[12px] text-ink-2 mt-1">{selectedComp.county}, {selectedComp.state}</p>
             </div>
 
-            {/* Confidence badge + IMPROVED + Agent-Verified indicators */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <div className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border ${confStyle.ring}`}>
-                <confStyle.Icon size={12} className={confStyle.color} />
-                <span className={`text-[10px] font-bold uppercase tracking-wider ${confStyle.color}`}>{conf}</span>
-              </div>
+            {/* Status badges — vault pill style (rounded-full, tighter
+                padding, subtle borders). Vault's "Improved" table pill is
+                the reference. Calm, restrained, single accent per badge. */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border ${confStyle.ring}`}>
+                <confStyle.Icon size={11} className={confStyle.color} />
+                <span className={`text-[10px] font-semibold ${confStyle.color}`}>{conf}</span>
+              </span>
               {selectedComp.has_improvements && (
-                <span className="text-[10px] font-bold px-2 py-1 bg-purple-400/10 border border-purple-400/30 text-purple-400 rounded-md uppercase tracking-wider">
+                <span className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-slate-blue/10 text-slate-blue-2 border border-slate-blue/20 rounded-full">
                   Improved
                 </span>
               )}
               {(selectedComp as any).irrigation === 'Strong' && (
-                <span className="text-[10px] font-bold px-2 py-1 bg-purple-400/10 border border-purple-400/30 text-purple-400 rounded-md uppercase tracking-wider">
+                <span className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-olive-tint text-olive-2 border border-olive-border rounded-full">
                   Irrigation
                 </span>
               )}
               {selectedComp.improvement_source === 'agent_verified' && (
                 <span
-                  className="text-[10px] font-bold px-2 py-1 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded-md uppercase tracking-wider"
+                  className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 bg-slate-blue/15 text-slate-blue-2 border border-slate-blue/30 rounded-full"
                   title="An agent involved in this transaction verified the improvement value."
                 >
                   Agent-Verified
@@ -4684,39 +5199,48 @@ export default function MapPage() {
               // (improvement_value). The DB-computed ppa_land_only is the
               // single source of truth for "something was backed out."
               const hasAdjustment = landOnly > 0 && allIn > 0 && Math.abs(allIn - landOnly) > 1;
+              // Vault-style KPI tile pattern: white cards on cream, single
+              // olive accent on the HEADLINE metric ($/Acre — what the
+              // broker is actually evaluating). Everything else is calm
+              // ink on white. Same typography stack as the vault's KPI
+              // dashboard above the table so the system reads as one app.
               return (
                 <div className="space-y-2">
-                  <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                    <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Acres</p>
-                    <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                  <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Acres</p>
+                    <p className="text-base font-semibold text-ink tabular-nums leading-tight">
                       {formatAcres(selectedComp.acres)}
                     </p>
                   </div>
-                  <div className="bg-card border border-border rounded-xl px-3 py-2 flex items-baseline justify-between">
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Price</p>
-                    <p className="text-base font-bold text-white font-mono leading-tight">
+                  <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Price</p>
+                    <p className="text-base font-semibold text-ink tabular-nums leading-tight">
                       {formatCurrency(selectedComp.sale_price)}
                     </p>
                   </div>
                   {hasAdjustment ? (
                     <>
-                      <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                        <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Total $/Ac</p>
-                        <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                      <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total $/Ac</p>
+                        <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
                           {formatPPA(allIn)}
                         </p>
                       </div>
-                      <div className="bg-amber-400/10 border border-amber-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                        <p className="text-[10px] font-bold text-amber-300/80 uppercase tracking-wider">Adjusted $/Ac</p>
-                        <p className="text-base font-bold text-amber-300 font-mono leading-tight">
+                      {/* Adjusted = the "story" metric — subtle amber accent
+                          on the number only, white card to match the others.
+                          No tinted background; the color cue is in the
+                          numeral alone, which is what vault does. */}
+                      <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Adjusted $/Ac</p>
+                        <p className="text-base font-semibold text-amber-800 tabular-nums leading-tight">
                           {formatPPA(landOnly)}
                         </p>
                       </div>
                     </>
                   ) : (
-                    <div className="bg-emerald-400/10 border border-emerald-400/30 rounded-xl px-3 py-2 flex items-baseline justify-between">
-                      <p className="text-[10px] font-bold text-emerald-300/80 uppercase tracking-wider">Total Price Per Acre</p>
-                      <p className="text-base font-bold text-emerald-300 font-mono leading-tight">
+                    <div className="bg-white border border-beige rounded-xl px-3 py-2.5 flex items-baseline justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Price Per Acre</p>
+                      <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
                         {formatPPA(selectedComp.ppa_land_only || selectedComp.price_per_acre || 0)}
                       </p>
                     </div>
@@ -4726,10 +5250,10 @@ export default function MapPage() {
             })()}
 
             {acreageDiscrepancy && acresInDesc != null && selectedComp.created_by === currentUserId && (
-              <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl px-3 py-2 space-y-2">
+              <div className="bg-amber-50 border border-amber-300 rounded-xl px-3 py-2 space-y-2">
                 <div className="flex items-start gap-2">
-                  <ShieldAlert size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
-                  <div className="text-[11px] text-amber-200 leading-relaxed">
+                  <ShieldAlert size={14} className="text-amber-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-[11px] text-amber-800 leading-relaxed">
                     <span className="font-bold">Acreage discrepancy.</span> Description mentions{' '}
                     <span className="font-mono font-bold">{acresInDesc.toLocaleString()} ac</span>{' '}
                     but saved value is{' '}
@@ -4738,7 +5262,7 @@ export default function MapPage() {
                 </div>
                 <button
                   onClick={() => fixAcresFromDescription(selectedComp.id, acresInDesc!)}
-                  className="w-full py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-lg text-[11px] font-bold text-amber-200 transition-colors"
+                  className="w-full py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg text-[11px] font-bold text-amber-800 transition-colors"
                 >
                   Use {acresInDesc.toLocaleString()} ac from description
                 </button>
@@ -4750,26 +5274,26 @@ export default function MapPage() {
             <div className="space-y-1.5 text-[11px]">
               {selectedComp.sale_date && (
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Sale date</span>
-                  <span className="text-slate-300 font-mono">{selectedComp.sale_date}</span>
+                  <span className="text-ink-3">Sale date</span>
+                  <span className="text-ink-2 font-mono">{selectedComp.sale_date}</span>
                 </div>
               )}
               {selectedComp.address && (
                 <div className="flex justify-between gap-2">
-                  <span className="text-slate-500 flex-shrink-0">Address</span>
-                  <span className="text-slate-300 text-right truncate">{selectedComp.address}</span>
+                  <span className="text-ink-3 flex-shrink-0">Address</span>
+                  <span className="text-ink-2 text-right truncate">{selectedComp.address}</span>
                 </div>
               )}
               {selectedComp.has_improvements && selectedComp.improvements_value != null && (
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Improvements</span>
-                  <span className="text-blue-300">{formatCurrency(selectedComp.improvements_value)} ECV</span>
+                  <span className="text-ink-3">Improvements</span>
+                  <span className="text-slate-blue-2 font-mono">{formatCurrency(selectedComp.improvements_value)} ECV</span>
                 </div>
               )}
               {selectedComp.improvements_notes && (
                 <div className="pt-1">
-                  <p className="text-slate-500 mb-0.5">Improvements notes</p>
-                  <p className="text-slate-300 leading-relaxed">{selectedComp.improvements_notes}</p>
+                  <p className="text-ink-3 mb-0.5">Improvements notes</p>
+                  <p className="text-ink-2 leading-relaxed">{selectedComp.improvements_notes}</p>
                 </div>
               )}
             </div>
@@ -4785,11 +5309,11 @@ export default function MapPage() {
                 /api/comp/[id]/find-listing endpoint enforces this on
                 the server side too. */}
             {selectedComp.created_by === currentUserId && (
-            <div className="border-t border-border pt-3 space-y-2">
+            <div className="border-t border-beige pt-3 space-y-2">
               <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-wide text-slate-500">Listing</div>
+                <div className="text-[10px] uppercase tracking-wide text-ink-3">Listing</div>
                 {(selectedComp as any).source_type && (
-                  <div className="text-[10px] text-slate-400">
+                  <div className="text-[10px] text-ink-2">
                     {(selectedComp as any).source_type === 'listing_url' ? 'From listing' : 'From PDF'}
                   </div>
                 )}
@@ -4797,12 +5321,12 @@ export default function MapPage() {
 
               {/* SAVED state */}
               {selectedComp.source_url && !listingCandidate && !pasteUrlMode && (
-                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                <div className="bg-cream/40 border border-beige rounded-lg p-2 space-y-1.5">
                   <a
                     href={selectedComp.source_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                    className="text-olive-2 hover:underline break-all text-[11px] flex items-start gap-1.5"
                   >
                     <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
                     <span>{selectedComp.source_url}</span>
@@ -4811,7 +5335,7 @@ export default function MapPage() {
                     <button
                       onClick={handleFindListing}
                       disabled={findingListing}
-                      className="text-[10px] text-slate-500 hover:text-sage underline disabled:opacity-50"
+                      className="text-[10px] text-ink-3 hover:text-olive-2 underline disabled:opacity-50"
                       title="Re-run AI find to look for a better match"
                     >
                       {findingListing ? 'Searching…' : 'Find a better match'}
@@ -4819,7 +5343,7 @@ export default function MapPage() {
                     <button
                       onClick={handleRemoveListingUrl}
                       disabled={savingListing}
-                      className="text-[10px] text-slate-500 hover:text-red-300 underline disabled:opacity-50 ml-auto"
+                      className="text-[10px] text-ink-3 hover:text-red-700 underline disabled:opacity-50 ml-auto"
                       title="Remove the saved listing URL"
                     >
                       Remove
@@ -4830,8 +5354,8 @@ export default function MapPage() {
 
               {/* AI FOUND state */}
               {listingCandidate && listingCandidate.url && (
-                <div className="bg-sage/10 border border-sage/40 rounded-lg p-2.5 space-y-2">
-                  <div className="flex items-center gap-1.5 text-sage text-[10px] font-bold uppercase tracking-wide">
+                <div className="bg-olive-tint border border-olive-border rounded-lg p-2.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-olive-2 text-[10px] font-bold uppercase tracking-wide">
                     <Sparkles size={11} />
                     AI found a match
                   </div>
@@ -4839,19 +5363,19 @@ export default function MapPage() {
                     href={listingCandidate.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-sage hover:underline break-all text-[11px] flex items-start gap-1.5"
+                    className="text-olive-2 hover:underline break-all text-[11px] flex items-start gap-1.5"
                   >
                     <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
                     <span>{listingCandidate.url}</span>
                   </a>
                   {listingCandidate.reason && (
-                    <p className="text-[10px] text-slate-300 leading-relaxed">{listingCandidate.reason}</p>
+                    <p className="text-[10px] text-ink-2 leading-relaxed">{listingCandidate.reason}</p>
                   )}
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <button
                       onClick={() => setListingCandidate(null)}
                       disabled={savingListing}
-                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                      className="py-1.5 bg-cream hover:bg-cream-2 border border-beige text-ink-2 rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
                     >
                       <X size={10} />
                       Not a match
@@ -4859,7 +5383,7 @@ export default function MapPage() {
                     <button
                       onClick={() => handleSaveListingUrl(listingCandidate.url!)}
                       disabled={savingListing}
-                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
+                      className="py-1.5 bg-olive hover:bg-olive-2 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40"
                     >
                       {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
                       {savingListing ? 'Saving…' : 'Save as listing'}
@@ -4870,17 +5394,17 @@ export default function MapPage() {
 
               {/* AI EMPTY state */}
               {listingCandidate && !listingCandidate.url && (
-                <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg p-2.5 space-y-1.5">
-                  <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wide">
+                <div className="bg-cream border border-beige rounded-lg p-2.5 space-y-1.5">
+                  <div className="text-[10px] font-bold text-ink-2 uppercase tracking-wide">
                     No confident match
                   </div>
                   {listingCandidate.reason && (
-                    <p className="text-[10px] text-slate-400 leading-relaxed">{listingCandidate.reason}</p>
+                    <p className="text-[10px] text-ink-2 leading-relaxed">{listingCandidate.reason}</p>
                   )}
-                  <p className="text-[10px] text-slate-500">Try again later or paste a URL manually below.</p>
+                  <p className="text-[10px] text-ink-3">Try again later or paste a URL manually below.</p>
                   <button
                     onClick={() => setListingCandidate(null)}
-                    className="text-[10px] text-slate-500 hover:text-slate-300 underline"
+                    className="text-[10px] text-ink-3 hover:text-ink-2 underline"
                   >
                     Dismiss
                   </button>
@@ -4889,7 +5413,7 @@ export default function MapPage() {
 
               {/* MANUAL PASTE state */}
               {pasteUrlMode && (
-                <div className="bg-night/40 border border-border rounded-lg p-2 space-y-1.5">
+                <div className="bg-cream/40 border border-beige rounded-lg p-2 space-y-1.5">
                   <input
                     type="url"
                     value={pasteUrlInput}
@@ -4903,19 +5427,19 @@ export default function MapPage() {
                     }}
                     placeholder="https://landsofamerica.com/property/…"
                     autoFocus
-                    className="w-full bg-night/60 border border-border focus:border-sage rounded px-2 py-1 text-[11px] text-white placeholder-slate-600 outline-none"
+                    className="w-full bg-cream/60 border border-beige focus:border-olive rounded px-2 py-1 text-[11px] text-ink placeholder-ink-3 outline-none"
                   />
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => { setPasteUrlMode(false); setPasteUrlInput(''); }}
-                      className="py-1.5 bg-slate-500/10 hover:bg-slate-500/20 border border-slate-500/30 text-slate-300 rounded text-[10px] font-bold"
+                      className="py-1.5 bg-cream hover:bg-cream-2 border border-beige text-ink-2 rounded text-[10px] font-bold"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={() => handleSaveListingUrl(pasteUrlInput)}
                       disabled={savingListing || pasteUrlInput.trim().length < 5}
-                      className="py-1.5 bg-sage hover:bg-sage2 text-black rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="py-1.5 bg-olive hover:bg-olive-2 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {savingListing ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
                       Save URL
@@ -4930,7 +5454,13 @@ export default function MapPage() {
                   <button
                     onClick={handleFindListing}
                     disabled={findingListing}
-                    className="w-full py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 text-sage rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    // iMessage blue — "Find listing online" is an AI search
+                    // action (sends the comp to the AI to hunt for a
+                    // matching public listing). Same family as the Ask
+                    // button: blue = "send to AI." Makes the right panel's
+                    // primary action visually distinct from the olive +
+                    // slate-blue surrounding chrome.
+                    className="w-full py-2 bg-imsg hover:bg-imsg-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shadow-sm"
                     title="Search Lands of America / LandWatch / Land.com / Realtor / Zillow for a matching listing"
                   >
                     {findingListing ? (
@@ -4947,7 +5477,7 @@ export default function MapPage() {
                   </button>
                   <button
                     onClick={() => setPasteUrlMode(true)}
-                    className="w-full py-1 text-[10px] text-slate-500 hover:text-slate-300 underline flex items-center justify-center gap-1"
+                    className="w-full py-1 text-[10px] text-ink-3 hover:text-ink-2 underline flex items-center justify-center gap-1"
                   >
                     <LinkIcon size={10} />
                     or paste URL manually
@@ -4963,10 +5493,15 @@ export default function MapPage() {
               const irrigationVal = (selectedComp as any).irrigation as string | null;
               return (
                 <div className="grid grid-cols-2 gap-2">
-                  <FeatureChip label="Water" value={selectedComp.water} strong={isStrongFeature('water', selectedComp.water)} />
-                  <FeatureChip label="Road" value={selectedComp.road_frontage} strong={isStrongFeature('road', selectedComp.road_frontage)} />
-                  <FeatureChip label="Dev" value={selectedComp.dev_potential} strong={isStrongFeature('dev', selectedComp.dev_potential)} />
-                  <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
+                  {/* Strong-state palette per attr: water→sky, dev→purple,
+                      road/irrigation→olive. Adds tasteful color variety to
+                      the right panel without becoming a rainbow. Each color
+                      carries semantic meaning (water=blue universal, dev=
+                      purple for "growth/future"). */}
+                  <FeatureChip label="Water" value={selectedComp.water} strong={isStrongFeature('water', selectedComp.water)} attr="water" />
+                  <FeatureChip label="Road" value={selectedComp.road_frontage} strong={isStrongFeature('road', selectedComp.road_frontage)} attr="road" />
+                  <FeatureChip label="Dev" value={selectedComp.dev_potential} strong={isStrongFeature('dev', selectedComp.dev_potential)} attr="dev" />
+                  <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} attr="irrigation" />
                 </div>
               );
             })()}
@@ -4975,14 +5510,14 @@ export default function MapPage() {
                 Inline pattern (no card border) to match CMA expanded + share report. */}
             {desc && (
               <div className="pt-1">
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description</p>
-                <p className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description</p>
+                <p className="text-[11px] text-ink-2 leading-relaxed whitespace-pre-wrap">
                   {descriptionExpanded ? desc : previewSentences}
                 </p>
                 {hasMore && (
                   <button
                     onClick={() => setDescriptionExpanded(v => !v)}
-                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-sage hover:text-sage2 transition-colors"
+                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-olive-2 hover:text-olive-2 transition-colors"
                   >
                     {descriptionExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
                   </button>
@@ -4992,27 +5527,27 @@ export default function MapPage() {
 
             {/* Ownership transfer */}
             {(selectedComp.grantor || selectedComp.grantee) && (
-              <div className="bg-card border border-border rounded-xl p-3">
-                <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Ownership Transfer</p>
+              <div className="bg-cream border border-beige rounded-xl p-3">
+                <p className="text-[9px] font-bold text-ink-3 uppercase tracking-wider mb-2">Ownership Transfer</p>
                 <div className="space-y-1.5">
                   {selectedComp.grantor && (
                     <div>
-                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">From</p>
-                      <p className="text-xs font-semibold text-slate-200">{selectedComp.grantor}</p>
+                      <p className="text-[9px] text-ink-3 font-bold uppercase tracking-wider">From</p>
+                      <p className="text-xs font-semibold text-ink">{selectedComp.grantor}</p>
                     </div>
                   )}
                   {selectedComp.grantor && selectedComp.grantee && (
-                    <div className="flex justify-center"><ArrowRight size={12} className="text-slate-600" /></div>
+                    <div className="flex justify-center"><ArrowRight size={12} className="text-ink-3" /></div>
                   )}
                   {selectedComp.grantee && (
                     <div>
-                      <p className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">To</p>
-                      <p className="text-xs font-semibold text-slate-200">{selectedComp.grantee}</p>
+                      <p className="text-[9px] text-ink-3 font-bold uppercase tracking-wider">To</p>
+                      <p className="text-xs font-semibold text-ink">{selectedComp.grantee}</p>
                     </div>
                   )}
                 </div>
                 {selectedComp.recording_number && (
-                  <p className="text-[10px] text-slate-500 font-mono mt-2 pt-2 border-t border-border">
+                  <p className="text-[10px] text-ink-3 font-mono mt-2 pt-2 border-t border-beige">
                     Recording: {selectedComp.recording_number}
                   </p>
                 )}
@@ -5025,7 +5560,7 @@ export default function MapPage() {
                   <button
                     onClick={detectBoundary}
                     disabled={detectingBoundary}
-                    className="w-full py-2.5 bg-sage/10 border border-sage/30 hover:bg-sage/20 hover:border-sage text-sm font-bold text-sage rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                    className="w-full py-2.5 bg-olive-tint border border-olive-border hover:bg-olive-tint hover:border-olive text-sm font-bold text-olive-2 rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     <MapPin size={14} />
                     {detectingBoundary ? 'Detecting…' : 'Detect Property Boundary'}
@@ -5034,7 +5569,7 @@ export default function MapPage() {
                   <button
                     onClick={detectBoundary}
                     disabled={detectingBoundary}
-                    className="w-full py-2 bg-card border border-border hover:border-sage text-xs font-bold text-slate-400 hover:text-sage rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                    className="w-full py-2 bg-cream border border-beige hover:border-olive text-xs font-bold text-ink-2 hover:text-olive-2 rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     <MapPin size={12} />
                     {detectingBoundary ? 'Re-detecting…' : 'Re-detect Boundary'}
@@ -5043,7 +5578,7 @@ export default function MapPage() {
 
                 <button
                   onClick={() => startReselectParcels(selectedComp)}
-                  className="w-full py-2 bg-card border border-border hover:border-sage text-xs font-bold text-slate-300 hover:text-sage rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                  className="w-full py-2 bg-cream border border-beige hover:border-olive text-xs font-bold text-ink-2 hover:text-olive-2 rounded-xl transition-colors flex items-center justify-center gap-1.5"
                 >
                   <MousePointer size={12} /> Re-select Parcels
                 </button>
@@ -5052,14 +5587,14 @@ export default function MapPage() {
                   <button
                     onClick={() => startEditBoundary(selectedComp)}
                     disabled={!(selectedComp as any).boundary_geojson}
-                    className="py-2 bg-card border border-border hover:border-amber-400 text-xs font-bold text-slate-300 hover:text-amber-400 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="py-2 bg-cream border border-beige hover:border-amber-500/60 text-xs font-bold text-ink-2 hover:text-amber-600 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Pencil size={12} /> Edit
                   </button>
                   <button
                     onClick={clearBoundary}
                     disabled={!(selectedComp as any).boundary_geojson}
-                    className="py-2 bg-card border border-border hover:border-red-400 text-xs font-bold text-slate-300 hover:text-red-400 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="py-2 bg-cream border border-beige hover:border-red-400 text-xs font-bold text-ink-2 hover:text-red-500 rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Trash2 size={12} /> Clear
                   </button>
@@ -5069,7 +5604,7 @@ export default function MapPage() {
 
             {selectedComp.created_by === currentUserId && (
               <button onClick={() => setEditingComp(selectedComp)}
-                className="w-full py-2.5 bg-card border border-border hover:border-sage text-sm font-bold text-slate-300 hover:text-white rounded-xl transition-colors flex items-center justify-center gap-2">
+                className="w-full py-2.5 bg-cream border border-beige hover:border-olive text-sm font-bold text-ink-2 hover:text-ink rounded-xl transition-colors flex items-center justify-center gap-2">
                 <Edit size={14} /> Edit Comp
               </button>
             )}

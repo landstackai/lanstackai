@@ -47,23 +47,34 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="font-sans bg-night text-white antialiased">
+      <body className="font-sans bg-cream text-ink antialiased">
         {children}
+        {/* Toast notifications — branded warm dark with frosted blur.
+            Same surface system as the map popups + sidebar (chrome
+            elements that float over content). Icons use the brand
+            accent variants for dark surfaces: olive-light for success,
+            warm brick red for error. */}
         <Toaster
           position="top-right"
           toastOptions={{
             style: {
-              background: '#1e2736',
-              color: '#f1f5f9',
-              border: '1px solid #2a3547',
+              background: 'rgba(26, 24, 21, 0.92)',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              color: '#F5F1E8',
+              border: '1px solid rgba(58, 52, 46, 0.7)',
+              borderRadius: '10px',
               fontFamily: 'Syne, sans-serif',
               fontSize: '13px',
+              fontWeight: 500,
+              padding: '10px 14px',
+              boxShadow: '0 12px 36px rgba(0,0,0,0.35), 0 2px 8px rgba(0,0,0,0.2)',
             },
             success: {
-              iconTheme: { primary: '#34d399', secondary: '#0b0f14' },
+              iconTheme: { primary: '#A8B57A', secondary: '#1A1815' },
             },
             error: {
-              iconTheme: { primary: '#ef4444', secondary: '#0b0f14' },
+              iconTheme: { primary: '#C8503F', secondary: '#1A1815' },
             },
           }}
         />

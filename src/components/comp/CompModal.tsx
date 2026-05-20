@@ -358,24 +358,24 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     }
   };
 
-  const inputClass = "w-full bg-card border border-border rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sage transition-colors";
-  const labelClass = "block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5";
+  const inputClass = "w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors";
+  const labelClass = "block text-xs font-bold text-ink-2 uppercase tracking-wider mb-1.5";
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end md:items-center justify-center p-0 md:p-4">
-      <div className="w-full md:max-w-2xl bg-panel border border-border md:rounded-2xl overflow-hidden flex flex-col max-h-[95vh]">
+      <div className="w-full md:max-w-2xl bg-white border border-beige md:rounded-2xl overflow-hidden flex flex-col max-h-[95vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border flex-shrink-0">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-beige flex-shrink-0">
           <div>
             <h2 className="font-bold text-base">{comp ? 'Edit Comp' : 'Add Comp'}</h2>
             <div className="flex items-center gap-1 mt-1">
               {[1, 2, 3].map(s => (
-                <div key={s} className={`h-1 w-8 rounded-full transition-colors ${s <= step ? 'bg-sage' : 'bg-border'}`} />
+                <div key={s} className={`h-1 w-8 rounded-full transition-colors ${s <= step ? 'bg-olive' : 'bg-beige'}`} />
               ))}
-              <span className="text-xs text-slate-500 ml-2">Step {step} of 3</span>
+              <span className="text-xs text-ink-3 ml-2">Step {step} of 3</span>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+          <button onClick={onClose} className="text-ink-3 hover:text-ink transition-colors">
             <X size={18} />
           </button>
         </div>
@@ -435,7 +435,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               <div>
                 <label className={labelClass}>Total Sale Price *</label>
                 <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
                   <input type="number" value={form.sale_price}
                     onChange={e => setForm({...form, sale_price: e.target.value})}
                     placeholder="3145855" className={`${inputClass} pl-7 font-mono`} />
@@ -443,14 +443,14 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               </div>
 
               {/* Improvements toggle */}
-              <div className="flex items-center justify-between py-2 px-3 bg-card border border-border rounded-lg">
+              <div className="flex items-center justify-between py-2 px-3 bg-cream border border-beige rounded-lg">
                 <div>
-                  <p className="text-sm font-bold text-white">Has Improvements</p>
-                  <p className="text-xs text-slate-500">Lodge, barn, cabin, etc.</p>
+                  <p className="text-sm font-bold text-ink">Has Improvements</p>
+                  <p className="text-xs text-ink-3">Lodge, barn, cabin, etc.</p>
                 </div>
                 <button
                   onClick={() => setForm(f => ({...f, has_improvements: !f.has_improvements}))}
-                  className={`w-11 h-6 rounded-full transition-colors relative ${form.has_improvements ? 'bg-sage' : 'bg-border'}`}
+                  className={`w-11 h-6 rounded-full transition-colors relative ${form.has_improvements ? 'bg-olive' : 'bg-beige'}`}
                 >
                   <div className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-transform ${form.has_improvements ? 'translate-x-6' : 'translate-x-1'}`} />
                 </button>
@@ -460,13 +460,13 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                 <div>
                   <label className={labelClass}>Improvements Value (ECV)</label>
                   <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
                     <input type="number" value={form.improvements_value}
                       onChange={e => setForm({...form, improvements_value: e.target.value})}
                       placeholder="351139" className={`${inputClass} pl-7 font-mono`} />
                   </div>
                   {landOnlyPrice && (
-                    <p className="text-xs text-emerald-400 font-mono mt-1">
+                    <p className="text-xs text-olive font-mono mt-1">
                       Land-only: ${landOnlyPrice.toLocaleString()} · ${(landOnlyPrice / parseFloat(form.acres || '1')).toFixed(0)}/ac
                     </p>
                   )}
@@ -475,9 +475,9 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
 
 
               {ppa && (
-                <div className="bg-sage/5 border border-sage/20 rounded-lg px-3 py-2 flex justify-between">
-                  <span className="text-xs text-slate-400">Price per acre</span>
-                  <span className="text-sage font-bold font-mono text-sm">${parseInt(ppa).toLocaleString()}/ac</span>
+                <div className="bg-olive-tint border border-olive-border rounded-lg px-3 py-2 flex justify-between">
+                  <span className="text-xs text-ink-2">Price per acre</span>
+                  <span className="text-olive-2 font-bold font-mono text-sm">${parseInt(ppa).toLocaleString()}/ac</span>
                 </div>
               )}
 
@@ -495,8 +495,8 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                       onClick={() => setForm(f => ({...f, visibility: v.value}))}
                       className={`p-2 rounded-lg border text-left transition-colors ${
                         form.visibility === v.value
-                          ? 'border-sage bg-sage/10 text-sage'
-                          : 'border-border text-slate-400 hover:border-slate-500'
+                          ? 'border-olive bg-olive-tint text-olive-2'
+                          : 'border-beige text-ink-2 hover:border-beige-2'
                       }`}
                     >
                       <div className="text-xs font-bold">{v.label}</div>
@@ -536,7 +536,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               <button
                 type="button"
                 onClick={() => setShowLocationPicker(true)}
-                className="flex items-center justify-center gap-1.5 w-full py-2 border border-sage/40 bg-sage/10 hover:bg-sage/15 text-sage rounded-lg text-xs font-bold transition-colors"
+                className="flex items-center justify-center gap-1.5 w-full py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-olive-2 rounded-lg text-xs font-bold transition-colors"
               >
                 <MapPin size={12} />
                 {form.latitude && form.longitude ? 'Adjust Location on Map' : 'Set Location on Map'}
@@ -555,7 +555,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   {(['None', 'Seasonal', 'Strong'] as WaterQuality[]).map(w => (
                     <button key={w} onClick={() => setForm(f => ({...f, water: w}))}
                       className={`py-2 rounded-lg border text-sm font-bold transition-colors ${
-                        form.water === w ? 'border-blue-400 bg-blue-400/10 text-blue-400' : 'border-border text-slate-400'
+                        form.water === w ? 'border-olive bg-olive-tint text-olive-2' : 'border-beige text-ink-2'
                       }`}
                     >{w}</button>
                   ))}
@@ -569,7 +569,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   {(['None', 'Low', 'Medium', 'High'] as RoadFrontage[]).map(r => (
                     <button key={r} onClick={() => setForm(f => ({...f, road_frontage: r}))}
                       className={`py-2 rounded-lg border text-xs font-bold transition-colors ${
-                        form.road_frontage === r ? 'border-sage bg-sage/10 text-sage' : 'border-border text-slate-400'
+                        form.road_frontage === r ? 'border-olive bg-olive-tint text-olive-2' : 'border-beige text-ink-2'
                       }`}
                     >{r}</button>
                   ))}
@@ -583,7 +583,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   {(['Low', 'Medium', 'High'] as DevPotential[]).map(d => (
                     <button key={d} onClick={() => setForm(f => ({...f, dev_potential: d}))}
                       className={`py-2 rounded-lg border text-sm font-bold transition-colors ${
-                        form.dev_potential === d ? 'border-amber-400 bg-amber-400/10 text-amber-400' : 'border-border text-slate-400'
+                        form.dev_potential === d ? 'border-amber-500/60 bg-amber-50 text-amber-600' : 'border-beige text-ink-2'
                       }`}
                     >{d}</button>
                   ))}
@@ -602,13 +602,13 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                       onClick={() => setForm(f => ({...f, irrigation: i}))}
                       className={`py-2 rounded-lg border text-sm font-bold transition-colors ${
                         form.irrigation === i
-                          ? 'border-emerald-400 bg-emerald-400/10 text-emerald-400'
-                          : 'border-border text-slate-400 hover:border-slate-500'
+                          ? 'border-olive-border bg-olive-tint text-olive'
+                          : 'border-beige text-ink-2 hover:border-beige-2'
                       }`}
                     >{i}</button>
                   ))}
                 </div>
-                <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+                <p className="text-[10px] text-ink-3 mt-1.5 leading-relaxed">
                   Strong = active center pivot, drip, or current row crops. Medium = partial irrigation. None = dry land. Strong triggers the IRRIGATION pill on comp cards.
                 </p>
               </div>
@@ -621,8 +621,8 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                     <button key={u} onClick={() => toggleBestUse(u)}
                       className={`px-3 py-1.5 rounded-full border text-xs font-bold transition-colors ${
                         form.best_use.includes(u)
-                          ? 'border-sage bg-sage/10 text-sage'
-                          : 'border-border text-slate-400 hover:border-slate-500'
+                          ? 'border-olive bg-olive-tint text-olive-2'
+                          : 'border-beige text-ink-2 hover:border-beige-2'
                       }`}
                     >{u}</button>
                   ))}
@@ -665,7 +665,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                     <option>No</option>
                     <option>Yes</option>
                   </select>
-                  <p className="text-[10px] text-slate-500 mt-1">Well allocation, groundwater rights — distinct from live water.</p>
+                  <p className="text-[10px] text-ink-3 mt-1">Well allocation, groundwater rights — distinct from live water.</p>
                 </div>
               </div>
 
@@ -785,7 +785,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   <button
                     onClick={generateDescription}
                     disabled={generating}
-                    className="flex items-center gap-1.5 px-2.5 py-1 bg-sage/10 hover:bg-sage/20 border border-sage/20 text-sage rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                    className="flex items-center gap-1.5 px-2.5 py-1 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
                   >
                     <Sparkles size={11} />
                     {generating ? 'Generating...' : 'AI Generate'}
@@ -804,7 +804,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                   The agent dropdown only shows when the box is checked.
                   Defaults to the current user; can be changed to a teammate
                   if it was their deal. Cleared when the box is unchecked. */}
-              <div className="bg-card border border-border rounded-lg overflow-hidden">
+              <div className="bg-cream border border-beige rounded-lg overflow-hidden">
                 <div className="flex items-center gap-3 py-2 px-3">
                   <input
                     type="checkbox"
@@ -822,14 +822,14 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                           : null,
                       }));
                     }}
-                    className="w-4 h-4 accent-sage"
+                    className="w-4 h-4 accent-olive"
                   />
-                  <label htmlFor="company-tx" className="text-sm font-semibold text-slate-300 cursor-pointer">
+                  <label htmlFor="company-tx" className="text-sm font-semibold text-ink cursor-pointer">
                     Company Transaction
                   </label>
                 </div>
                 {form.is_company_transaction && (
-                  <div className="px-3 pb-3 pt-1 border-t border-border">
+                  <div className="px-3 pb-3 pt-1 border-t border-beige">
                     <label className={labelClass}>Transaction Agent</label>
                     <select
                       value={form.transaction_agent_id ?? ''}
@@ -842,7 +842,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                         return <option key={m.id} value={m.id}>{label}</option>;
                       })}
                     </select>
-                    <p className="text-[10px] text-slate-500 mt-1">
+                    <p className="text-[10px] text-ink-3 mt-1">
                       Defaults to you. Pick a teammate if it was their deal. Drives the map's "My Sales" filter.
                     </p>
                   </div>
@@ -850,24 +850,24 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               </div>
 
               {/* Improvement Adjustment (optional, collapsible) */}
-              <div className="bg-card border border-border rounded-lg overflow-hidden">
+              <div className="bg-cream border border-beige rounded-lg overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setImprovementOpen(o => !o)}
                   className="w-full flex items-center justify-between px-3 py-2.5 text-left"
                 >
                   <div>
-                    <p className="text-sm font-bold text-white">Improvement Adjustment <span className="text-slate-500 font-normal">(optional)</span></p>
-                    <p className="text-[10px] text-slate-500">Used to compute land-only price for CMAs.</p>
+                    <p className="text-sm font-bold text-ink">Improvement Adjustment <span className="text-ink-3 font-normal">(optional)</span></p>
+                    <p className="text-[10px] text-ink-3">Used to compute land-only price for CMAs.</p>
                   </div>
-                  {improvementOpen ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
+                  {improvementOpen ? <ChevronUp size={14} className="text-ink-3" /> : <ChevronDown size={14} className="text-ink-3" />}
                 </button>
                 {improvementOpen && (
-                  <div className="px-3 pb-3 pt-1 space-y-3 border-t border-border">
+                  <div className="px-3 pb-3 pt-1 space-y-3 border-t border-beige">
                     <div>
                       <label className={labelClass}>Improvement Value</label>
                       <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
                         <input
                           type="number"
                           value={form.improvement_value}
@@ -890,7 +890,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
                         <option value="broker_estimate">Broker Estimate</option>
                       </select>
                     </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed">
+                    <p className="text-[10px] text-ink-3 leading-relaxed">
                       Leaving these blank keeps the comp behaving exactly as before. Agent-Verified
                       means you (or a teammate) had first-hand knowledge of the transaction —
                       the client sees a green badge but never your name. Broker estimates are
@@ -904,10 +904,10 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-5 py-4 border-t border-border flex-shrink-0">
+        <div className="flex items-center justify-between px-5 py-4 border-t border-beige flex-shrink-0">
           <button
             onClick={() => step > 1 ? setStep(step - 1) : onClose()}
-            className="flex items-center gap-1.5 px-4 py-2 border border-border rounded-lg text-sm font-bold text-slate-400 hover:text-white transition-colors"
+            className="flex items-center gap-1.5 px-4 py-2 border border-beige rounded-lg text-sm font-bold text-ink-2 hover:text-ink transition-colors"
           >
             <ChevronLeft size={14} />
             {step > 1 ? 'Back' : 'Cancel'}
@@ -917,7 +917,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
             {step < 3 ? (
               <button
                 onClick={() => setStep(step + 1)}
-                className="flex items-center gap-1.5 px-5 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-sm font-bold transition-colors"
+                className="flex items-center gap-1.5 px-5 py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-sm font-bold transition-colors"
               >
                 Next <ChevronRight size={14} />
               </button>
@@ -925,7 +925,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
               <button
                 onClick={handleSave}
                 disabled={loading}
-                className="px-6 py-2 bg-sage hover:bg-sage2 text-black rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+                className="px-6 py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
               >
                 {loading ? 'Saving...' : comp ? 'Save Changes' : 'Add Comp'}
               </button>

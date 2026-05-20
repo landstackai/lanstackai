@@ -54,11 +54,11 @@ export function TieredLoadingMessage({
   return (
     <div className="flex flex-col gap-1">
       {/* Tier 1: brand voice */}
-      <div className="text-sm text-slate-200 font-medium">{BRAND_VOICE[brandIdx]}</div>
+      <div className="text-sm text-ink font-medium">{BRAND_VOICE[brandIdx]}</div>
       {/* Tier 2: specific status (optional) */}
       {status && (
-        <div className="text-xs text-slate-400 flex items-center gap-1.5">
-          <span className="inline-block w-1 h-1 rounded-full bg-sage animate-pulse" />
+        <div className="text-xs text-ink-2 flex items-center gap-1.5">
+          <span className="inline-block w-1 h-1 rounded-full bg-olive animate-pulse" />
           {status}
         </div>
       )}

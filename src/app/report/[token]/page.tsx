@@ -149,15 +149,20 @@ export default function ClientReport({ params }: ClientReportProps) {
 
       const points: [number, number][] = [];
 
-      // Subject pin (yellow)
+      // Subject pin — warm brick red, matches the dashboard map's subject
+      // marker. Real-estate convention: red = "the one we're evaluating."
+      // Subtle pulse halo keyframe defined in globals.css (subjectPulse).
       const subjLat = (cma as any).subject_latitude;
       const subjLng = (cma as any).subject_longitude;
       if (subjLat != null && subjLng != null) {
         const sEl = document.createElement('div');
         sEl.style.cssText = `
-          background:#facc15;border:3px solid #0b0f14;border-radius:50%;
-          width:18px;height:18px;
-          box-shadow:0 0 0 3px #facc15aa, 0 4px 14px rgba(0,0,0,.6);
+          background:#C8503F;
+          border:3px solid #F5F1E8;
+          border-radius:50%;
+          width:20px;height:20px;
+          box-shadow:0 0 0 4px rgba(200,80,63,0.35), 0 6px 18px rgba(0,0,0,.5);
+          animation:subjectPulse 2.4s ease-in-out infinite;
         `;
         sEl.title = cma.subject_name || 'Subject';
         const sm = new mapboxgl.Marker({ element: sEl }).setLngLat([subjLng, subjLat]).addTo(map.current);
@@ -179,8 +184,8 @@ export default function ClientReport({ params }: ClientReportProps) {
             type: 'geojson',
             data: { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: subjBoundary }] },
           });
-          map.current.addLayer({ id: 'subj-fill', type: 'fill', source: 'subj-boundary', paint: { 'fill-color': '#facc15', 'fill-opacity': 0.15 } });
-          map.current.addLayer({ id: 'subj-line', type: 'line', source: 'subj-boundary', paint: { 'line-color': '#facc15', 'line-width': 2.5 } });
+          map.current.addLayer({ id: 'subj-fill', type: 'fill', source: 'subj-boundary', paint: { 'fill-color': '#C8503F', 'fill-opacity': 0.15 } });
+          map.current.addLayer({ id: 'subj-line', type: 'line', source: 'subj-boundary', paint: { 'line-color': '#C8503F', 'line-width': 2.5 } });
         }
       }
 
@@ -190,10 +195,10 @@ export default function ClientReport({ params }: ClientReportProps) {
         const el = document.createElement('div');
         el.dataset.compId = comp.id;
         el.style.cssText = `
-          background:#0b0f14;border:2px solid #34d399;border-radius:20px;
+          background:#1A1815;border:2px solid #A8B57A;border-radius:20px;
           padding:4px 8px;font-family:'DM Mono',monospace;font-size:11px;
-          font-weight:700;color:#34d399;cursor:pointer;white-space:nowrap;
-          box-shadow:0 2px 8px rgba(0,0,0,.5);
+          font-weight:700;color:#A8B57A;cursor:pointer;white-space:nowrap;
+          box-shadow:0 2px 10px rgba(0,0,0,.4);
           transition:border-color .15s, box-shadow .15s, color .15s;
         `;
         el.textContent = `$${Math.round((comp.ppa_land_only || comp.price_per_acre || 0) / 1000)}k`;
@@ -209,35 +214,37 @@ export default function ClientReport({ params }: ClientReportProps) {
         const isStrongIrrigation = (comp as any).irrigation === 'Strong';
         const isAgentVerified = (comp as any).improvement_source === 'agent_verified';
         const propertyName = (comp.property_name || `${comp.county} County`).replace(/</g, '&lt;');
-        const purplePill = (label: string) =>
-          `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(192,132,252,0.1);color:#c084fc;border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
-        const improvedBadge = isImproved ? purplePill('IMPROVED') : '';
-        const irrigationBadge = isStrongIrrigation ? purplePill('IRRIGATION') : '';
+        // Branded warm dark popup — matches the dashboard map popup.
+        // Floats over satellite map with frosted blur for legibility.
+        const bluePill = (label: string) =>
+          `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.15);color:#7B9FCE;border:1px solid rgba(123,159,206,0.35);border-radius:3px;letter-spacing:0.05em;">${label}</span>`;
+        const improvedBadge = isImproved ? bluePill('IMPROVED') : '';
+        const irrigationBadge = isStrongIrrigation ? bluePill('IRRIGATION') : '';
         const adjBadge = hasAdjustment
-          ? `<span style="font-size:9px;color:#fbbf24;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
+          ? `<span style="font-size:9px;color:#E8B872;font-family:'DM Mono',monospace;font-weight:700;">ADJ</span>`
           : '';
         const agentBadge = isAgentVerified
-          ? `<span style="font-size:9px;font-weight:700;padding:1px 5px;background:rgba(52,211,153,0.1);color:#6ee7b7;border:1px solid rgba(52,211,153,0.3);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
+          ? `<span style="font-size:9px;font-weight:600;padding:1px 5px;background:rgba(123,159,206,0.18);color:#7B9FCE;border:1px solid rgba(123,159,206,0.40);border-radius:3px;letter-spacing:0.05em;">Agent-Verified</span>`
           : '';
-        const adjustedColor = hasAdjustment ? '#fcd34d' : 'rgba(253,230,138,0.45)';
+        const adjustedColor = hasAdjustment ? '#E8B872' : 'rgba(232,184,114,0.45)';
         const adjustedValue = hasAdjustment ? formatPPA(adjustedPpa) : '—';
         const popupHtml = `
           <div style="padding:10px 12px;font-family:'Syne',sans-serif;">
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-              <span style="font-weight:700;font-size:12px;color:#fff;letter-spacing:-0.01em;">${propertyName}</span>
+              <span style="font-weight:600;font-size:12px;color:#F5F1E8;letter-spacing:-0.01em;">${propertyName}</span>
               ${improvedBadge}
               ${irrigationBadge}
               ${adjBadge}
               ${agentBadge}
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,auto);column-gap:16px;row-gap:2px;font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap;">
-              <div style="color:#64748b;">Acres</div>
-              <div style="color:#64748b;">Total</div>
-              <div style="color:#64748b;">Total $/Ac</div>
-              <div style="color:#64748b;">Adjusted $/Ac</div>
-              <div style="color:#fff;font-weight:700;">${formatAcres(comp.acres)}</div>
-              <div style="color:#fff;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
-              <div style="color:#34d399;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
+              <div style="color:#A8A296;">Acres</div>
+              <div style="color:#A8A296;">Total</div>
+              <div style="color:#A8A296;">Total $/Ac</div>
+              <div style="color:#A8A296;">Adjusted $/Ac</div>
+              <div style="color:#F5F1E8;font-weight:700;">${formatAcres(comp.acres)}</div>
+              <div style="color:#F5F1E8;font-weight:700;">${formatCurrency(comp.sale_price)}</div>
+              <div style="color:#A8B57A;font-weight:700;">${totalPpa > 0 ? formatPPA(totalPpa) : '—'}</div>
               <div style="color:${adjustedColor};font-weight:700;">${adjustedValue}</div>
             </div>
           </div>
@@ -316,49 +323,49 @@ export default function ClientReport({ params }: ClientReportProps) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-night flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-sage border-t-transparent rounded-full animate-spin" />
+      <div className="min-h-screen bg-cream flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-olive border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
 
   if (!cma) {
     return (
-      <div className="min-h-screen bg-night flex items-center justify-center text-center p-4">
+      <div className="min-h-screen bg-cream flex items-center justify-center text-center p-4">
         <div>
           <div className="text-4xl mb-4">🔒</div>
           <h1 className="text-xl font-bold mb-2">Report Not Found</h1>
-          <p className="text-slate-400 text-sm">This link may have expired or been revoked.</p>
+          <p className="text-ink-2 text-sm">This link may have expired or been revoked.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-night flex flex-col overflow-hidden">
+    <div className="h-screen bg-cream flex flex-col overflow-hidden">
       {/* Header — brokerage branding takes the lead, landstack.ai retreats to footer */}
-      <div className="bg-panel border-b border-border px-4 py-3 flex items-center justify-between flex-shrink-0 print:bg-white print:text-black print:border-slate-300">
+      <div className="bg-white border-b border-beige px-4 py-3 flex items-center justify-between flex-shrink-0 print:bg-white print:text-black print:border-slate-300">
         <div className="flex items-center gap-2 min-w-0">
           {broker?.brokerage_name ? (
             <div className="min-w-0">
-              <p className="font-bold text-sm text-white truncate print:text-black">{broker.brokerage_name}</p>
+              <p className="font-bold text-sm text-ink truncate print:text-black">{broker.brokerage_name}</p>
               {broker.full_name && (
-                <p className="text-[10px] text-slate-400 truncate print:text-slate-700">{broker.full_name}</p>
+                <p className="text-[10px] text-ink-2 truncate print:text-slate-700">{broker.full_name}</p>
               )}
             </div>
           ) : (
             <>
-              <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-sage to-sage2 flex items-center justify-center">
-                <Layers size={12} className="text-black" />
+              <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-olive to-olive-2 flex items-center justify-center">
+                <Layers size={12} className="text-white" />
               </div>
-              <span className="font-bold text-sm">landstack<span className="text-sage">.ai</span></span>
+              <span className="font-bold text-sm">landstack<span className="text-olive-2">.ai</span></span>
             </>
           )}
         </div>
         <div className="flex items-center gap-3">
           <div className="text-right hidden sm:block">
-            <p className="text-xs text-slate-300 font-bold print:text-black">Comparative Market Analysis</p>
-            <p className="text-[10px] text-slate-500 font-mono print:text-slate-700">
+            <p className="text-xs text-ink font-bold print:text-black">Comparative Market Analysis</p>
+            <p className="text-[10px] text-ink-3 font-mono print:text-slate-700">
               {cma.client_name ? `Prepared for ${cma.client_name} · ` : ''}
               {(cma as any).created_at ? new Date((cma as any).created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : ''}
             </p>
@@ -367,7 +374,7 @@ export default function ClientReport({ params }: ClientReportProps) {
           <button
             onClick={() => window.print()}
             title="Print or Save as PDF"
-            className="print:hidden p-2 rounded-lg text-slate-400 hover:text-white hover:bg-card border border-border hover:border-slate-400 transition-colors"
+            className="print:hidden p-2 rounded-lg text-ink-2 hover:text-ink hover:bg-cream-2 border border-beige hover:border-beige-2 transition-colors"
           >
             <Printer size={14} />
           </button>
@@ -389,7 +396,7 @@ export default function ClientReport({ params }: ClientReportProps) {
               Section 3: The Evidence (sortable comp cards + map sync)
               Section 4: Broker's Read (editorial)
               Section 5: Fine Print (methodology + disclosure + footer) */}
-        <div className="w-full md:w-[28rem] bg-panel border-l border-border flex flex-col overflow-y-auto print:full-width">
+        <div className="w-full md:w-[28rem] bg-white border-l border-beige flex flex-col overflow-y-auto print:full-width">
           {(() => {
             // === Shared computation (used across sections) ===
             const subjAcres = Number(cma.subject_acres) || 0;
@@ -431,8 +438,30 @@ export default function ClientReport({ params }: ClientReportProps) {
               const adj = adjMap[c.id] || {};
               return (adj.improvement_value != null) || ((c as any).improvement_value != null);
             });
+            // Broker's Opinion of Value — supports two modes:
+            //   'lump_sum'  → one number (broker_opinion_value is the total)
+            //   'breakdown' → land + improvement (broker_opinion_land_value
+            //                  + broker_opinion_improvement_value); total =
+            //                  sum of the two
+            // When mode is NULL, infer from which columns are populated.
             const brokerOpinion = (cma as any).broker_opinion_value;
-            const usingBrokerOpinion = brokerOpinion != null && Number(brokerOpinion) > 0;
+            const brokerLandValue = (cma as any).broker_opinion_land_value;
+            const brokerImprovementValue = (cma as any).broker_opinion_improvement_value;
+            const brokerMode = (cma as any).broker_opinion_mode as 'lump_sum' | 'breakdown' | null | undefined;
+
+            const landNum = brokerLandValue != null ? Number(brokerLandValue) : NaN;
+            const impNum = brokerImprovementValue != null ? Number(brokerImprovementValue) : NaN;
+            const lumpNum = brokerOpinion != null ? Number(brokerOpinion) : NaN;
+
+            // Resolve mode: explicit > inferred from data presence
+            const isBreakdown =
+              brokerMode === 'breakdown'
+              || (brokerMode == null && Number.isFinite(landNum) && landNum > 0);
+            const isLumpSum =
+              brokerMode === 'lump_sum'
+              || (brokerMode == null && !isBreakdown && Number.isFinite(lumpNum) && lumpNum > 0);
+            const usingBrokerOpinion = isBreakdown || isLumpSum;
+
             const usingLandOnly = hasAnyAdjustedComp && landOnly.length > 0;
 
             // Active range = land-only when adjustments exist, else all-in.
@@ -440,9 +469,33 @@ export default function ClientReport({ params }: ClientReportProps) {
             const rngMid = usingLandOnly ? lMid : aMid;
             const rngHigh = usingLandOnly ? lHigh : aHigh;
 
+            // Compute the total broker opinion + components
+            const opinionLand = Number.isFinite(landNum) && landNum > 0 ? landNum : 0;
+            const opinionImprovement = Number.isFinite(impNum) && impNum > 0 ? impNum : 0;
+            const opinionLumpSum = Number.isFinite(lumpNum) && lumpNum > 0 ? lumpNum : 0;
+            const opinionBreakdownTotal = opinionLand + opinionImprovement;
+
+            // Optional house itemization under Improvement Value. When the
+            // broker filled in House SQFT × $/SQFT (and/or additional vertical),
+            // the share report shows the itemization beneath the Improvement
+            // Value line. Otherwise just the lump improvement.
+            const houseSqftRaw = (cma as any).broker_opinion_house_sqft;
+            const housePpsfRaw = (cma as any).broker_opinion_house_ppsf;
+            const addlVertRaw = (cma as any).broker_opinion_additional_vertical;
+            const houseSqftN = houseSqftRaw != null ? Number(houseSqftRaw) : NaN;
+            const housePpsfN = housePpsfRaw != null ? Number(housePpsfRaw) : NaN;
+            const addlVertN = addlVertRaw != null ? Number(addlVertRaw) : NaN;
+            const houseSqftVal = Number.isFinite(houseSqftN) && houseSqftN > 0 ? houseSqftN : 0;
+            const housePpsfVal = Number.isFinite(housePpsfN) && housePpsfN > 0 ? housePpsfN : 0;
+            const additionalVerticalVal = Number.isFinite(addlVertN) && addlVertN > 0 ? addlVertN : 0;
+            const houseValue = (houseSqftVal > 0 && housePpsfVal > 0) ? houseSqftVal * housePpsfVal : 0;
+            const hasHouseItemization = houseValue > 0 || additionalVerticalVal > 0;
+
             const computedPpa = usingLandOnly ? lMid : aMid;
-            const suggestedValue = usingBrokerOpinion
-              ? Number(brokerOpinion)
+            const suggestedValue = isBreakdown
+              ? opinionBreakdownTotal
+              : isLumpSum
+              ? opinionLumpSum
               : computedPpa * subjAcres;
             const suggestedPpa = subjAcres > 0 ? suggestedValue / subjAcres : computedPpa;
 
@@ -490,16 +543,20 @@ export default function ClientReport({ params }: ClientReportProps) {
 
             return (
               <>
-                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============ */}
-                <div className="p-4 border-b border-border">
-                  <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-xl p-3 space-y-1">
+                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============
+                    Warm brick red dot + label matches the subject pin on the
+                    map. Calm white card on cream, vault-style restraint —
+                    color identity comes from the small red dot, not a tinted
+                    background. */}
+                <div className="p-4 border-b border-beige">
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                     <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 ring-2 ring-yellow-400/40" />
-                      <p className="text-[10px] font-bold text-yellow-300/90 uppercase tracking-wider">Your Property</p>
+                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
                     </div>
-                    <p className="text-sm font-bold text-white">{cma.subject_name}</p>
-                    <p className="text-xs text-slate-400 font-mono flex items-center gap-1">
-                      <MapPin size={10} className="text-slate-500" />
+                    <p className="text-sm font-semibold text-ink">{cma.subject_name}</p>
+                    <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
+                      <MapPin size={10} className="text-ink-3" />
                       {cma.subject_county}, {cma.subject_state} · {formatAcres(subjAcres)}
                     </p>
                   </div>
@@ -508,32 +565,32 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* ============ SECTION 2 — TOTAL PRICE PER ACRE (mirrors broker All-In) ============ */}
                 {allIn.length > 0 && (
                   <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-card border border-border rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-border bg-night/40 flex items-center justify-between">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Average Total Price Per Acre</p>
-                        <p className="text-[9px] text-slate-500 font-mono">{allIn.length} of {comps.length} comps</p>
+                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
+                        <p className="text-[9px] text-ink-3 font-mono">{allIn.length} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
-                            <td className="px-3 py-1.5 text-slate-400">Low</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(aLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(aLow * subjAcres)}</td>
+                            <td className="px-3 py-1.5 text-ink-2">Low</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aLow)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aLow * subjAcres)}</td>
                           </tr>
-                          <tr className="bg-emerald-400/5 border-t border-border">
-                            <td className="px-3 py-2 text-emerald-300 font-bold">Mid</td>
-                            <td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatPPA(aMid)}</td>
-                            <td className="text-right px-3 py-2 text-emerald-300 font-bold">{formatCurrency(aMid * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-2 text-olive-2 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(aMid)}</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(aMid * subjAcres)}</td>
                           </tr>
-                          <tr className="border-t border-border">
-                            <td className="px-3 py-1.5 text-slate-400">High</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(aHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(aHigh * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-1.5 text-ink-2">High</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aHigh)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aHigh * subjAcres)}</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed px-1">
+                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
                       Average sale price per acre across the comparable sales below.
                     </p>
                   </div>
@@ -542,78 +599,153 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* ============ SECTION 3 — ADJUSTED PRICE PER ACRE (LAND ONLY) ============ */}
                 {landOnly.length > 0 && hasAnyAdjustedComp && (
                   <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-card border border-amber-400/30 rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-amber-400/20 bg-amber-400/5 flex items-center justify-between">
-                        <p className="text-[10px] font-bold text-amber-300 uppercase tracking-wider">Average Adjusted Price Per Acre (Land Only)</p>
-                        <p className="text-[9px] text-slate-400 font-mono">{landOnly.length} of {comps.length} comps</p>
+                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
+                        <p className="text-[9px] text-ink-3 font-mono">{landOnly.length} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
-                            <td className="px-3 py-1.5 text-slate-400">Low</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(lLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(lLow * subjAcres)}</td>
+                            <td className="px-3 py-1.5 text-ink-2">Low</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lLow)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lLow * subjAcres)}</td>
                           </tr>
-                          <tr className="bg-amber-400/5 border-t border-amber-400/15">
-                            <td className="px-3 py-2 text-amber-200 font-bold">Mid</td>
-                            <td className="text-right px-3 py-2 text-amber-200 font-bold">{formatPPA(lMid)}</td>
-                            <td className="text-right px-3 py-2 text-amber-200 font-bold">{formatCurrency(lMid * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-2 text-amber-800 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(lMid)}</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(lMid * subjAcres)}</td>
                           </tr>
-                          <tr className="border-t border-amber-400/15">
-                            <td className="px-3 py-1.5 text-slate-400">High</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatPPA(lHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-slate-200">{formatCurrency(lHigh * subjAcres)}</td>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-1.5 text-ink-2">High</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lHigh)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lHigh * subjAcres)}</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
-                    <p className="text-[10px] text-slate-500 leading-relaxed px-1">
+                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
                       $/acre with structures (houses, barns) subtracted — a fairer comparison for raw land.
                     </p>
                   </div>
                 )}
 
-                {/* ============ SECTION 4 — BROKER'S RECOMMENDED VALUE (the headline) ============ */}
+                {/* ============ SECTION 4 — BROKER'S OPINION OF VALUE / RECOMMENDED VALUE ============
+                    Headline of the report. Three render modes:
+                      1. Breakdown — Land + Improvement itemization (broker chose this in workspace)
+                      2. Lump Sum — single number (the original render)
+                      3. Computed — falls back to CMA averages when broker hasn't set an opinion
+                    All three live on a calm white card with a soft cream-2 inner panel so the
+                    headline pops without screaming. */}
                 {suggestedValue > 0 && (
-                  <div className="mx-4 mb-4 p-4 rounded-2xl bg-gradient-to-br from-sage/15 via-sage/5 to-transparent border border-sage/30">
-                    <p className="text-[10px] font-bold text-sage uppercase tracking-[0.18em] mb-2">
+                  <div className="mx-4 mb-4 p-5 rounded-2xl bg-white border border-beige shadow-sm">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
                       {usingBrokerOpinion ? "Broker's Opinion of Value" : 'Recommended Value'}
                     </p>
-                    <p className="text-3xl font-bold text-white font-mono leading-none">
-                      {formatCurrency(suggestedValue)}
-                    </p>
-                    <p className="text-[11px] text-slate-400 font-mono mt-1.5">
-                      {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
-                    </p>
 
-                    {/* Range bar */}
+                    {isBreakdown ? (
+                      // Itemized: Land Value + Improvement Value = Total.
+                      // When house itemization is present (SQFT × $/SQFT and/or
+                      // additional vertical), show the breakdown nested under
+                      // Improvement Value so the client sees how it was derived.
+                      <div className="space-y-2.5">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <div>
+                            <p className="text-[12px] font-medium text-ink">Land Value</p>
+                            {subjAcres > 0 && opinionLand > 0 && (
+                              <p className="text-[10px] text-ink-3 font-mono tabular-nums mt-0.5">
+                                {formatPPA(opinionLand / subjAcres)} · {formatAcres(subjAcres)}
+                              </p>
+                            )}
+                          </div>
+                          <p className="text-base font-semibold text-ink font-mono tabular-nums">
+                            {formatCurrency(opinionLand)}
+                          </p>
+                        </div>
+                        {opinionImprovement > 0 && (
+                          <div className="space-y-1.5">
+                            <div className="flex items-baseline justify-between gap-3">
+                              <p className="text-[12px] font-medium text-ink">Improvement Value</p>
+                              <p className="text-base font-semibold text-ink font-mono tabular-nums">
+                                {formatCurrency(opinionImprovement)}
+                              </p>
+                            </div>
+                            {hasHouseItemization && (
+                              // Nested itemization under Improvement Value.
+                              // Indented with a left bar so the client visually
+                              // groups these rows under their parent total.
+                              <div className="ml-3 pl-3 border-l-2 border-beige space-y-1">
+                                {houseValue > 0 && (
+                                  <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[11px] text-ink-2">
+                                      House <span className="text-ink-3 font-mono tabular-nums">· {houseSqftVal.toLocaleString()} sqft × ${housePpsfVal.toLocaleString()}/sqft</span>
+                                    </p>
+                                    <p className="text-[11px] font-mono tabular-nums text-ink-2">
+                                      {formatCurrency(houseValue)}
+                                    </p>
+                                  </div>
+                                )}
+                                {additionalVerticalVal > 0 && (
+                                  <div className="flex items-baseline justify-between gap-3">
+                                    <p className="text-[11px] text-ink-2">Additional vertical improvements</p>
+                                    <p className="text-[11px] font-mono tabular-nums text-ink-2">
+                                      {formatCurrency(additionalVerticalVal)}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <div className="border-t border-beige pt-2.5 flex items-baseline justify-between gap-3">
+                          <p className="text-[12px] font-semibold text-ink-2 uppercase tracking-[0.06em]">Total</p>
+                          <p className="text-2xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
+                            {formatCurrency(suggestedValue)}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      // Single number — either broker's lump sum or computed from averages
+                      <>
+                        <p className="text-3xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
+                          {formatCurrency(suggestedValue)}
+                        </p>
+                        <p className="text-[11px] text-ink-2 font-mono tabular-nums mt-1.5">
+                          {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
+                        </p>
+                      </>
+                    )}
+
+                    {/* Range bar — always shown for context (Low / High range from comps) */}
                     {rngHigh > rngLow && (
                       <div className="mt-4">
                         <div className="relative mb-2">
-                          <div className="h-1.5 rounded-full bg-card border border-border overflow-hidden">
-                            <div className="h-full bg-gradient-to-r from-slate-600 via-sage/40 to-slate-600" />
+                          <div className="h-1.5 rounded-full bg-cream border border-beige overflow-hidden">
+                            <div className="h-full bg-gradient-to-r from-beige-2 via-olive/40 to-beige-2" />
                           </div>
                           <div
-                            className="absolute -top-1.5 w-4 h-4 rounded-full bg-sage border-2 border-night shadow-lg shadow-sage/40 -translate-x-1/2"
+                            className="absolute -top-1.5 w-4 h-4 rounded-full bg-olive border-2 border-white shadow-md -translate-x-1/2"
                             style={{ left: `${markerPct}%` }}
                             title={`Recommended ${formatPPA(suggestedPpa)}`}
                           />
                         </div>
                         <div className="flex justify-between text-[9px] font-mono">
                           <div>
-                            <p className="text-slate-500 uppercase tracking-wider">Low</p>
-                            <p className="text-slate-300">{formatCurrency(rngLow * subjAcres)}</p>
+                            <p className="text-ink-3 uppercase tracking-wider">Low</p>
+                            <p className="text-ink-2 tabular-nums">{formatCurrency(rngLow * subjAcres)}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-slate-500 uppercase tracking-wider">High</p>
-                            <p className="text-slate-300">{formatCurrency(rngHigh * subjAcres)}</p>
+                            <p className="text-ink-3 uppercase tracking-wider">High</p>
+                            <p className="text-ink-2 tabular-nums">{formatCurrency(rngHigh * subjAcres)}</p>
                           </div>
                         </div>
                       </div>
                     )}
 
-                    <p className="text-[11px] text-slate-300 leading-relaxed mt-4">
-                      {usingBrokerOpinion
+                    <p className="text-[11px] text-ink-2 leading-relaxed mt-4">
+                      {isBreakdown
+                        ? `Land valued at ${formatPPA(opinionLand / Math.max(subjAcres, 1))} based on the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below${opinionImprovement > 0 ? `; improvements valued separately at ${formatCurrency(opinionImprovement)}` : ''}.`
+                        : isLumpSum
                         ? `Broker's professional opinion of value, supported by the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below.`
                         : usingLandOnly
                         ? `Based on the land-only average across ${landOnly.length} of ${comps.length} comparable sales.`
@@ -625,22 +757,22 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* ============ SECTION 5 — COMPARABLE SALES (mirrors broker comp list) ============ */}
                 <div className="flex-1 px-4 pb-4">
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                      Comparable Sales <span className="text-slate-500">({comps.length})</span>
+                    <p className="text-[10px] font-bold text-ink-2 uppercase tracking-wider">
+                      Comparable Sales <span className="text-ink-3">({comps.length})</span>
                     </p>
                     <div className="relative">
-                      <ArrowUpDown size={10} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                      <ArrowUpDown size={10} className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-3 pointer-events-none" />
                       <select
                         value={sortBy}
                         onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-                        className="appearance-none bg-card border border-border rounded-lg pl-6 pr-6 py-1 text-[10px] font-bold text-slate-300 cursor-pointer hover:border-blue-400/40 transition-colors"
+                        className="appearance-none bg-cream border border-beige rounded-lg pl-6 pr-6 py-1 text-[10px] font-bold text-ink-2 cursor-pointer hover:border-blue-400/40 transition-colors"
                       >
                         <option value="default">Most relevant</option>
                         <option value="closest">Closest</option>
                         <option value="recent">Most recent</option>
                         <option value="ppa">Highest Total $/Ac</option>
                       </select>
-                      <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                      <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-3 pointer-events-none" />
                     </div>
                   </div>
 
@@ -678,52 +810,52 @@ export default function ClientReport({ params }: ClientReportProps) {
                               return next;
                             });
                           }}
-                          className={`bg-card border rounded-xl overflow-hidden transition-colors cursor-pointer ${
+                          className={`bg-cream border rounded-xl overflow-hidden transition-colors cursor-pointer ${
                             isHovered
                               ? 'border-blue-400 ring-2 ring-blue-400/30'
                               : selectedComp?.id === comp.id
                               ? 'border-blue-400'
-                              : 'border-border'
+                              : 'border-beige'
                           }`}
                         >
                           <div className="px-3 py-2">
                             <div className="flex items-center justify-between gap-2">
-                              <p className="text-xs font-bold text-white truncate flex-1 flex items-center gap-1.5">
+                              <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
                                 <span className="truncate">{comp.property_name || `${comp.county} County`}</span>
                                 {(comp as any).has_improvements && (
-                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
                                     IMPROVED
                                   </span>
                                 )}
                                 {(comp as any).irrigation === 'Strong' && (
-                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded flex-shrink-0">
+                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
                                     IRRIGATION
                                   </span>
                                 )}
                                 {isAdjusted && (
-                                  <span className="text-[9px] text-amber-400 font-mono flex-shrink-0">ADJ</span>
+                                  <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>
                                 )}
                                 {effSrc === 'agent_verified' && (
                                   <span
-                                    className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded flex-shrink-0"
+                                    className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
                                     title="An agent involved in this transaction verified the improvement value."
                                   >
                                     Agent-Verified
                                   </span>
                                 )}
                                 {isBrokerEstimated && (
-                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-400/15 border border-amber-400/30 text-amber-300 font-bold flex-shrink-0">
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-400/30 text-amber-700 font-bold flex-shrink-0">
                                     Broker-est
                                   </span>
                                 )}
                               </p>
                               <div className="flex items-center gap-2 flex-shrink-0">
                                 {dist != null && (
-                                  <p className="text-[10px] text-slate-500 font-mono">{dist.toFixed(1)} mi</p>
+                                  <p className="text-[10px] text-ink-3 font-mono">{dist.toFixed(1)} mi</p>
                                 )}
                                 <button
                                   onClick={(e) => { e.stopPropagation(); toggleExpanded(comp.id); }}
-                                  className="p-0.5 rounded text-slate-500 hover:text-white hover:bg-card transition-colors"
+                                  className="p-0.5 rounded text-ink-3 hover:text-ink hover:bg-cream-2 transition-colors"
                                   title={expandedCompIds.has(comp.id) ? 'Hide details' : 'Show details'}
                                 >
                                   <ChevronDown
@@ -736,20 +868,20 @@ export default function ClientReport({ params }: ClientReportProps) {
                             {/* 4-column grid (matches CMA workspace) */}
                             <div className="grid grid-cols-4 gap-2 mt-2 text-[10px] font-mono">
                               <div>
-                                <p className="text-slate-500 text-[9px] uppercase">Acres</p>
-                                <p className="text-white font-bold">{formatAcres(comp.acres)}</p>
+                                <p className="text-ink-3 text-[9px] uppercase">Acres</p>
+                                <p className="text-ink font-bold">{formatAcres(comp.acres)}</p>
                               </div>
                               <div>
-                                <p className="text-slate-500 text-[9px] uppercase">Total</p>
-                                <p className="text-white font-bold">{formatCurrency(comp.sale_price)}</p>
+                                <p className="text-ink-3 text-[9px] uppercase">Total</p>
+                                <p className="text-ink font-bold">{formatCurrency(comp.sale_price)}</p>
                               </div>
                               <div>
-                                <p className="text-slate-500 text-[9px] uppercase">Total $/Ac</p>
-                                <p className="text-emerald-400 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
+                                <p className="text-ink-3 text-[9px] uppercase">Total $/Ac</p>
+                                <p className="text-olive font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
                               </div>
                               <div>
-                                <p className="text-slate-500 text-[9px] uppercase">Adjusted $/Ac</p>
-                                <p className={`font-bold ${land != null ? 'text-amber-300' : 'text-slate-600'}`}>
+                                <p className="text-ink-3 text-[9px] uppercase">Adjusted $/Ac</p>
+                                <p className={`font-bold ${land != null ? 'text-amber-700' : 'text-ink-3'}`}>
                                   {land != null ? formatPPA(land) : '—'}
                                 </p>
                               </div>
@@ -760,15 +892,15 @@ export default function ClientReport({ params }: ClientReportProps) {
                               Order matches the broker's CMA workspace expanded view, with the
                               per-comp note pulled to the top so the client reads it first. */}
                           {expandedCompIds.has(comp.id) && (
-                            <div className="border-t border-border bg-night/40 px-3 py-2.5 space-y-1.5 text-[11px]">
+                            <div className="border-t border-beige bg-cream-2 px-3 py-2.5 space-y-1.5 text-[11px]">
                               {/* Per-comp broker note (if set). Quoted, blue-accented to mirror
                                   the overall Broker's Analysis section. */}
                               {adj.broker_note && adj.broker_note.trim().length > 0 && (
-                                <div className="pb-2 border-b border-border/60">
-                                  <p className="text-[10px] font-bold text-blue-300 uppercase tracking-wider mb-1">
+                                <div className="pb-2 border-b border-beige/60">
+                                  <p className="text-[10px] font-bold text-blue-700 uppercase tracking-wider mb-1">
                                     Broker's Note
                                   </p>
-                                  <p className="text-[12px] text-slate-200 leading-relaxed italic border-l-2 border-blue-400/40 pl-3 whitespace-pre-wrap">
+                                  <p className="text-[12px] text-ink leading-relaxed italic border-l-2 border-blue-400/40 pl-3 whitespace-pre-wrap">
                                     {adj.broker_note}
                                   </p>
                                 </div>
@@ -777,26 +909,26 @@ export default function ClientReport({ params }: ClientReportProps) {
                                   Same order as broker workspace + standalone Comp Detail. */}
                               {(comp as any).sale_date && (
                                 <div className="flex justify-between">
-                                  <span className="text-slate-500">Sale date</span>
-                                  <span className="text-slate-300 font-mono">{(comp as any).sale_date}</span>
+                                  <span className="text-ink-3">Sale date</span>
+                                  <span className="text-ink-2 font-mono">{(comp as any).sale_date}</span>
                                 </div>
                               )}
                               {(comp as any).address && (
                                 <div className="flex justify-between gap-2">
-                                  <span className="text-slate-500 flex-shrink-0">Address</span>
-                                  <span className="text-slate-300 text-right truncate">{(comp as any).address}</span>
+                                  <span className="text-ink-3 flex-shrink-0">Address</span>
+                                  <span className="text-ink-2 text-right truncate">{(comp as any).address}</span>
                                 </div>
                               )}
                               {(comp as any).has_improvements && (comp as any).improvements_value != null && (
                                 <div className="flex justify-between">
-                                  <span className="text-slate-500">Improvements</span>
-                                  <span className="text-blue-300">{formatCurrency((comp as any).improvements_value)} ECV</span>
+                                  <span className="text-ink-3">Improvements</span>
+                                  <span className="text-blue-700">{formatCurrency((comp as any).improvements_value)} ECV</span>
                                 </div>
                               )}
                               {(comp as any).improvements_notes && (
                                 <div className="pt-1">
-                                  <p className="text-slate-500 mb-0.5">Improvements notes</p>
-                                  <p className="text-slate-300 leading-relaxed">{(comp as any).improvements_notes}</p>
+                                  <p className="text-ink-3 mb-0.5">Improvements notes</p>
+                                  <p className="text-ink-2 leading-relaxed">{(comp as any).improvements_notes}</p>
                                 </div>
                               )}
 
@@ -849,9 +981,9 @@ export default function ClientReport({ params }: ClientReportProps) {
                                     : desc;
                                 const hasMore = preview !== desc && desc.length > preview.length;
                                 return (
-                                  <div className="pt-1.5 border-t border-border/60">
-                                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Description</p>
-                                    <p className="text-[11px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                  <div className="pt-1.5 border-t border-beige/60">
+                                    <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description</p>
+                                    <p className="text-[11px] text-ink-2 leading-relaxed whitespace-pre-wrap">
                                       {isExpanded ? desc : preview}
                                     </p>
                                     {hasMore && (
@@ -860,7 +992,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                                           e.stopPropagation();
                                           toggleDescription(comp.id);
                                         }}
-                                        className="mt-1 flex items-center gap-1 text-[10px] font-bold text-sage hover:text-sage2 transition-colors"
+                                        className="mt-1 flex items-center gap-1 text-[10px] font-bold text-olive-2 hover:text-olive transition-colors"
                                       >
                                         {isExpanded ? 'Show less' : 'Read more'}
                                       </button>
@@ -900,8 +1032,8 @@ export default function ClientReport({ params }: ClientReportProps) {
                                 };
 
                                 return (
-                                  <div className="pt-2 border-t border-border/60 space-y-2">
-                                    <p className="text-[10px] font-bold text-blue-300 uppercase tracking-wider">
+                                  <div className="pt-2 border-t border-beige/60 space-y-2">
+                                    <p className="text-[10px] font-bold text-blue-700 uppercase tracking-wider">
                                       Listing & Photos
                                     </p>
                                     {all.map((lnk: any, i: number) => {
@@ -913,11 +1045,11 @@ export default function ClientReport({ params }: ClientReportProps) {
                                           target="_blank"
                                           rel="noopener noreferrer"
                                           onClick={(e) => e.stopPropagation()}
-                                          className="block rounded-lg bg-card hover:bg-night border border-border hover:border-blue-400/50 transition-colors group overflow-hidden"
+                                          className="block rounded-lg bg-cream hover:bg-cream-2 border border-beige hover:border-blue-400/50 transition-colors group overflow-hidden"
                                         >
                                           <div className="flex items-stretch gap-3">
                                             {/* Bigger thumbnail — 96×72 so photos are visible */}
-                                            <div className="w-24 h-[72px] flex-shrink-0 bg-night relative overflow-hidden">
+                                            <div className="w-24 h-[72px] flex-shrink-0 bg-cream-2 relative overflow-hidden">
                                               <img
                                                 src={thumbFor(lnk)}
                                                 alt=""
@@ -931,20 +1063,20 @@ export default function ClientReport({ params }: ClientReportProps) {
                                             </div>
                                             <div className="flex-1 min-w-0 py-2 pr-3 flex flex-col justify-center">
                                               <div className="flex items-center gap-1.5 mb-1">
-                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-400/10 text-blue-300 border border-blue-400/20 font-bold uppercase tracking-wider flex-shrink-0">
+                                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-400/10 text-blue-700 border border-blue-400/20 font-bold uppercase tracking-wider flex-shrink-0">
                                                   {src.name}
                                                 </span>
                                                 {lnk.broker_verified && (
-                                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300 border border-emerald-400/20 font-bold flex-shrink-0">
+                                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-olive-tint text-olive-2 border border-olive-border font-bold flex-shrink-0">
                                                     ✓ Verified
                                                   </span>
                                                 )}
                                               </div>
-                                              <p className="text-[12px] text-slate-200 group-hover:text-white font-bold flex items-center gap-1.5">
+                                              <p className="text-[12px] text-ink group-hover:text-ink font-bold flex items-center gap-1.5">
                                                 {src.cta}
-                                                <ExternalLink size={11} className="text-slate-500 group-hover:text-blue-400 flex-shrink-0" />
+                                                <ExternalLink size={11} className="text-ink-3 group-hover:text-slate-blue-2 flex-shrink-0" />
                                               </p>
-                                              <p className="text-[10px] text-slate-500 mt-0.5 truncate">
+                                              <p className="text-[10px] text-ink-3 mt-0.5 truncate">
                                                 {lnk.url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 40)}
                                                 {lnk.url.length > 50 ? '…' : ''}
                                               </p>
@@ -964,7 +1096,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                                     e.stopPropagation();
                                     map.current?.flyTo({ center: [comp.longitude!, comp.latitude!], zoom: 14, duration: 800 });
                                   }}
-                                  className="text-[10px] text-blue-400 hover:text-blue-300 font-bold pt-1"
+                                  className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold pt-1"
                                 >
                                   View on map →
                                 </button>
@@ -973,15 +1105,15 @@ export default function ClientReport({ params }: ClientReportProps) {
                           )}
 
                           {/* Compact icon-only reactions */}
-                          <div className="flex items-center gap-1 px-3 py-1.5 border-t border-border bg-night/30">
-                            <span className="text-[9px] text-slate-500 uppercase tracking-wider mr-auto">Your take</span>
+                          <div className="flex items-center gap-1 px-3 py-1.5 border-t border-beige bg-cream-2">
+                            <span className="text-[9px] text-ink-3 uppercase tracking-wider mr-auto">Your take</span>
                             <button
                               onClick={(e) => { e.stopPropagation(); handleReaction(comp.id, 'relevant'); }}
                               title="Relevant"
                               className={`p-1.5 rounded-md transition-colors ${
                                 myReaction === 'relevant'
-                                  ? 'bg-emerald-400/20 text-emerald-400'
-                                  : 'text-slate-500 hover:text-emerald-400 hover:bg-emerald-400/10'
+                                  ? 'bg-olive-tint text-olive-2'
+                                  : 'text-ink-3 hover:text-olive-2 hover:bg-olive-tint'
                               }`}
                             >
                               <ThumbsUp size={12} />
@@ -991,8 +1123,8 @@ export default function ClientReport({ params }: ClientReportProps) {
                               title="I have a question"
                               className={`p-1.5 rounded-md transition-colors ${
                                 myReaction === 'question'
-                                  ? 'bg-amber-400/20 text-amber-400'
-                                  : 'text-slate-500 hover:text-amber-400 hover:bg-amber-400/10'
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'text-ink-3 hover:text-amber-700 hover:bg-amber-50'
                               }`}
                             >
                               <HelpCircle size={12} />
@@ -1002,8 +1134,8 @@ export default function ClientReport({ params }: ClientReportProps) {
                               title="Not comparable"
                               className={`p-1.5 rounded-md transition-colors ${
                                 myReaction === 'not_comparable'
-                                  ? 'bg-red-400/20 text-red-400'
-                                  : 'text-slate-500 hover:text-red-400 hover:bg-red-400/10'
+                                  ? 'bg-red-400/20 text-red-600'
+                                  : 'text-ink-3 hover:text-red-600 hover:bg-red-400/10'
                               }`}
                             >
                               <ThumbsDown size={12} />
@@ -1017,11 +1149,11 @@ export default function ClientReport({ params }: ClientReportProps) {
 
                 {/* ============ SECTION 6 — BROKER'S ANALYSIS ============ */}
                 {cma.broker_notes && (
-                  <div className="px-5 py-5 border-t border-border bg-card/30">
-                    <p className="text-[9px] font-bold text-blue-300 uppercase tracking-[0.18em] mb-3">
+                  <div className="px-5 py-5 border-t border-beige bg-cream/30">
+                    <p className="text-[9px] font-bold text-blue-700 uppercase tracking-[0.18em] mb-3">
                       Broker's Analysis
                     </p>
-                    <p className="text-sm text-slate-200 leading-relaxed italic border-l-2 border-blue-400/40 pl-4">
+                    <p className="text-sm text-ink leading-relaxed italic border-l-2 border-blue-400/40 pl-4">
                       {cma.broker_notes}
                     </p>
                   </div>
@@ -1031,13 +1163,13 @@ export default function ClientReport({ params }: ClientReportProps) {
                 {/* Doesn't expose the broker's email — feedback POSTs to a server
                     endpoint that stores the message; broker reads it in their
                     dashboard. Hidden in print (no point on paper). */}
-                <div className="px-5 py-5 border-t border-border print:hide">
+                <div className="px-5 py-5 border-t border-beige print:hide">
                   <button
                     onClick={() => {
                       setFeedbackOpen(true);
                       setFeedbackSent(false);
                     }}
-                    className="w-full py-3 bg-sage/10 hover:bg-sage/20 border border-sage/30 hover:border-sage/60 rounded-xl text-sage font-bold text-sm transition-colors flex items-center justify-center gap-2"
+                    className="w-full py-3 bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive rounded-xl text-olive-2 font-bold text-sm transition-colors flex items-center justify-center gap-2"
                   >
                     <MessageCircle size={14} />
                     Have questions? Reply to {broker?.full_name || 'your broker'}
@@ -1045,25 +1177,25 @@ export default function ClientReport({ params }: ClientReportProps) {
                 </div>
 
                 {/* ============ SECTION 7 — FINE PRINT ============ */}
-                <div className="px-4 py-4 border-t border-border space-y-3">
+                <div className="px-4 py-4 border-t border-beige space-y-3">
                   {/* Methodology (collapsible) */}
                   <button
                     onClick={() => setShowMethodology((v) => !v)}
-                    className="flex items-center justify-between w-full text-left text-[10px] font-bold text-slate-400 uppercase tracking-wider hover:text-slate-200 transition-colors"
+                    className="flex items-center justify-between w-full text-left text-[10px] font-bold text-ink-2 uppercase tracking-wider hover:text-ink transition-colors"
                   >
                     <span>How this value was calculated</span>
                     <ChevronDown size={12} className={`transition-transform ${showMethodology ? 'rotate-180' : ''}`} />
                   </button>
                   {showMethodology && (
-                    <div className="text-[11px] text-slate-400 leading-relaxed space-y-2 pl-1">
+                    <div className="text-[11px] text-ink-2 leading-relaxed space-y-2 pl-1">
                       <p>
                         We collect recent comparable sales near the subject property. For each, we calculate
-                        <span className="text-emerald-400 font-bold"> all-in $/acre</span> (sale price ÷ acres).
+                        <span className="text-olive font-bold"> all-in $/acre</span> (sale price ÷ acres).
                       </p>
                       {usingLandOnly && (
                         <p>
                           When a comp has improvements (a house, barn, etc.), we subtract the improvement value
-                          to get a <span className="text-amber-300 font-bold">land-only $/acre</span> — a fairer
+                          to get a <span className="text-amber-700 font-bold">land-only $/acre</span> — a fairer
                           comparison for raw land.
                         </p>
                       )}
@@ -1079,8 +1211,8 @@ export default function ClientReport({ params }: ClientReportProps) {
 
                   {/* Disclosure */}
                   {anyBrokerEstimate && (
-                    <div className="border border-amber-400/20 bg-amber-400/5 rounded-lg p-3">
-                      <p className="text-[10px] text-amber-200 leading-relaxed">
+                    <div className="border border-amber-400/20 bg-amber-50 rounded-lg p-3">
+                      <p className="text-[10px] text-amber-700 leading-relaxed">
                         <span className="font-bold uppercase tracking-wider mr-1">Disclosure:</span>
                         Improvement deductions marked <span className="font-bold">Broker-est</span> are
                         based on broker judgment and have not been verified by a licensed appraiser.
@@ -1090,8 +1222,8 @@ export default function ClientReport({ params }: ClientReportProps) {
                   )}
 
                   {/* Footer */}
-                  <p className="text-[10px] text-center text-slate-600 pt-2">
-                    Powered by <span className="text-sage font-bold">landstack.ai</span>
+                  <p className="text-[10px] text-center text-ink-3 pt-2">
+                    Powered by <span className="text-olive-2 font-bold">landstack.ai</span>
                   </p>
                 </div>
               </>
@@ -1105,19 +1237,19 @@ export default function ClientReport({ params }: ClientReportProps) {
           deferred — for now the broker sees messages in their dashboard. */}
       {feedbackOpen && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 print:hidden">
-          <div className="w-full max-w-md bg-panel border border-border rounded-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+          <div className="w-full max-w-md bg-white border border-beige rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-beige flex items-center justify-between">
               <div>
-                <p className="font-bold text-white text-sm">
+                <p className="font-bold text-ink text-sm">
                   {feedbackSent ? 'Message sent' : `Reply to ${broker?.full_name || 'your broker'}`}
                 </p>
                 {!feedbackSent && (
-                  <p className="text-[11px] text-slate-500 mt-0.5">Your broker will see this in their dashboard.</p>
+                  <p className="text-[11px] text-ink-3 mt-0.5">Your broker will see this in their dashboard.</p>
                 )}
               </div>
               <button
                 onClick={() => setFeedbackOpen(false)}
-                className="text-slate-500 hover:text-white"
+                className="text-ink-3 hover:text-ink"
               >
                 <X size={16} />
               </button>
@@ -1125,10 +1257,10 @@ export default function ClientReport({ params }: ClientReportProps) {
             {feedbackSent ? (
               <div className="px-5 py-6 text-center space-y-2">
                 <div className="text-3xl">✓</div>
-                <p className="text-sm text-slate-300">Thanks — your broker has been notified.</p>
+                <p className="text-sm text-ink-2">Thanks — your broker has been notified.</p>
                 <button
                   onClick={() => setFeedbackOpen(false)}
-                  className="mt-3 px-4 py-2 bg-sage/15 hover:bg-sage/25 border border-sage/40 rounded-lg text-sm font-bold text-sage"
+                  className="mt-3 px-4 py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border rounded-lg text-sm font-bold text-olive-2"
                 >
                   Close
                 </button>
@@ -1137,40 +1269,40 @@ export default function ClientReport({ params }: ClientReportProps) {
               <div className="px-5 py-4 space-y-3">
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Your name</p>
+                    <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Your name</p>
                     <input
                       type="text"
                       value={feedbackName}
                       onChange={(e) => setFeedbackName(e.target.value)}
                       placeholder="Optional"
-                      className="w-full bg-night border border-border focus:border-sage rounded-lg px-3 py-2 text-sm text-white outline-none"
+                      className="w-full bg-cream border border-beige focus:border-olive rounded-lg px-3 py-2 text-sm text-ink outline-none"
                     />
                   </div>
                   <div>
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Your email</p>
+                    <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Your email</p>
                     <input
                       type="email"
                       value={feedbackEmail}
                       onChange={(e) => setFeedbackEmail(e.target.value)}
                       placeholder="So broker can reply"
-                      className="w-full bg-night border border-border focus:border-sage rounded-lg px-3 py-2 text-sm text-white outline-none"
+                      className="w-full bg-cream border border-beige focus:border-olive rounded-lg px-3 py-2 text-sm text-ink outline-none"
                     />
                   </div>
                 </div>
                 <div>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Message</p>
+                  <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Message</p>
                   <textarea
                     value={feedbackMessage}
                     onChange={(e) => setFeedbackMessage(e.target.value)}
                     rows={5}
                     placeholder="What would you like to ask your broker about this report?"
-                    className="w-full bg-night border border-border focus:border-sage rounded-lg px-3 py-2 text-sm text-white outline-none resize-none"
+                    className="w-full bg-cream border border-beige focus:border-olive rounded-lg px-3 py-2 text-sm text-ink outline-none resize-none"
                   />
                 </div>
                 <div className="flex items-center justify-end gap-2 pt-1">
                   <button
                     onClick={() => setFeedbackOpen(false)}
-                    className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white transition-colors"
+                    className="px-4 py-2 text-xs font-bold text-ink-2 hover:text-ink transition-colors"
                   >
                     Cancel
                   </button>
@@ -1202,7 +1334,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                         setFeedbackSending(false);
                       }
                     }}
-                    className="px-4 py-2 bg-sage hover:bg-sage2 disabled:opacity-40 disabled:cursor-not-allowed text-black rounded-lg text-xs font-bold transition-colors"
+                    className="px-4 py-2 bg-olive hover:bg-olive-2 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold transition-colors"
                   >
                     {feedbackSending ? 'Sending…' : 'Send to broker'}
                   </button>

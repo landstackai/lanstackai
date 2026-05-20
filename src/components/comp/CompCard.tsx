@@ -15,10 +15,10 @@ interface CompCardProps {
 }
 
 const statusColors: Record<string, string> = {
-  Sold: 'bg-emerald-400/10 text-emerald-400',
-  Active: 'bg-blue-400/10 text-blue-400',
-  Pending: 'bg-amber-400/10 text-amber-400',
-  Withdrawn: 'bg-red-400/10 text-red-400',
+  Sold: 'bg-olive-tint text-olive-2',
+  Active: 'bg-slate-blue/10 text-slate-blue-2',
+  Pending: 'bg-amber-50 text-amber-800',
+  Withdrawn: 'bg-red-50 text-red-700',
 };
 
 export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected, onSelect }: CompCardProps) {
@@ -34,8 +34,8 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
   if (viewMode === 'list') {
     return (
       <div
-        className={`flex items-center gap-3 bg-card border rounded-xl p-3 transition-all group hover:border-sage/40 ${
-          isSelected ? 'border-sage bg-sage/5' : 'border-[#1f2d3d]'
+        className={`flex items-center gap-3 bg-cream border rounded-xl p-3 transition-all group hover:border-olive-border ${
+          isSelected ? 'border-olive bg-olive-tint' : 'border-[#1f2d3d]'
         } ${onSelect ? 'cursor-pointer' : ''}`}
         onClick={onSelect}
       >
@@ -47,11 +47,11 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-bold text-white truncate">
+            <span className="text-sm font-bold text-ink truncate">
               {comp.property_name || `${comp.county} County`}
             </span>
             {comp.is_draft && (
-              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-400/10 text-amber-400 rounded">DRAFT</span>
+              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded">DRAFT</span>
             )}
             {comp.has_improvements && (
               <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-400 rounded">IMPROVED</span>
@@ -61,7 +61,7 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
             )}
             {comp.improvement_source === 'agent_verified' && (
               <span
-                className="text-[9px] font-bold px-1.5 py-0.5 bg-emerald-400/10 border border-emerald-400/30 text-emerald-300 rounded"
+                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded"
                 title="An agent involved in this transaction verified the improvement value."
               >
                 AGENT-VERIFIED
@@ -69,21 +69,21 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
             )}
           </div>
           <div className="flex items-center gap-3 mt-0.5">
-            <span className="text-xs text-slate-500 flex items-center gap-1">
+            <span className="text-xs text-ink-3 flex items-center gap-1">
               <MapPin size={9} />{comp.county}, {comp.state}
             </span>
-            <span className="text-xs text-slate-500 font-mono">{formatAcres(comp.acres)}</span>
+            <span className="text-xs text-ink-3 font-mono">{formatAcres(comp.acres)}</span>
             {comp.sale_date && (
-              <span className="text-xs text-slate-600">{formatDate(comp.sale_date)}</span>
+              <span className="text-xs text-ink-3">{formatDate(comp.sale_date)}</span>
             )}
           </div>
         </div>
 
         <div className="text-right flex-shrink-0">
-          <div className="text-sm font-bold text-emerald-400 font-mono">
+          <div className="text-sm font-bold text-olive-2 font-mono">
             {formatPPA(displayPPA || 0)}
           </div>
-          <div className="text-xs text-slate-500 font-mono">
+          <div className="text-xs text-ink-3 font-mono">
             {formatCurrency(comp.sale_price)}
           </div>
         </div>
@@ -91,19 +91,19 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={(e) => { e.stopPropagation(); onEdit(); }}
-            className="p-1.5 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/5 text-ink-2 hover:text-ink transition-colors"
           >
             <Edit size={13} />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1.5 rounded-lg hover:bg-red-400/10 text-slate-400 hover:text-red-400 transition-colors"
+            className="p-1.5 rounded-lg hover:bg-red-400/10 text-ink-2 hover:text-red-500 transition-colors"
           >
             <Trash2 size={13} />
           </button>
         </div>
 
-        <VisibilityIcon size={10} className="text-slate-600 flex-shrink-0" />
+        <VisibilityIcon size={10} className="text-ink-3 flex-shrink-0" />
       </div>
     );
   }
@@ -111,8 +111,8 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
   // Grid view
   return (
     <div
-      className={`bg-card border rounded-xl p-4 transition-all hover:border-sage/40 ${
-        isSelected ? 'border-sage bg-sage/5' : 'border-[#1f2d3d]'
+      className={`bg-cream border rounded-xl p-4 transition-all hover:border-olive-border ${
+        isSelected ? 'border-olive bg-olive-tint' : 'border-[#1f2d3d]'
       } ${onSelect ? 'cursor-pointer' : ''}`}
       onClick={onSelect}
     >
@@ -122,21 +122,21 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
         </span>
         <div className="flex items-center gap-1">
           <button onClick={(e) => { e.stopPropagation(); onEdit(); }}
-            className="p-1 rounded hover:bg-white/5 text-slate-500 hover:text-white">
+            className="p-1 rounded hover:bg-white/5 text-ink-3 hover:text-ink">
             <Edit size={12} />
           </button>
           <button onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-red-400/10 text-slate-500 hover:text-red-400">
+            className="p-1 rounded hover:bg-red-400/10 text-ink-3 hover:text-red-500">
             <Trash2 size={12} />
           </button>
         </div>
       </div>
 
-      <h3 className="font-bold text-white text-sm mb-1 truncate">
+      <h3 className="font-bold text-ink text-sm mb-1 truncate">
         {comp.property_name || `${comp.county} County Ranch`}
       </h3>
 
-      <div className="flex items-center gap-1 text-xs text-slate-500 mb-3">
+      <div className="flex items-center gap-1 text-xs text-ink-3 mb-3">
         <MapPin size={10} />
         <span>{comp.county}, {comp.state}</span>
         <span className="mx-1">·</span>
@@ -145,17 +145,17 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
 
       <div className="flex items-end justify-between">
         <div>
-          <div className="text-lg font-bold text-emerald-400 font-mono leading-none">
+          <div className="text-lg font-bold text-olive-2 font-mono leading-none">
             {formatPPA(displayPPA || 0)}
           </div>
-          <div className="text-xs text-slate-500 font-mono mt-0.5">
+          <div className="text-xs text-ink-3 font-mono mt-0.5">
             {formatCurrency(comp.sale_price)}
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {comp.water === 'Strong' && <span className="text-blue-400 text-xs">💧</span>}
+          {comp.water === 'Strong' && <span className="text-slate-blue-2 text-xs">💧</span>}
           {comp.has_improvements && <span className="text-xs text-purple-400">🏠</span>}
-          <VisibilityIcon size={10} className="text-slate-600" />
+          <VisibilityIcon size={10} className="text-ink-3" />
         </div>
       </div>
     </div>

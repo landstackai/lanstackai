@@ -1,17 +1,26 @@
 'use client';
 
 /**
- * FeatureChip — displays a categorical comp attribute (water, road, dev,
- * minerals) as a small labeled box. When `strong` is true the chip is
- * "lit up" with emerald accents to signal a value-driving feature; when
- * the value is missing/None it renders muted so the eye skips it.
+ * FeatureChip — displays a categorical comp attribute as a small labeled
+ * box. `strong` means the value is in the top tier (Strong water, High
+ * road, etc.) and gets the olive treatment; weak/None values render muted.
  *
- * Visual language matches the Mid-row highlight in the averages tables.
+ * Restraint principle: olive is the SINGLE accent here. Earlier this file
+ * had per-attribute color coding (sky for water, purple for dev) but that
+ * pushed the right panel into "rainbow" territory — too many colors fight
+ * each other and the page no longer reads as a calm, Claude-like surface.
+ * Now: one accent (olive) when something matters, ink when it doesn't.
+ *
+ * The `attr` prop is preserved for backwards compatibility but ignored —
+ * keeps existing callers passing `attr="water"` etc. compiling.
  */
+type AttrKey = 'water' | 'road' | 'dev' | 'irrigation' | 'minerals';
+
 type FeatureChipProps = {
   label: string;
   value: string | null | undefined;
   strong?: boolean;
+  attr?: AttrKey;
 };
 
 export function FeatureChip({ label, value, strong = false }: FeatureChipProps) {
@@ -23,19 +32,19 @@ export function FeatureChip({ label, value, strong = false }: FeatureChipProps) 
   return (
     <div
       className={`rounded-lg p-2 border transition-colors ${
-        strong ? 'bg-emerald-400/10 border-emerald-400/30' : 'bg-card border-border'
+        strong ? 'bg-olive-tint border-olive-border' : 'bg-cream border-beige'
       }`}
     >
       <p
         className={`text-[9px] font-bold uppercase tracking-wider ${
-          strong ? 'text-emerald-300/80' : 'text-slate-500'
+          strong ? 'text-olive-2/80' : 'text-ink-3'
         }`}
       >
         {label}
       </p>
       <p
         className={`text-xs font-bold mt-0.5 ${
-          strong ? 'text-emerald-200' : isEmpty ? 'text-slate-500' : 'text-white'
+          strong ? 'text-olive-2' : isEmpty ? 'text-ink-3' : 'text-ink'
         }`}
       >
         {displayValue}
