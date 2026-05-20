@@ -13,6 +13,73 @@ import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
 import { TieredLoadingMessage } from '@/components/TieredLoadingMessage';
 
+// ─── Tier-field sanitizers ─────────────────────────────────────────────
+// The DB enforces CHECK constraints on these fields (migration 001):
+//   water         ∈ {'None', 'Seasonal', 'Strong'}
+//   road_frontage ∈ {'None', 'Low', 'Medium', 'High'}
+//   dev_potential ∈ {'Low', 'Medium', 'High'}
+//   irrigation    ∈ {'None', 'Medium', 'Strong'}  (migration 012)
+//
+// The AI sometimes returns appraisal-language ("Paved", "County Road",
+// "Excellent", "Limited") that doesn't match the schema enum — saves
+// then fail with "violates check constraint comps_X_check". These
+// helpers normalize raw AI output to a known-valid value, with
+// best-effort mappings from common appraisal phrasing.
+//
+// Unknown values fall back to the column's safest default (typically
+// 'None' for water/road/irrigation; 'Low' for dev_potential).
+
+function sanitizeWater(raw: unknown): 'None' | 'Seasonal' | 'Strong' {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return 'None';
+  if (/strong|live|year[- ]?round|perennial|active/.test(s)) return 'Strong';
+  if (/seasonal|wet[- ]?weather|intermittent|spring[- ]?fed/.test(s)) return 'Seasonal';
+  if (s === 'none' || s === 'no' || s === 'n/a' || /\bnone\b/.test(s)) return 'None';
+  // Title-case match (most common AI output)
+  if (s === 'strong') return 'Strong';
+  if (s === 'seasonal') return 'Seasonal';
+  return 'None';
+}
+
+function sanitizeRoadFrontage(raw: unknown): 'None' | 'Low' | 'Medium' | 'High' {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return 'None';
+  // Exact enum matches first
+  if (s === 'high') return 'High';
+  if (s === 'medium' || s === 'med') return 'Medium';
+  if (s === 'low') return 'Low';
+  if (s === 'none' || s === 'no' || s === 'n/a' || /\bnone\b/.test(s)) return 'None';
+  // Appraisal-language mappings
+  if (/paved|highway|state\s?road|good\s?frontage|excellent|interstate/.test(s)) return 'High';
+  if (/gravel|caliche|all[- ]weather|county\s?road|fair/.test(s)) return 'Medium';
+  if (/dirt|easement|limited|minimal|rough|poor/.test(s)) return 'Low';
+  return 'None';
+}
+
+function sanitizeDevPotential(raw: unknown): 'Low' | 'Medium' | 'High' {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return 'Low';
+  if (s === 'high') return 'High';
+  if (s === 'medium' || s === 'med') return 'Medium';
+  if (s === 'low') return 'Low';
+  if (/strong|excellent|prime|imminent/.test(s)) return 'High';
+  if (/moderate|fair|potential/.test(s)) return 'Medium';
+  if (/none|limited|remote|rural/.test(s)) return 'Low';
+  return 'Low';
+}
+
+function sanitizeIrrigation(raw: unknown): 'None' | 'Medium' | 'Strong' | null {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return null; // irrigation is nullable; preserve "unknown"
+  if (s === 'strong') return 'Strong';
+  if (s === 'medium' || s === 'med') return 'Medium';
+  if (s === 'none' || s === 'no' || s === 'n/a') return 'None';
+  if (/center\s?pivot|drip|active|strong/.test(s)) return 'Strong';
+  if (/some|partial|limited|medium/.test(s)) return 'Medium';
+  if (/dry|dryland|none/.test(s)) return 'None';
+  return null;
+}
+
 // Build a patch object that updates an existing comp with newly-extracted
 // data WITHOUT overwriting fields the broker has already verified.
 //
@@ -1114,12 +1181,13 @@ export default function ImportPage() {
       minerals_sold: (comp as any).minerals_sold,
       confirmation_source: (comp as any).confirmation_source,
       description: (comp as any).description,
-      water: (comp as any).water || 'None',
-      road_frontage: (comp as any).road_frontage || 'None',
+      // Tier fields — sanitize against schema CHECK constraints.
+      water: sanitizeWater((comp as any).water),
+      road_frontage: sanitizeRoadFrontage((comp as any).road_frontage),
       has_improvements: (comp as any).has_improvements || false,
       improvements_notes: (comp as any).improvements_notes,
       has_water_rights: (comp as any).has_water_rights ?? null,
-      irrigation: (comp as any).irrigation ?? null,
+      irrigation: sanitizeIrrigation((comp as any).irrigation),
       flood_plain: (comp as any).flood_plain ?? null,
       status: 'Sold',
       visibility: 'team',
@@ -1585,8 +1653,11 @@ export default function ImportPage() {
       minerals_sold: comp.minerals_sold,
       confirmation_source: comp.confirmation_source,
       description: comp.description,
-      water: comp.water || 'None',
-      road_frontage: comp.road_frontage || 'None',
+      // Tier fields — sanitize against schema CHECK constraints. AI
+      // can produce appraisal-language ("Paved", "County Road") that
+      // would otherwise reject the INSERT.
+      water: sanitizeWater(comp.water),
+      road_frontage: sanitizeRoadFrontage(comp.road_frontage),
       has_improvements: comp.has_improvements || false,
       improvements_notes: comp.improvements_notes,
       wildlife_notes: comp.wildlife_notes,
