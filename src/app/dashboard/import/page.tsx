@@ -1563,13 +1563,14 @@ export default function ImportPage() {
       acres_source: (comp as any).acres_source ?? null,
       sale_price: comp.sale_price || 0,
       sale_price_source: (comp as any).sale_price_source ?? null,
-      // Persist price-per-acre values directly — they were previously
-      // computed-on-display from sale_price/acres, but the AI extracts
-      // them as discrete fields. Persisting unlocks the math gate's
-      // self-check at query time + the source citation surface.
-      price_per_acre: (comp as any).price_per_acre ?? null,
+      // NOTE: price_per_acre and ppa_land_only are GENERATED ALWAYS AS
+      // (...) STORED columns in Postgres — see migration 001 lines 52
+      // and 68. The DB auto-computes them from sale_price + acres (and
+      // improvements_value for the land-only variant). We CANNOT INSERT
+      // values for them; Postgres rejects with "cannot insert a
+      // non-DEFAULT value into column 'price_per_acre'" even when the
+      // value is NULL. Only the *_source citation columns are writable.
       price_per_acre_source: (comp as any).price_per_acre_source ?? null,
-      ppa_land_only: (comp as any).ppa_land_only ?? null,
       ppa_land_only_source: (comp as any).ppa_land_only_source ?? null,
       improvements_value: comp.improvements_value,
       sale_date: comp.sale_date,
