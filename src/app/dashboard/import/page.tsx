@@ -1610,7 +1610,22 @@ export default function ImportPage() {
     }).select('id').single();
 
     if (error || !inserted) {
-      if (!silent) toast.error('Failed to save comp');
+      // Surface the actual Supabase error so we can diagnose missing
+      // columns / RLS issues / constraint failures from the toast directly
+      // instead of generic "Failed to save comp". Console.error always
+      // fires so the full error object is available in DevTools even
+      // when the toast is suppressed (silent=true for bulk saves).
+      const detail = error?.message
+        || (error as any)?.details
+        || (error as any)?.hint
+        || 'unknown error';
+      console.error('[saveComp] insert failed', {
+        error,
+        compPropertyName: comp.property_name,
+        county: comp.county,
+        hasLatLng: comp.latitude != null && comp.longitude != null,
+      });
+      if (!silent) toast.error(`Save failed: ${detail}`, { duration: 7000 });
       return null;
     } else {
       const label = comp.property_name || `${comp.county || 'Comp'}`;
