@@ -2853,6 +2853,12 @@ export default function MapPage() {
       //   - Cream-1 number text (reads on ANY satellite color)
       //   - Status-colored ring (subtle, brand-cohesive)
       //   - CMA-selected: brighter olive ring + soft glow
+      //
+      // NOTE: do NOT use `transform` in transitions or on hover — Mapbox
+      // owns the `transform` CSS property on marker DOM (it positions
+      // markers via translate). Setting transform: scale() wipes Mapbox's
+      // translate and the pin jumps to (0,0) for a frame. Hover affordance
+      // comes from border-color + box-shadow only.
       el.style.cssText = `
         background:${isCmaSelected ? '#332E29' : '#1A1815'};
         border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
@@ -2860,7 +2866,7 @@ export default function MapPage() {
         padding:4px 9px;font-family:'DM Mono',monospace;font-size:11px;
         font-weight:700;color:#F5F1E8;white-space:nowrap;cursor:pointer;
         box-shadow:${isCmaSelected ? '0 0 0 3px rgba(196,206,150,0.25), ' : ''}0 2px 10px rgba(0,0,0,.4);
-        transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s, transform .15s;
+        transition:border-color .15s, box-shadow .15s, padding .15s, font-size .15s;
       `;
       const total = comp.sale_price || 0;
       const formatPinAmount = (n: number) => {
@@ -2983,10 +2989,10 @@ export default function MapPage() {
       const isAiDimmed = aiHighlightedCompIds != null && !aiHighlightedCompIds.has(id);
 
       // Hide non-matching pins entirely when an AI filter is active.
-      // Hover / AI-highlight states use our brand palette: olive-light
-      // for hover (primary brand glow) and a slate-blue-light ring for
-      // AI-highlighted (matches the AI accent elsewhere). The pin TEXT
-      // always stays warm cream — only borders/glow change.
+      // Hover / AI-highlight states use box-shadow + border-color only.
+      // DO NOT touch el.style.transform — Mapbox uses it for positioning
+      // the marker (translate). Setting transform here would wipe the
+      // translate and snap the pin to (0,0) for a frame.
       el.style.display = isAiDimmed ? 'none' : '';
       if (isHovered) {
         el.style.boxShadow = '0 0 0 4px rgba(168,181,122,0.40), 0 8px 22px rgba(0,0,0,.55)';
@@ -2994,14 +3000,12 @@ export default function MapPage() {
         el.style.color = '#F5F1E8';
         el.style.zIndex = '10';
         el.style.opacity = '1';
-        el.style.transform = 'scale(1.04)';
       } else if (isAiHighlighted) {
         el.style.boxShadow = '0 0 0 4px rgba(123,159,206,0.32), 0 4px 14px rgba(0,0,0,.5)';
         el.style.borderColor = '#7B9FCE';
         el.style.color = '#F5F1E8';
         el.style.zIndex = '5';
         el.style.opacity = '1';
-        el.style.transform = 'scale(1)';
       } else {
         el.style.boxShadow = isCmaSelected
           ? '0 0 0 3px rgba(196,206,150,0.25), 0 2px 10px rgba(0,0,0,.4)'
@@ -3010,7 +3014,6 @@ export default function MapPage() {
         el.style.color = '#F5F1E8';
         el.style.zIndex = '1';
         el.style.opacity = '1';
-        el.style.transform = 'scale(1)';
       }
     });
   }, [hoveredCompId, aiHighlightedCompIds]);
