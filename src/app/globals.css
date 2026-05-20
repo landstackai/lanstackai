@@ -167,6 +167,22 @@ html, body {
   }
 }
 
+/* AI badge pulse — used on the "AI / Landstack AI" badge in the import
+   chat while the model is thinking. Faint olive halo + subtle opacity
+   dip so the broker's eye knows the assistant is alive and working,
+   not stuck. Matches the subjectPulse aesthetic so the visual language
+   reads as one app. */
+@keyframes aiThinking {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(107, 123, 63, 0);
+  }
+  50% {
+    opacity: 0.72;
+    box-shadow: 0 0 0 5px rgba(107, 123, 63, 0.18);
+  }
+}
+
 @keyframes slideUp {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
