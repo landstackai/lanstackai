@@ -1775,11 +1775,14 @@ export default function ImportPage() {
                   : 'bg-cream border border-beige text-ink'
               }`}>
                 {msg.role === 'assistant' && (
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <div className="w-4 h-4 rounded bg-olive-tint flex items-center justify-center">
-                      <span className="text-olive-2 text-[8px] font-bold">AI</span>
+                  // Landstack AI badge — bumped to a readable 28px so the
+                  // brand is recognizable in the chat stream. Bordered for
+                  // definition, olive accent for brand identity.
+                  <div className="flex items-center gap-2 mb-2.5">
+                    <div className="w-7 h-7 rounded-md bg-olive-tint border border-olive-border flex items-center justify-center shadow-sm">
+                      <span className="text-olive-2 text-[11px] font-bold tracking-tight">AI</span>
                     </div>
-                    <span className="text-xs font-semibold text-olive-2">Landstack AI</span>
+                    <span className="text-[13px] font-semibold text-olive-2 tracking-tight">Landstack AI</span>
                   </div>
                 )}
                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
@@ -2127,13 +2130,24 @@ export default function ImportPage() {
           ))}
 
           {loading && (
+            // Thinking state — the AI badge pulses with a soft olive halo
+            // so the broker's eye knows the assistant is alive and working.
+            // 32px so it reads instantly across the room; the aiThinking
+            // keyframe in globals.css drives the halo + opacity dip every
+            // 1.5s. Tier-1 brand voice + Tier-2 status sit alongside it.
             <div className="flex justify-start">
-              <div className="bg-cream border border-beige rounded-2xl px-4 py-3 max-w-[80%]">
+              <div className="bg-cream border border-beige rounded-2xl px-4 py-3.5 max-w-[80%] shadow-sm">
                 <div className="flex items-start gap-3">
-                  <div className="w-5 h-5 rounded bg-olive-tint flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <span className="text-olive-2 text-[8px] font-bold">AI</span>
+                  <div
+                    className="w-8 h-8 rounded-md bg-olive-tint border border-olive-border flex items-center justify-center flex-shrink-0 mt-0.5"
+                    style={{ animation: 'aiThinking 1.5s ease-in-out infinite' }}
+                  >
+                    <span className="text-olive-2 text-[12px] font-bold tracking-tight">AI</span>
                   </div>
-                  <TieredLoadingMessage status={loadingStatus} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] font-semibold text-olive-2 tracking-tight mb-0.5">Landstack AI</p>
+                    <TieredLoadingMessage status={loadingStatus} />
+                  </div>
                 </div>
               </div>
             </div>
