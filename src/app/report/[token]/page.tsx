@@ -149,15 +149,20 @@ export default function ClientReport({ params }: ClientReportProps) {
 
       const points: [number, number][] = [];
 
-      // Subject pin (yellow)
+      // Subject pin — warm brick red, matches the dashboard map's subject
+      // marker. Real-estate convention: red = "the one we're evaluating."
+      // Subtle pulse halo keyframe defined in globals.css (subjectPulse).
       const subjLat = (cma as any).subject_latitude;
       const subjLng = (cma as any).subject_longitude;
       if (subjLat != null && subjLng != null) {
         const sEl = document.createElement('div');
         sEl.style.cssText = `
-          background:#facc15;border:3px solid #0b0f14;border-radius:50%;
-          width:18px;height:18px;
-          box-shadow:0 0 0 3px #facc15aa, 0 4px 14px rgba(0,0,0,.6);
+          background:#C8503F;
+          border:3px solid #F5F1E8;
+          border-radius:50%;
+          width:20px;height:20px;
+          box-shadow:0 0 0 4px rgba(200,80,63,0.35), 0 6px 18px rgba(0,0,0,.5);
+          animation:subjectPulse 2.4s ease-in-out infinite;
         `;
         sEl.title = cma.subject_name || 'Subject';
         const sm = new mapboxgl.Marker({ element: sEl }).setLngLat([subjLng, subjLat]).addTo(map.current);
@@ -179,8 +184,8 @@ export default function ClientReport({ params }: ClientReportProps) {
             type: 'geojson',
             data: { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: subjBoundary }] },
           });
-          map.current.addLayer({ id: 'subj-fill', type: 'fill', source: 'subj-boundary', paint: { 'fill-color': '#facc15', 'fill-opacity': 0.15 } });
-          map.current.addLayer({ id: 'subj-line', type: 'line', source: 'subj-boundary', paint: { 'line-color': '#facc15', 'line-width': 2.5 } });
+          map.current.addLayer({ id: 'subj-fill', type: 'fill', source: 'subj-boundary', paint: { 'fill-color': '#C8503F', 'fill-opacity': 0.15 } });
+          map.current.addLayer({ id: 'subj-line', type: 'line', source: 'subj-boundary', paint: { 'line-color': '#C8503F', 'line-width': 2.5 } });
         }
       }
 
@@ -433,8 +438,30 @@ export default function ClientReport({ params }: ClientReportProps) {
               const adj = adjMap[c.id] || {};
               return (adj.improvement_value != null) || ((c as any).improvement_value != null);
             });
+            // Broker's Opinion of Value — supports two modes:
+            //   'lump_sum'  → one number (broker_opinion_value is the total)
+            //   'breakdown' → land + improvement (broker_opinion_land_value
+            //                  + broker_opinion_improvement_value); total =
+            //                  sum of the two
+            // When mode is NULL, infer from which columns are populated.
             const brokerOpinion = (cma as any).broker_opinion_value;
-            const usingBrokerOpinion = brokerOpinion != null && Number(brokerOpinion) > 0;
+            const brokerLandValue = (cma as any).broker_opinion_land_value;
+            const brokerImprovementValue = (cma as any).broker_opinion_improvement_value;
+            const brokerMode = (cma as any).broker_opinion_mode as 'lump_sum' | 'breakdown' | null | undefined;
+
+            const landNum = brokerLandValue != null ? Number(brokerLandValue) : NaN;
+            const impNum = brokerImprovementValue != null ? Number(brokerImprovementValue) : NaN;
+            const lumpNum = brokerOpinion != null ? Number(brokerOpinion) : NaN;
+
+            // Resolve mode: explicit > inferred from data presence
+            const isBreakdown =
+              brokerMode === 'breakdown'
+              || (brokerMode == null && Number.isFinite(landNum) && landNum > 0);
+            const isLumpSum =
+              brokerMode === 'lump_sum'
+              || (brokerMode == null && !isBreakdown && Number.isFinite(lumpNum) && lumpNum > 0);
+            const usingBrokerOpinion = isBreakdown || isLumpSum;
+
             const usingLandOnly = hasAnyAdjustedComp && landOnly.length > 0;
 
             // Active range = land-only when adjustments exist, else all-in.
@@ -442,9 +469,17 @@ export default function ClientReport({ params }: ClientReportProps) {
             const rngMid = usingLandOnly ? lMid : aMid;
             const rngHigh = usingLandOnly ? lHigh : aHigh;
 
+            // Compute the total broker opinion + components
+            const opinionLand = Number.isFinite(landNum) && landNum > 0 ? landNum : 0;
+            const opinionImprovement = Number.isFinite(impNum) && impNum > 0 ? impNum : 0;
+            const opinionLumpSum = Number.isFinite(lumpNum) && lumpNum > 0 ? lumpNum : 0;
+            const opinionBreakdownTotal = opinionLand + opinionImprovement;
+
             const computedPpa = usingLandOnly ? lMid : aMid;
-            const suggestedValue = usingBrokerOpinion
-              ? Number(brokerOpinion)
+            const suggestedValue = isBreakdown
+              ? opinionBreakdownTotal
+              : isLumpSum
+              ? opinionLumpSum
               : computedPpa * subjAcres;
             const suggestedPpa = subjAcres > 0 ? suggestedValue / subjAcres : computedPpa;
 
@@ -492,15 +527,19 @@ export default function ClientReport({ params }: ClientReportProps) {
 
             return (
               <>
-                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============ */}
+                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============
+                    Warm brick red dot + label matches the subject pin on the
+                    map. Calm white card on cream, vault-style restraint —
+                    color identity comes from the small red dot, not a tinted
+                    background. */}
                 <div className="p-4 border-b border-beige">
-                  <div className="bg-yellow-400/10 border border-yellow-400/30 rounded-xl p-3 space-y-1">
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                     <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 ring-2 ring-yellow-400/40" />
-                      <p className="text-[10px] font-bold text-yellow-700 uppercase tracking-wider">Your Property</p>
+                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
                     </div>
-                    <p className="text-sm font-bold text-ink">{cma.subject_name}</p>
-                    <p className="text-xs text-ink-2 font-mono flex items-center gap-1">
+                    <p className="text-sm font-semibold text-ink">{cma.subject_name}</p>
+                    <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
                       <MapPin size={10} className="text-ink-3" />
                       {cma.subject_county}, {cma.subject_state} · {formatAcres(subjAcres)}
                     </p>
@@ -575,20 +614,64 @@ export default function ClientReport({ params }: ClientReportProps) {
                   </div>
                 )}
 
-                {/* ============ SECTION 4 — BROKER'S RECOMMENDED VALUE (the headline) ============ */}
+                {/* ============ SECTION 4 — BROKER'S OPINION OF VALUE / RECOMMENDED VALUE ============
+                    Headline of the report. Three render modes:
+                      1. Breakdown — Land + Improvement itemization (broker chose this in workspace)
+                      2. Lump Sum — single number (the original render)
+                      3. Computed — falls back to CMA averages when broker hasn't set an opinion
+                    All three live on a calm white card with a soft cream-2 inner panel so the
+                    headline pops without screaming. */}
                 {suggestedValue > 0 && (
-                  <div className="mx-4 mb-4 p-4 rounded-2xl bg-gradient-to-br from-olive/15 via-olive/5 to-transparent border border-olive-border">
-                    <p className="text-[10px] font-bold text-olive-2 uppercase tracking-[0.18em] mb-2">
+                  <div className="mx-4 mb-4 p-5 rounded-2xl bg-white border border-beige shadow-sm">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
                       {usingBrokerOpinion ? "Broker's Opinion of Value" : 'Recommended Value'}
                     </p>
-                    <p className="text-3xl font-bold text-ink font-mono leading-none">
-                      {formatCurrency(suggestedValue)}
-                    </p>
-                    <p className="text-[11px] text-ink-2 font-mono mt-1.5">
-                      {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
-                    </p>
 
-                    {/* Range bar */}
+                    {isBreakdown ? (
+                      // Itemized: Land Value + Improvement Value = Total. Each row is plain
+                      // ink; only the final TOTAL gets the olive accent to anchor the eye.
+                      <div className="space-y-2.5">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <div>
+                            <p className="text-[12px] font-medium text-ink">Land Value</p>
+                            {subjAcres > 0 && opinionLand > 0 && (
+                              <p className="text-[10px] text-ink-3 font-mono tabular-nums mt-0.5">
+                                {formatPPA(opinionLand / subjAcres)} · {formatAcres(subjAcres)}
+                              </p>
+                            )}
+                          </div>
+                          <p className="text-base font-semibold text-ink font-mono tabular-nums">
+                            {formatCurrency(opinionLand)}
+                          </p>
+                        </div>
+                        {opinionImprovement > 0 && (
+                          <div className="flex items-baseline justify-between gap-3">
+                            <p className="text-[12px] font-medium text-ink">Improvement Value</p>
+                            <p className="text-base font-semibold text-ink font-mono tabular-nums">
+                              {formatCurrency(opinionImprovement)}
+                            </p>
+                          </div>
+                        )}
+                        <div className="border-t border-beige pt-2.5 flex items-baseline justify-between gap-3">
+                          <p className="text-[12px] font-semibold text-ink-2 uppercase tracking-[0.06em]">Total</p>
+                          <p className="text-2xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
+                            {formatCurrency(suggestedValue)}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      // Single number — either broker's lump sum or computed from averages
+                      <>
+                        <p className="text-3xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
+                          {formatCurrency(suggestedValue)}
+                        </p>
+                        <p className="text-[11px] text-ink-2 font-mono tabular-nums mt-1.5">
+                          {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
+                        </p>
+                      </>
+                    )}
+
+                    {/* Range bar — always shown for context (Low / High range from comps) */}
                     {rngHigh > rngLow && (
                       <div className="mt-4">
                         <div className="relative mb-2">
@@ -596,7 +679,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                             <div className="h-full bg-gradient-to-r from-beige-2 via-olive/40 to-beige-2" />
                           </div>
                           <div
-                            className="absolute -top-1.5 w-4 h-4 rounded-full bg-olive border-2 border-white shadow-lg shadow-olive/40 -translate-x-1/2"
+                            className="absolute -top-1.5 w-4 h-4 rounded-full bg-olive border-2 border-white shadow-md -translate-x-1/2"
                             style={{ left: `${markerPct}%` }}
                             title={`Recommended ${formatPPA(suggestedPpa)}`}
                           />
@@ -604,18 +687,20 @@ export default function ClientReport({ params }: ClientReportProps) {
                         <div className="flex justify-between text-[9px] font-mono">
                           <div>
                             <p className="text-ink-3 uppercase tracking-wider">Low</p>
-                            <p className="text-ink-2">{formatCurrency(rngLow * subjAcres)}</p>
+                            <p className="text-ink-2 tabular-nums">{formatCurrency(rngLow * subjAcres)}</p>
                           </div>
                           <div className="text-right">
                             <p className="text-ink-3 uppercase tracking-wider">High</p>
-                            <p className="text-ink-2">{formatCurrency(rngHigh * subjAcres)}</p>
+                            <p className="text-ink-2 tabular-nums">{formatCurrency(rngHigh * subjAcres)}</p>
                           </div>
                         </div>
                       </div>
                     )}
 
                     <p className="text-[11px] text-ink-2 leading-relaxed mt-4">
-                      {usingBrokerOpinion
+                      {isBreakdown
+                        ? `Land valued at ${formatPPA(opinionLand / Math.max(subjAcres, 1))} based on the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below${opinionImprovement > 0 ? `; improvements valued separately at ${formatCurrency(opinionImprovement)}` : ''}.`
+                        : isLumpSum
                         ? `Broker's professional opinion of value, supported by the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below.`
                         : usingLandOnly
                         ? `Based on the land-only average across ${landOnly.length} of ${comps.length} comparable sales.`

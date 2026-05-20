@@ -184,12 +184,30 @@ export default function MapPage() {
   // Per-comp expand-description toggle (CMA workspace expanded view)
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
 
-  // Broker Opinion of Value: dual-input (per-acre + total) with bidirectional
-  // calculation. Stored as a single broker_opinion_value (total) on the CMA.
-  // We hold local string inputs so the user's typing isn't clobbered by the
-  // optimistic state round-trip.
+  // Broker Opinion of Value — supports TWO modes:
+  //
+  //   'lump_sum' (default) — broker enters a single number for the
+  //     property's value via $/Acre OR Total. The two are linked: edit
+  //     either, the other auto-calculates from subject acres. Stored
+  //     in cmas.broker_opinion_value (total $).
+  //
+  //   'breakdown' — broker breaks the value into Land + Improvement.
+  //     Inputs: Land $/Acre (or Land Total — linked), and a separate
+  //     Improvement Value lump sum. Total = Land + Improvement (auto).
+  //     Stored in cmas.broker_opinion_land_value (land total $) +
+  //     cmas.broker_opinion_improvement_value (improvement $).
+  //
+  // Flipping modes preserves entered values where possible so brokers
+  // don't lose work mid-CMA.
+  type BovMode = 'lump_sum' | 'breakdown';
+  const [bovMode, setBovMode] = useState<BovMode>('lump_sum');
+  // Lump-sum mode inputs (legacy fields, kept for that mode)
   const [bovPpaInput, setBovPpaInput] = useState<string>('');
   const [bovTotalInput, setBovTotalInput] = useState<string>('');
+  // Breakdown-mode inputs
+  const [bovLandPpaInput, setBovLandPpaInput] = useState<string>('');
+  const [bovLandTotalInput, setBovLandTotalInput] = useState<string>('');
+  const [bovImprovementInput, setBovImprovementInput] = useState<string>('');
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -1885,19 +1903,49 @@ export default function MapPage() {
     );
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync the dual BOV inputs when a different CMA loads. We bind to id only
-  // (not broker_opinion_value) so live typing isn't overwritten by the
-  // optimistic state round-trip during keystrokes.
+  // Sync ALL BOV inputs when a different CMA loads. Mode is inferred from
+  // which columns are populated:
+  //   broker_opinion_land_value set → breakdown mode
+  //   else → lump_sum mode (existing column, default)
+  // Bind to id only so live typing isn't clobbered by optimistic state
+  // round-trips during keystrokes.
   useEffect(() => {
-    const total = (viewingCMA as any)?.broker_opinion_value;
-    const acres = Number(viewingCMA?.subject_acres) || 0;
-    const totalNum = total != null ? Number(total) : NaN;
-    if (Number.isFinite(totalNum) && totalNum > 0) {
-      setBovTotalInput(String(Math.round(totalNum)));
-      setBovPpaInput(acres > 0 ? String(Math.round(totalNum / acres)) : '');
+    const cma: any = viewingCMA;
+    const acres = Number(cma?.subject_acres) || 0;
+    const lumpTotal = cma?.broker_opinion_value;
+    const landTotal = cma?.broker_opinion_land_value;
+    const improvement = cma?.broker_opinion_improvement_value;
+    const storedMode = cma?.broker_opinion_mode as BovMode | null | undefined;
+
+    // Lump-sum fields
+    const lumpNum = lumpTotal != null ? Number(lumpTotal) : NaN;
+    if (Number.isFinite(lumpNum) && lumpNum > 0) {
+      setBovTotalInput(String(Math.round(lumpNum)));
+      setBovPpaInput(acres > 0 ? String(Math.round(lumpNum / acres)) : '');
     } else {
       setBovTotalInput('');
       setBovPpaInput('');
+    }
+
+    // Breakdown fields
+    const landNum = landTotal != null ? Number(landTotal) : NaN;
+    if (Number.isFinite(landNum) && landNum > 0) {
+      setBovLandTotalInput(String(Math.round(landNum)));
+      setBovLandPpaInput(acres > 0 ? String(Math.round(landNum / acres)) : '');
+    } else {
+      setBovLandTotalInput('');
+      setBovLandPpaInput('');
+    }
+    const impNum = improvement != null ? Number(improvement) : NaN;
+    setBovImprovementInput(Number.isFinite(impNum) && impNum > 0 ? String(Math.round(impNum)) : '');
+
+    // Mode resolution: explicit > inferred > default
+    if (storedMode === 'lump_sum' || storedMode === 'breakdown') {
+      setBovMode(storedMode);
+    } else if (Number.isFinite(landNum) && landNum > 0) {
+      setBovMode('breakdown');
+    } else {
+      setBovMode('lump_sum');
     }
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -4104,102 +4152,278 @@ export default function MapPage() {
                 </div>
               )}
 
-              {/* Broker Opinion of Value — dual input.
-                  Edit either field; the partner field auto-calculates from
-                  the subject acreage. The total ($) is what gets persisted to
-                  cmas.broker_opinion_value, which the share report reads. */}
+              {/* ─── Broker Opinion of Value ──────────────────────────
+                  Two modes, broker picks which way they're thinking about
+                  the property:
+
+                    Lump Sum (default):    single $/Acre OR Total number
+                    Land + Improvements:   Land $/Ac + Improvement lump
+
+                  Lump sum saves to broker_opinion_value (total $).
+                  Breakdown saves to broker_opinion_land_value +
+                  broker_opinion_improvement_value, plus
+                  broker_opinion_value as the computed sum (backwards
+                  compatibility for read paths). broker_opinion_mode
+                  stores the active mode so the share report knows
+                  which way to render. */}
               {(() => {
-                const saveBov = async (total: number | null) => {
-                  setViewingCMA((prev: any) => (prev ? { ...prev, broker_opinion_value: total } : prev));
+                // Save helper — writes all relevant columns for the active mode
+                // and clears the inactive-mode columns. Optimistic local update
+                // so the right-panel re-renders instantly.
+                const saveBov = async (patch: {
+                  mode: BovMode | null;
+                  total: number | null;
+                  landValue: number | null;
+                  improvementValue: number | null;
+                }) => {
+                  setViewingCMA((prev: any) => prev ? ({
+                    ...prev,
+                    broker_opinion_mode: patch.mode,
+                    broker_opinion_value: patch.total,
+                    broker_opinion_land_value: patch.landValue,
+                    broker_opinion_improvement_value: patch.improvementValue,
+                  }) : prev);
                   const { error } = await supabase
                     .from('cmas')
-                    .update({ broker_opinion_value: total })
+                    .update({
+                      broker_opinion_mode: patch.mode,
+                      broker_opinion_value: patch.total,
+                      broker_opinion_land_value: patch.landValue,
+                      broker_opinion_improvement_value: patch.improvementValue,
+                    })
                     .eq('id', viewingCMA.id);
                   if (error) toast.error(error.message);
                 };
 
+                // ─── LUMP SUM handlers ───
                 const onPpaChange = (raw: string) => {
                   setBovPpaInput(raw);
                   const ppa = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(ppa) || ppa <= 0) {
                     setBovTotalInput('');
-                    saveBov(null);
+                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const total = ppa * subjAcres;
                     setBovTotalInput(String(Math.round(total)));
-                    saveBov(total);
+                    saveBov({ mode: 'lump_sum', total, landValue: null, improvementValue: null });
                   }
                 };
-
                 const onTotalChange = (raw: string) => {
                   setBovTotalInput(raw);
                   const total = raw === '' ? NaN : Number(raw);
                   if (!Number.isFinite(total) || total <= 0) {
                     setBovPpaInput('');
-                    saveBov(null);
+                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
                     return;
                   }
                   if (subjAcres > 0) {
                     const ppa = total / subjAcres;
                     setBovPpaInput(String(Math.round(ppa)));
-                    saveBov(total);
+                  }
+                  saveBov({ mode: 'lump_sum', total, landValue: null, improvementValue: null });
+                };
+
+                // ─── BREAKDOWN handlers ───
+                // commitBreakdown(landValue, improvement) writes both fields
+                // and a computed `total` for read-side backwards compat.
+                const commitBreakdown = (landValue: number | null, improvement: number | null) => {
+                  const land = landValue || 0;
+                  const imp = improvement || 0;
+                  const total = (land + imp) > 0 ? (land + imp) : null;
+                  saveBov({
+                    mode: 'breakdown',
+                    total,
+                    landValue: landValue,
+                    improvementValue: improvement,
+                  });
+                };
+                const onLandPpaChange = (raw: string) => {
+                  setBovLandPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovLandTotalInput('');
+                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
+                    commitBreakdown(null, Number.isFinite(imp as number) ? imp : null);
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const landValue = ppa * subjAcres;
+                    setBovLandTotalInput(String(Math.round(landValue)));
+                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
+                    commitBreakdown(landValue, Number.isFinite(imp as number) ? imp : null);
+                  }
+                };
+                const onLandTotalChange = (raw: string) => {
+                  setBovLandTotalInput(raw);
+                  const landValue = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(landValue) || landValue <= 0) {
+                    setBovLandPpaInput('');
+                    const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
+                    commitBreakdown(null, Number.isFinite(imp as number) ? imp : null);
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const ppa = landValue / subjAcres;
+                    setBovLandPpaInput(String(Math.round(ppa)));
+                  }
+                  const imp = bovImprovementInput === '' ? null : Number(bovImprovementInput);
+                  commitBreakdown(landValue, Number.isFinite(imp as number) ? imp : null);
+                };
+                const onImprovementChange = (raw: string) => {
+                  setBovImprovementInput(raw);
+                  const imp = raw === '' ? NaN : Number(raw);
+                  const land = bovLandTotalInput === '' ? null : Number(bovLandTotalInput);
+                  commitBreakdown(
+                    Number.isFinite(land as number) ? land : null,
+                    Number.isFinite(imp) ? imp : null,
+                  );
+                };
+
+                // ─── Mode switching — preserve values across switches ───
+                const switchToLumpSum = () => {
+                  // If broker had Land + Improvement values, sum them to the lump total
+                  const land = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
+                  const imp = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
+                  const combined = (Number.isFinite(land) ? land : 0) + (Number.isFinite(imp) ? imp : 0);
+                  setBovMode('lump_sum');
+                  if (combined > 0) {
+                    setBovTotalInput(String(Math.round(combined)));
+                    if (subjAcres > 0) setBovPpaInput(String(Math.round(combined / subjAcres)));
+                    saveBov({ mode: 'lump_sum', total: combined, landValue: null, improvementValue: null });
                   } else {
-                    saveBov(total);
+                    saveBov({ mode: 'lump_sum', total: null, landValue: null, improvementValue: null });
+                  }
+                };
+                const switchToBreakdown = () => {
+                  // If broker had a lump total, transfer it to Land Value (assume no improvement yet)
+                  const lump = bovTotalInput === '' ? 0 : Number(bovTotalInput);
+                  setBovMode('breakdown');
+                  if (lump > 0) {
+                    setBovLandTotalInput(String(Math.round(lump)));
+                    if (subjAcres > 0) setBovLandPpaInput(String(Math.round(lump / subjAcres)));
+                    saveBov({ mode: 'breakdown', total: lump, landValue: lump, improvementValue: null });
+                  } else {
+                    saveBov({ mode: 'breakdown', total: null, landValue: null, improvementValue: null });
                   }
                 };
 
-                const ppaPlaceholder = landMid > 0
-                  ? Math.round(landMid).toString()
-                  : allInMid > 0
-                  ? Math.round(allInMid).toString()
-                  : '';
-                const totalPlaceholder = landOnlyValue > 0
-                  ? Math.round(landOnlyValue).toString()
-                  : allInValue > 0
-                  ? Math.round(allInValue).toString()
-                  : '';
+                // Placeholders pull from CMA averages so the broker sees
+                // suggested numbers if they leave fields blank.
+                const ppaPlaceholder = landMid > 0 ? Math.round(landMid).toString()
+                  : allInMid > 0 ? Math.round(allInMid).toString() : '';
+                const totalPlaceholder = landOnlyValue > 0 ? Math.round(landOnlyValue).toString()
+                  : allInValue > 0 ? Math.round(allInValue).toString() : '';
+
+                // Computed total in breakdown mode (live, from local inputs)
+                const breakdownLandNum = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
+                const breakdownImpNum = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
+                const breakdownTotal = (Number.isFinite(breakdownLandNum) ? breakdownLandNum : 0)
+                                     + (Number.isFinite(breakdownImpNum) ? breakdownImpNum : 0);
+
+                // Shared input class
+                const inputCls = 'w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono tabular-nums outline-none transition-all';
 
                 return (
-                  <div className="bg-cream border border-beige rounded-xl p-3 space-y-2">
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-bold text-olive-2 uppercase tracking-wider">Your Opinion of Value</p>
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
                       <p className="text-[9px] text-ink-3">optional</p>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {/* $/Acre */}
-                      <div>
-                        <p className="text-[9px] text-ink-3 uppercase tracking-wider mb-0.5">$/Acre</p>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                          <input
-                            type="number"
-                            placeholder={ppaPlaceholder}
-                            value={bovPpaInput}
-                            onChange={(e) => onPpaChange(e.target.value)}
-                            className="w-full bg-cream border border-beige focus:border-olive rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono outline-none"
-                          />
-                        </div>
-                      </div>
-                      {/* Total */}
-                      <div>
-                        <p className="text-[9px] text-ink-3 uppercase tracking-wider mb-0.5">Total</p>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                          <input
-                            type="number"
-                            placeholder={totalPlaceholder}
-                            value={bovTotalInput}
-                            onChange={(e) => onTotalChange(e.target.value)}
-                            className="w-full bg-cream border border-beige focus:border-olive rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono outline-none"
-                          />
-                        </div>
-                      </div>
+
+                    {/* Mode toggle — Lump Sum vs Land + Improvements */}
+                    <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
+                      <button
+                        type="button"
+                        onClick={switchToLumpSum}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'lump_sum'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Lump Sum
+                      </button>
+                      <button
+                        type="button"
+                        onClick={switchToBreakdown}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'breakdown'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Land + Improvements
+                      </button>
                     </div>
-                    <p className="text-[10px] text-ink-3 leading-relaxed">
-                      Edit either field — the other auto-calculates from {formatAcres(subjAcres)}. Leave blank to use the computed averages.
-                    </p>
+
+                    {bovMode === 'lump_sum' ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        {/* Land Value group */}
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Land Value</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={ppaPlaceholder} value={bovLandPpaInput} onChange={(e) => onLandPpaChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={totalPlaceholder} value={bovLandTotalInput} onChange={(e) => onLandTotalChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-ink-3 leading-relaxed">
+                            Edit either — auto-calculates from {formatAcres(subjAcres)}.
+                          </p>
+                        </div>
+
+                        {/* Improvement Value */}
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
+                          <div className="relative">
+                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                            <input type="number" placeholder="0" value={bovImprovementInput} onChange={(e) => onImprovementChange(e.target.value)} className={inputCls} />
+                          </div>
+                        </div>
+
+                        {/* Total Opinion — computed sum */}
+                        <div className="border-t border-beige pt-2 flex items-baseline justify-between">
+                          <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Opinion</p>
+                          <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
+                            {breakdownTotal > 0 ? formatCurrency(breakdownTotal) : '—'}
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </div>
                 );
               })()}
