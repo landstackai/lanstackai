@@ -5,6 +5,8 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
+import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
+import { properCase } from '@/lib/utils/properCase';
 import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
@@ -4107,6 +4109,50 @@ export default function MapPage() {
         const landOnlyValue = landMid * subjAcres;
         const landOnlySampleSize = landOnlyPpas.length;
 
+        // ─── Shared cmaMath helper: Total + Land-Only + Adjusted ────
+        // The legacy bindings above (allInPpas/landOnlyPpas) still feed
+        // the BOV editor placeholders, but for the three average cards
+        // we delegate to the shared helper so the workspace, list, and
+        // printable report all agree. See src/lib/utils/cmaMath.ts for
+        // the canonical definitions.
+        //
+        // Three flavors:
+        //   TOTAL      sale_price / acres
+        //   LAND-ONLY  (sale_price - improvements_value) / acres
+        //              — only counts comps with improvements_value SET,
+        //                so sample size can be < cmaComps.length.
+        //   ADJUSTED   uses broker draft override > improvement_value >
+        //              improvements_value. Comps without any improvement
+        //              still contribute (eff=0), so n usually = total n.
+        const cmaAverages = computeCmaAverages(
+          cmaComps as any,
+          compAdjustmentsDraft
+        );
+        const cmaSubjectTotals = subjectTotals(cmaAverages, subjAcres);
+        const renderRowsForAvg = (
+          avg: typeof cmaAverages.total,
+          totals: typeof cmaSubjectTotals.total,
+          midClass: string,
+        ) => (
+          <>
+            <tr>
+              <td className="px-3 py-1.5 text-ink-2">Low</td>
+              <td className="text-right px-3 py-1.5 text-ink tabular-nums">{avg.low != null ? formatPPA(avg.low) : '—'}</td>
+              <td className="text-right px-3 py-1.5 text-ink tabular-nums">{totals.low != null ? formatCurrency(totals.low) : '—'}</td>
+            </tr>
+            <tr className="border-t border-beige/60">
+              <td className={`px-3 py-2 font-semibold ${midClass}`}>Mid</td>
+              <td className={`text-right px-3 py-2 font-semibold tabular-nums ${midClass}`}>{avg.mid != null ? formatPPA(avg.mid) : '—'}</td>
+              <td className={`text-right px-3 py-2 font-semibold tabular-nums ${midClass}`}>{totals.mid != null ? formatCurrency(totals.mid) : '—'}</td>
+            </tr>
+            <tr className="border-t border-beige/60">
+              <td className="px-3 py-1.5 text-ink-2">High</td>
+              <td className="text-right px-3 py-1.5 text-ink tabular-nums">{avg.high != null ? formatPPA(avg.high) : '—'}</td>
+              <td className="text-right px-3 py-1.5 text-ink tabular-nums">{totals.high != null ? formatCurrency(totals.high) : '—'}</td>
+            </tr>
+          </>
+        );
+
         const toggleExpanded = (id: string) => {
           setExpandedCompIds(prev => {
             const next = new Set(prev);
@@ -4120,7 +4166,7 @@ export default function MapPage() {
             <div className="flex items-center justify-between px-4 py-3 border-b border-beige flex-shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <FileText size={14} className="text-slate-blue-2 flex-shrink-0" />
-                <span className="font-bold text-sm truncate">{viewingCMA.subject_name}</span>
+                <span className="font-bold text-sm truncate">{properCase(viewingCMA.subject_name)}</span>
               </div>
               <button onClick={exitCmaWorkspace} className="text-ink-3 hover:text-ink flex-shrink-0">
                 <X size={16} />
@@ -4130,15 +4176,18 @@ export default function MapPage() {
             <div className="p-4 space-y-4">
               {/* Subject summary — warm brick red to match the map pin
                   + boundary. Same visual identity across all three
-                  surfaces: pin on map, boundary on map, badge here. */}
+                  surfaces: pin on map, boundary on map, badge here.
+                  Subject name pretty-printed (CARAWAY PARTNERS LTD →
+                  Caraway Partners LTD) so the workspace doesn't read
+                  like a CAD parcel record. */}
               <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
                   <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
                 </div>
-                <p className="text-sm font-semibold text-ink">{viewingCMA.subject_name}</p>
+                <p className="text-sm font-semibold text-ink">{properCase(viewingCMA.subject_name)}</p>
                 <p className="text-xs text-ink-2 font-mono tabular-nums">
-                  {viewingCMA.subject_county}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
+                  {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
                 </p>
               </div>
 
@@ -4184,39 +4233,60 @@ export default function MapPage() {
                 </button>
               </div>
 
-              {/* All-in average */}
-              {/* CMA averages — vault tile pattern. White cards on cream,
-                  ink labels, ONE colored numeral on the Mid row to tell
-                  the story (olive for the headline $/Ac, amber for the
-                  land-only adjustment). No tinted backgrounds; the color
-                  cue is in the numeral alone. */}
-              {allInPpas.length > 0 && (
+              {/* CMA averages — three stacked cards, each a different
+                  read on the comp set:
+                    1. TOTAL      headline market signal
+                    2. LAND-ONLY  what raw dirt is worth (strict subset)
+                    3. ADJUSTED   broker's market read with overrides
+
+                  Color cues on the Mid numeral only — olive for total
+                  (the headline), slate-blue for land-only (the dirt
+                  story), amber for adjusted (the broker's analysis).
+                  Sample size per card surfaces when a particular
+                  flavor has fewer comps contributing than the others. */}
+              {cmaAverages.total.n > 0 && (
                 <div className="bg-white border border-beige rounded-xl overflow-hidden">
                   <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
                     <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaComps.length} of {cmaComps.length} comps</p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.total.n} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInLow * subjAcres)}</td></tr>
-                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-olive-2 font-semibold">Mid</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(allInMid)}</td><td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(allInValue)}</td></tr>
-                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(allInHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(allInHigh * subjAcres)}</td></tr>
+                      {renderRowsForAvg(cmaAverages.total, cmaSubjectTotals.total, 'text-olive-2')}
                     </tbody>
                   </table>
                 </div>
               )}
 
-              {landOnlyPpas.length > 0 && (
+              {cmaAverages.landOnly.n > 0 && (
                 <div className="bg-white border border-beige rounded-xl overflow-hidden">
                   <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
-                    <p className="text-[9px] text-ink-3 font-mono">{landOnlySampleSize} of {cmaComps.length} comps</p>
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Land-Only Price Per Acre
+                      <span className="text-ink-3 normal-case tracking-normal"> (improved comps)</span>
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.landOnly.n} of {cmaComps.length} comps</p>
                   </div>
                   <table className="w-full text-xs">
                     <tbody className="font-mono">
-                      <tr><td className="px-3 py-1.5 text-ink-2">Low</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landLow)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landLow * subjAcres)}</td></tr>
-                      <tr className="border-t border-beige/60"><td className="px-3 py-2 text-amber-800 font-semibold">Mid</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(landMid)}</td><td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(landOnlyValue)}</td></tr>
-                      <tr className="border-t border-beige/60"><td className="px-3 py-1.5 text-ink-2">High</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(landHigh)}</td><td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(landHigh * subjAcres)}</td></tr>
+                      {renderRowsForAvg(cmaAverages.landOnly, cmaSubjectTotals.landOnly, 'text-slate-blue-2')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {cmaAverages.adjusted.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Adjusted Price Per Acre
+                      <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.adjusted.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.adjusted, cmaSubjectTotals.adjusted, 'text-amber-800')}
                     </tbody>
                   </table>
                 </div>
