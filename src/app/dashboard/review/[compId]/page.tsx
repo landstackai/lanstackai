@@ -37,7 +37,7 @@ import * as turf from '@turf/turf';
 import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2, Sparkles, ExternalLink, Link as LinkIcon, Trash2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { buildOwnerSearchChips } from '@/lib/utils/abbreviateOwner';
-import { useMapHover } from '@/lib/hooks/useMapHover';
+import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
 import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
@@ -568,10 +568,13 @@ export default function ReviewPage() {
     const layerIds = [
       'txgio-parcels-raster',
       'nearby-parcels-fill',
+      'nearby-parcels-labels',
       'owner-matches-fill',
       'owner-matches-line',
+      'owner-matches-labels',
       'selected-parcels-fill',
       'selected-parcels-line',
+      'selected-parcels-labels',
     ];
     const sourceIds = ['txgio-parcels-raster', 'nearby-parcels-fill', 'owner-matches-fill', 'selected-parcels-fill'];
     for (const id of layerIds) tryRemove('layer', id);
@@ -608,6 +611,31 @@ export default function ReviewPage() {
         source: 'nearby-parcels-fill',
         paint: { 'fill-color': '#000000', 'fill-opacity': 0 },
       });
+      // Always-visible owner-name labels on every nearby parcel.
+      // Shows up at zoom 14.5+ where the parcel grid is readable;
+      // Mapbox de-collides automatically so overlapping labels get
+      // hidden rather than overlapping into illegibility. Cream halo
+      // makes the warm-ink text readable on any satellite backdrop.
+      m.addLayer({
+        id: 'nearby-parcels-labels',
+        type: 'symbol',
+        source: 'nearby-parcels-fill',
+        minzoom: 14.5,
+        layout: {
+          'text-field': ['coalesce', ['get', 'owner_name'], ''],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14.5, 9, 17, 12] as any,
+          'text-anchor': 'center',
+          'text-max-width': 10,
+          'text-allow-overlap': false,
+          'text-ignore-placement': false,
+          'symbol-placement': 'point',
+        },
+        paint: {
+          'text-color': '#1F1F1C',
+          'text-halo-color': '#F5F1E8',
+          'text-halo-width': 1.5,
+        },
+      });
 
       // Owner-search match overlay. Starts EMPTY; the dedicated effect
       // (below) sets data when the broker runs a search. Sky-blue chosen
@@ -632,6 +660,28 @@ export default function ReviewPage() {
         source: 'owner-matches-fill',
         paint: { 'line-color': '#38bdf8', 'line-width': 2, 'line-dasharray': [3, 2] },
       });
+      // Owner-search match labels — sky-blue text + cream halo so
+      // they read as "this is a SEARCH MATCH" distinct from generic
+      // nearby parcels (ink + cream halo).
+      m.addLayer({
+        id: 'owner-matches-labels',
+        type: 'symbol',
+        source: 'owner-matches-fill',
+        minzoom: 14,
+        layout: {
+          'text-field': ['coalesce', ['get', 'owner_name'], ''],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 13] as any,
+          'text-anchor': 'center',
+          'text-max-width': 10,
+          'text-allow-overlap': false,
+          'symbol-placement': 'point',
+        },
+        paint: {
+          'text-color': '#075985', // sky-800
+          'text-halo-color': '#F5F1E8',
+          'text-halo-width': 2,
+        },
+      });
 
       // Selected source starts EMPTY — Effect 2 populates it via setData
       m.addSource('selected-parcels-fill', {
@@ -649,6 +699,29 @@ export default function ReviewPage() {
         type: 'line',
         source: 'selected-parcels-fill',
         paint: { 'line-color': '#facc15', 'line-width': 2.5 },
+      });
+      // Selected-parcel labels — darker ink color over the gold fill
+      // (text on yellow needs deep contrast). Slightly larger size
+      // than nearby labels since selected parcels are the ones the
+      // broker is actively committing to.
+      m.addLayer({
+        id: 'selected-parcels-labels',
+        type: 'symbol',
+        source: 'selected-parcels-fill',
+        minzoom: 14,
+        layout: {
+          'text-field': ['coalesce', ['get', 'owner_name'], ''],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 13] as any,
+          'text-anchor': 'center',
+          'text-max-width': 10,
+          'text-allow-overlap': false,
+          'symbol-placement': 'point',
+        },
+        paint: {
+          'text-color': '#1F1F1C',
+          'text-halo-color': '#facc15',
+          'text-halo-width': 2,
+        },
       });
     } catch (e: any) {
       console.error('[review] failed to add reselect layers:', e?.message);
@@ -687,12 +760,31 @@ export default function ReviewPage() {
     m.on('mouseenter', 'owner-matches-fill', handleEnter);
     m.on('mouseleave', 'owner-matches-fill', handleLeave);
 
-    // NOTE: parcel hover tooltips removed per broker feedback - owner
-    // names cluttered the map. Brokers find what they need via the
-    // owner-search input + the side-panel parcel list; on-map hover
-    // doesn't add enough signal to justify the visual noise. The
-    // boundary hover ("Boundary · NNN ac" on the gold comp polygon)
-    // is kept since it surfaces info that isn't visible elsewhere.
+    // Parcel hover tooltips — restored per broker feedback. Always-
+    // visible labels surface the owner name even when you're not
+    // hovering, but the hover tooltip adds richer detail (full
+    // owner string in case it was truncated, acreage, click hint).
+    // The .parcel-hover-popup CSS class in globals.css carries the
+    // warm-dark + frosted-blur styling shared with map page popups.
+    const formatParcelAcres = (raw: any): string => {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) return '—';
+      return `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })}± ac`;
+    };
+    const buildParcelTooltip = (f: any): string => {
+      const owner = escHtml(f?.properties?.owner_name || 'Unknown owner');
+      const acres = formatParcelAcres(f?.properties?.gis_area);
+      return (
+        `<div style="font-weight:600;line-height:1.25;">${owner}</div>` +
+        `<div style="opacity:0.7;font-size:10px;margin-top:2px;">${acres}</div>`
+      );
+    };
+    const detachNearbyHover = attachHoverPopup(m, 'nearby-parcels-fill', buildParcelTooltip);
+    const detachOwnerHover = attachHoverPopup(m, 'owner-matches-fill', buildParcelTooltip);
+    const detachSelectedHover = attachHoverPopup(m, 'selected-parcels-fill', (f) => (
+      `<div style="font-weight:600;line-height:1.25;">${escHtml(f?.properties?.owner_name || 'Unknown owner')}</div>` +
+      `<div style="opacity:0.7;font-size:10px;margin-top:2px;">${formatParcelAcres(f?.properties?.gis_area)} · click to remove</div>`
+    ));
 
     return () => {
       // The captured `m` reference may point to a destroyed map by the
@@ -705,6 +797,9 @@ export default function ReviewPage() {
       try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
       try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
       try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
+      try { detachNearbyHover?.(); } catch {}
+      try { detachOwnerHover?.(); } catch {}
+      try { detachSelectedHover?.(); } catch {}
       try { removeHoverPopup(); } catch {}
       try { if (m.getCanvas()) m.getCanvas().style.cursor = ''; } catch {}
       for (const id of layerIds) tryRemove('layer', id);
