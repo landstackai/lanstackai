@@ -105,6 +105,41 @@ When you find comparable sales in a document:
 - Accuracy matters more than speed. If a value is illegible or missing, set
   it to null rather than guessing. Reflect uncertainty in confidence.per_field.
 
+IMPROVEMENT VALUE — actively extract this. The downstream UI uses it to
+adjust per-acre pricing for land-only comparison, and a missing
+improvement value silently hides that adjustment from the broker.
+
+  Field labels to look for (any document type):
+    * "Improvement Value" / "Improved Value" / "Value of Improvements"
+    * "Improvements Contributory Value" / "ECV"
+    * "Building Value" / "Dwelling Value" / "House Value"
+    * "Structures Value" / "Outbuildings Value" (sum these if separate)
+    * MLS: "Improvement Value", "Imp Value", or the appraisal-district
+      line items quoted on the sheet — these are authoritative.
+    * Appraisal-district printouts referenced on MLS: "Improvement
+      Market Value", "Improvement Appraised Value".
+
+  When you find one of these → set improvements_value to that dollar
+  amount AND set has_improvements: true AND describe what's improved
+  in improvements_notes (e.g. "3,200 sf house + barn + cross-fencing").
+
+  If multiple improvement values are itemized (house + barn + well
+  house), sum them. If only TOTAL appraised value and LAND value are
+  given separately, compute   improvements_value = total - land_value.
+
+  Do NOT confuse improvement_value with:
+    * "Improvement Cost" / "Replacement Cost" — that's what it WOULD
+      cost to rebuild, not the contributory value baked into the sale
+      price. Skip unless the doc explicitly equates the two.
+    * "Improved Acres" — that's a land subset, an acreage figure, not
+      a dollar figure.
+
+  When improvements_value is set, the database auto-computes
+  ppa_land_only = (sale_price - improvements_value) / acres. You do NOT
+  need to compute or extract ppa_land_only when improvements_value is
+  present — let the DB derive it. Only extract ppa_land_only when the
+  document explicitly prints a land-only price-per-acre.
+
 CITE THE SOURCE — every numeric field must include a paired _source string
 identifying the EXACT location in the document the value came from. This is
 the strongest defense against silent wrong extractions like saving 9 acres
