@@ -652,60 +652,17 @@ export default function ClientReport({ params }: ClientReportProps) {
                   </div>
                 )}
 
-                {/* Adjusted card gate: show whenever the adjusted
-                    averages actually differ from Total. The legacy
-                    `hasAnyAdjustedComp` flag only checked the singular
-                    `improvement_value` field + broker draft overrides
-                    — it ignored the `improvements_value` (plural) field
-                    that import-extraction populates, so post-MLS-import
-                    CMAs were hiding the Adjusted card even when the
-                    helper had real numbers. The diff check below is
-                    the actual question we care about: "is Adjusted
-                    showing the client something distinct from Total?"
-                    If yes, render. If no (vacant-land-only CMA), hide
-                    as redundant. */}
-                {(() => {
-                  const a = sharedAverages.adjusted;
-                  const t = sharedAverages.total;
-                  if (a.n === 0) return false;
-                  if (a.mid == null || t.mid == null) return false;
-                  // 1¢/ac threshold — anything below that is rounding noise.
-                  return Math.abs(a.mid - t.mid) > 1;
-                })() && (
-                  <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                          Average Adjusted Price Per Acre
-                          <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
-                        </p>
-                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.adjusted.n} of {comps.length} comps</p>
-                      </div>
-                      <table className="w-full text-xs">
-                        <tbody className="font-mono">
-                          <tr>
-                            <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.adjusted.low != null ? formatPPA(sharedAverages.adjusted.low) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.adjusted.low != null ? formatCurrency(sharedSubjectTotals.adjusted.low) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-2 text-amber-800 font-semibold">Mid</td>
-                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{sharedAverages.adjusted.mid != null ? formatPPA(sharedAverages.adjusted.mid) : '—'}</td>
-                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{sharedSubjectTotals.adjusted.mid != null ? formatCurrency(sharedSubjectTotals.adjusted.mid) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.adjusted.high != null ? formatPPA(sharedAverages.adjusted.high) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.adjusted.high != null ? formatCurrency(sharedSubjectTotals.adjusted.high) : '—'}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
-                      $/acre after broker's per-comp adjustments for terrain, road frontage, water, etc.
-                    </p>
-                  </div>
-                )}
+                {/* Adjusted card intentionally NOT rendered on the
+                    shareable report. It conveys the same idea as
+                    Land-Only (subtract improvements) and the two
+                    landed within a few hundred $/ac of each other in
+                    practice — confusing for clients reading three
+                    near-identical "dirt-only" numbers. The broker's
+                    per-comp overrides are still factored into each
+                    comp card's "Adjusted $/Ac" column below, and the
+                    workspace keeps all three cards for diagnostic
+                    use. Revisit this if there's broker demand for
+                    surfacing the override-aggregate to clients. */}
 
                 {/* ============ SECTION 4 — BROKER'S OPINION OF VALUE / RECOMMENDED VALUE ============
                     Headline of the report. Three render modes:
