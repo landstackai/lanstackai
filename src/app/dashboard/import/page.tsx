@@ -733,6 +733,64 @@ async function autoLocateInBrowserLogged(comp: any) {
   return result;
 }
 
+// ─── Address-geocode fallback ──────────────────────────────────────────
+// When parcel-level auto-locate strikes out (no owner-name match in the
+// county roll), forward-geocode the comp's address as a best-effort
+// "pin somewhere useful" so the broker isn't left with a vault entry
+// at (null, null).
+//
+// Real-world trigger: MLS sold sheets where grantor/grantee are blank
+// (or were correctly null'd because the doc only listed agents). We
+// have a street address, so we can at least drop a pin at the building.
+// The broker enters review mode and reselects parcels from there.
+//
+// Hard rules:
+//   - Requires a real street address (must contain a digit). City-only
+//     strings like "Pearsall, TX" would just geocode to a centroid and
+//     mislead the broker — don't bother.
+//   - Confidence is always "low" — we have no boundary, no parcel match,
+//     and no acreage verification. Broker MUST refine.
+//   - Returns the same shape as autoLocateInBrowser so call sites can
+//     treat it identically.
+async function geocodeAddressFallback(comp: any): Promise<{
+  latitude: number;
+  longitude: number;
+  parcel_id: string | null;
+  geometry: any;
+  match_reason: string;
+  match_confidence: 'high' | 'medium' | 'low';
+} | null> {
+  const address = typeof comp?.address === 'string' ? comp.address.trim() : '';
+  // No address OR address has no number → skip. Mapbox would happily
+  // resolve "Pearsall, TX" to a city centroid; that's worse than no pin
+  // because it implies precision we don't have.
+  if (!address || !/\d/.test(address) || address.length < 6) return null;
+  try {
+    const { geocodeAddress } = await import('@/lib/utils/geocodePlace');
+    const hit = await geocodeAddress(address);
+    if (!hit) return null;
+    return {
+      latitude: hit.lat,
+      longitude: hit.lng,
+      parcel_id: null,
+      geometry: null,
+      match_reason: 'pinned to street address — verify boundary',
+      match_confidence: 'low',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Combined locate: parcel-level first (best), address geocode second
+// (good enough). Both call sites in the import pipeline should call
+// this rather than autoLocateInBrowserLogged directly.
+async function locateCompForImport(comp: any) {
+  const located = await autoLocateInBrowserLogged(comp);
+  if (located) return located;
+  return geocodeAddressFallback(comp);
+}
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
@@ -907,7 +965,10 @@ export default function ImportPage() {
             continue;
           }
           try {
-            const located = await autoLocateInBrowserLogged(c);
+            // locateCompForImport tries parcel match first, then falls
+            // back to street-address geocoding so MLS sold sheets (where
+            // the only locator is "Address:") still get a pin.
+            const located = await locateCompForImport(c);
             if (located) {
               console.log(`[import] auto-locate ✓ ${label}: ${located.match_reason}`);
               toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
@@ -1094,9 +1155,10 @@ export default function ImportPage() {
 
       // Browser-side auto-locate — server-side fails inside Vercel functions
       // because function-to-self URLs don't hit the edge cache. Re-run from
-      // here where /api/parcels-by-owner cache hits work.
+      // here where /api/parcels-by-owner cache hits work. Falls back to
+      // address geocoding for MLS sheets that don't match by owner.
       for (let i = 0; i < comps.length; i++) {
-        const located = await autoLocateInBrowserLogged(comps[i]);
+        const located = await locateCompForImport(comps[i]);
         if (located) {
           console.log(`[batch] auto-located ${comps[i].property_name || comps[i].county}: ${located.match_reason}`);
           comps[i] = {
@@ -1461,7 +1523,9 @@ export default function ImportPage() {
         continue;
       }
       try {
-        const located = await autoLocateInBrowserLogged(c);
+        // Parcel match first, address-geocode fallback for MLS-style
+        // comps with no owner-name parcel hit.
+        const located = await locateCompForImport(c);
         if (located) {
           dedupedComps[i] = {
             ...c,
