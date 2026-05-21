@@ -67,7 +67,7 @@ export default function CMALibraryPage() {
       if (allCompIds.size > 0) {
         const { data: comps } = await supabase
           .from('comps')
-          .select('id,acres,sale_price,improvements_value,improvement_value,improvement_source')
+          .select('id,acres,sale_price,improvements_value,improvement_value,improvement_source,has_improvements')
           .in('id', Array.from(allCompIds));
         if (comps) {
           const byId: Record<string, CmaComp> = {};
