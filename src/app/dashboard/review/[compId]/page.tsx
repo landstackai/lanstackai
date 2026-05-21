@@ -402,6 +402,11 @@ export default function ReviewPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [aerialExpanded]);
 
+  // Auto-expand effect moved below enterReselectMode's declaration to
+  // avoid the "used before declaration" TS error. See line after the
+  // enterReselectMode useCallback for the actual effect.
+  const reselectAutoFiredRef = useRef<string | null>(null);
+
   // Resize the map canvas whenever the side panel toggles — flex
   // reflow changes the map column width, but Mapbox can't detect that
   // by itself and renders to the old canvas size, leaving black space
@@ -497,9 +502,31 @@ export default function ReviewPage() {
     } else if (comp.latitude != null && comp.longitude != null) {
       // No boundary geometry but we do have a pin — center on it.
       m.flyTo({ center: [comp.longitude, comp.latitude], zoom: 14, duration: 800 });
+    } else {
+      // Best-effort fallback when comp has NEITHER boundary NOR lat/lng
+      // (autoLocate failed during import → broker is here to fix it).
+      //
+      // Cascade so the broker NEVER lands on the default wide-TX view:
+      //   1. Address → street-level zoom (best)
+      //   2. County, State → county centroid at zoom 9 (always works)
+      //
+      // Fire-and-forget; the comp deps already prevent re-firing.
+      (async () => {
+        const { geocodeBestEffort } = await import('@/lib/utils/geocodePlace');
+        const hit = await geocodeBestEffort({
+          address: comp.address,
+          county: comp.county,
+          state: comp.state,
+        });
+        if (hit && map.current) {
+          map.current.flyTo({
+            center: [hit.lng, hit.lat],
+            zoom: hit.zoom,
+            duration: 900,
+          });
+        }
+      })();
     }
-    // No boundary AND no lat/lng: map stays at the wide TX view. Side
-    // panel will surface this state with the red MapPinOff badge.
 
     return () => {
       try { detachHover?.(); } catch {}
@@ -889,6 +916,42 @@ export default function ReviewPage() {
     setOwnerMatches(null);
     setOwnerSearchError(null);
   }, []);
+
+  // ── Auto-expand Reselect Mode on page load for comps that need
+  // location review. The broker came here to FIX the location, so
+  // surfacing Reselect Mode immediately saves a click and signals
+  // "this is the workflow."
+  //
+  // Pre-fills the owner search with grantee (the new owner) since
+  // grantee is more likely to match current parcel records than grantor.
+  // Broker can clear/edit if grantee isn't useful.
+  //
+  // Guards: only fires once per comp id, only when comp has no lat/lng
+  // (otherwise the location is fine and broker is just visiting), and
+  // only after the map is loaded so enterReselectMode can do its work.
+  // Lives down here (not next to its declaration) because
+  // enterReselectMode is declared on line 858+.
+  useEffect(() => {
+    if (!comp || !mapLoaded) return;
+    if (mode !== 'view') return;
+    if (reselectAutoFiredRef.current === comp.id) return;
+    const needsLocation =
+      (comp as any).needs_location_review === true
+      || (comp.latitude == null || comp.longitude == null);
+    if (!needsLocation) return;
+    reselectAutoFiredRef.current = comp.id;
+    if (comp.grantee) {
+      setOwnerQuery(comp.grantee);
+    } else if (comp.grantor) {
+      setOwnerQuery(comp.grantor);
+    }
+    // Wait so the geocode-fallback flyTo settles before Reselect's
+    // zoom-to-13.5 logic kicks in (avoids double-animating).
+    const t = setTimeout(() => {
+      enterReselectMode();
+    }, 950);
+    return () => clearTimeout(t);
+  }, [comp, mapLoaded, mode, enterReselectMode]);
 
   // Run an owner-name search against TxGIO. Scoped to comp.county when
   // available — drastically narrows results (common surnames otherwise
@@ -1300,7 +1363,7 @@ export default function ReviewPage() {
         )}
 
         {/* Top bar: back link + comp label (absolute over map) */}
-        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 max-w-[60%]">
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 max-w-[40%]">
           <button
             onClick={() => router.push('/dashboard/vault')}
             className="text-ink-2 hover:text-ink flex items-center gap-1 text-xs"
@@ -1316,6 +1379,108 @@ export default function ReviewPage() {
               <Clock size={10} />
               Needs review
             </span>
+          )}
+        </div>
+
+        {/* ─── Owner search bar — top-center of map ─────────────────────
+            Same look as the vault + map AI search bars (white card, olive
+            sparkle, iMessage-blue Ask button). Pre-filled with the comp's
+            grantee on page load. Hitting Ask:
+              1. Enters Reselect Mode (if not already in it) so the
+                 sky-blue parcel highlights render properly
+              2. Runs the owner search against TxGIO, scoped to the
+                 comp's county
+            Brokers will use this constantly — every time autoLocate
+            failed, every time they're verifying a multi-parcel ranch.
+            Owner name is the highest-signal handle into parcel data,
+            so this bar is the workhorse of the page. */}
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 w-[28rem] max-w-[55%]">
+          <div className="relative">
+            <Sparkles size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-olive pointer-events-none" />
+            <input
+              type="text"
+              value={ownerQuery}
+              onChange={(e) => setOwnerQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (ownerQuery.trim().length < 3) return;
+                  if (mode !== 'reselect') {
+                    // Enter Reselect first so the search-result layers
+                    // (sky-blue parcel highlights) render properly.
+                    enterReselectMode();
+                    // Give Reselect's parcel-fetch a beat to settle, then
+                    // fire the owner search.
+                    setTimeout(() => runOwnerSearch(), 900);
+                  } else {
+                    runOwnerSearch();
+                  }
+                }
+              }}
+              placeholder={
+                comp?.county
+                  ? `Search owners in ${comp.county} County…`
+                  : 'Search parcels by owner name…'
+              }
+              disabled={ownerSearching}
+              className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-24 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10 disabled:opacity-60"
+            />
+            {ownerQuery && !ownerSearching && (
+              <button
+                onClick={() => { setOwnerQuery(''); clearOwnerSearch(); }}
+                title="Clear"
+                className="absolute right-[5rem] top-1/2 -translate-y-1/2 text-ink-3 hover:text-ink p-1"
+              >
+                <X size={13} />
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (ownerQuery.trim().length < 3) return;
+                if (mode !== 'reselect') {
+                  enterReselectMode();
+                  setTimeout(() => runOwnerSearch(), 900);
+                } else {
+                  runOwnerSearch();
+                }
+              }}
+              disabled={ownerSearching || ownerQuery.trim().length < 3}
+              title="Search parcels by owner name"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-imsg hover:bg-imsg-2 disabled:opacity-40 disabled:cursor-not-allowed rounded-md text-[12px] font-medium text-white transition-all shadow-sm min-w-[56px] inline-flex items-center justify-center gap-1.5"
+            >
+              {ownerSearching ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <>
+                  <Sparkles size={11} />
+                  Ask
+                </>
+              )}
+            </button>
+          </div>
+          {/* Match-count chip — sits just below the search bar when
+              results come back, like the vault's filter chips. Subtle
+              olive tint so it's visible without competing. */}
+          {ownerMatches && ownerMatches.length > 0 && (
+            <div className="mt-1.5 bg-white border border-beige rounded-md px-2.5 py-1.5 flex items-center justify-between gap-2 shadow-sm">
+              <p className="text-[11px] text-olive-2 truncate">
+                {ownerMatches.length} match{ownerMatches.length === 1 ? '' : 'es'} highlighted on map — click to add
+              </p>
+              <button
+                onClick={clearOwnerSearch}
+                className="text-ink-3 hover:text-ink flex-shrink-0"
+                title="Clear matches"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          )}
+          {ownerSearchError && (
+            <div className="mt-1.5 bg-red-50 border border-red-200 rounded-md px-2.5 py-1.5 shadow-sm">
+              <p className="text-[11px] text-red-700">{ownerSearchError}</p>
+            </div>
           )}
         </div>
 
@@ -1790,6 +1955,49 @@ export default function ReviewPage() {
             </div>
           )}
 
+          {/* ─── Workflow actions: Reselect + Draw + Verify ─────────────
+              Moved here (was at the bottom of the panel) so when a comp
+              with needs_location_review lands, the broker sees the
+              fix-the-location tools immediately below the transaction
+              parties — the natural reading order is subject → financials
+              → who-bought-it → "now I'll place the pin." Hidden in
+              reselect/draw mode (those each have their own banner). */}
+          {mode === 'view' && (
+            <div className="border-t border-beige pt-3 space-y-2">
+              <button
+                onClick={enterReselectMode}
+                disabled={!map.current}
+                title="Re-pick the parcels that make up this comp — click parcels on the map to add/remove"
+                className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Edit3 size={12} />
+                Reselect parcels
+              </button>
+              <button
+                onClick={enterDrawMode}
+                disabled={!map.current}
+                title="Draw a new boundary from scratch — for unrecorded subdivisions, carve-outs, or anything TxGIO doesn't have"
+                className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Pencil size={12} />
+                Draw new boundary
+              </button>
+              <button
+                onClick={handleMarkVerified}
+                disabled={saving || !comp.needs_location_review}
+                title={
+                  !comp.needs_location_review
+                    ? 'This comp is already verified'
+                    : 'Mark this comp as visually verified — clears the gray clock badge'
+                }
+                className="w-full py-2 bg-white hover:bg-cream border border-beige hover:border-beige-2 text-ink-2 hover:text-ink rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Check size={12} />
+                {comp.needs_location_review ? 'Mark verified' : 'Verified'}
+              </button>
+            </div>
+          )}
+
           {/* ─── Source + Listing URL ──────────────────────────────────
               Source type tag (PDF appraisal / Listing URL) + the
               listing-link surface. Always visible so brokers know
@@ -2041,43 +2249,9 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* Action row. Hidden in reselect AND draw modes (those each
-              have their own Save/Cancel controls in their banner above). */}
-          {mode === 'view' && (
-          <div className="border-t border-beige pt-3 space-y-2">
-            <button
-              onClick={enterReselectMode}
-              disabled={!map.current}
-              title="Re-pick the parcels that make up this comp — click parcels on the map to add/remove"
-              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Edit3 size={12} />
-              Reselect parcels
-            </button>
-            <button
-              onClick={enterDrawMode}
-              disabled={!map.current}
-              title="Draw a new boundary from scratch — for unrecorded subdivisions, carve-outs, or anything TxGIO doesn't have"
-              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Pencil size={12} />
-              Draw new boundary
-            </button>
-            <button
-              onClick={handleMarkVerified}
-              disabled={saving || !comp.needs_location_review}
-              title={
-                !comp.needs_location_review
-                  ? 'This comp is already verified'
-                  : 'Mark this comp as visually verified — clears the gray clock badge'
-              }
-              className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Check size={12} />
-              {comp.needs_location_review ? 'Mark verified' : 'Verified'}
-            </button>
-          </div>
-          )}
+          {/* Action row now lives right under Grantor/Grantee — see
+              the workflow-actions block above. Intentionally NOT
+              duplicated here. */}
         </div>
       </aside>
       )}
