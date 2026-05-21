@@ -1722,7 +1722,17 @@ export default function ImportPage() {
       // would otherwise reject the INSERT.
       water: sanitizeWater(comp.water),
       road_frontage: sanitizeRoadFrontage(comp.road_frontage),
-      has_improvements: comp.has_improvements || false,
+      // has_improvements backfill: if the AI extracted a non-zero
+      // improvements_value but missed the boolean, force has_improvements
+      // true. Otherwise we'd save a comp with a $400K improvements value
+      // and no "Improved" badge — and worse, the land-only adjustment
+      // would be hidden from the vault's Adjusted $/Ac column because
+      // some UI surfaces still gate on has_improvements. Cheap belt-and-
+      // suspenders that prevents a silent data inconsistency.
+      has_improvements: Boolean(
+        comp.has_improvements ||
+        (Number(comp.improvements_value) > 0)
+      ),
       improvements_notes: comp.improvements_notes,
       wildlife_notes: comp.wildlife_notes,
       flood_plain_pct: comp.flood_plain_pct,
