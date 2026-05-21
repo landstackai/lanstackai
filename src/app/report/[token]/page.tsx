@@ -410,6 +410,20 @@ export default function ClientReport({ params }: ClientReportProps) {
               const total = Number(c.sale_price) || 0;
               return total > 0 ? total / acres : (c.price_per_acre || 0);
             };
+            // Per-comp Adjusted $/Ac. Resolution order (most-
+            // authoritative wins) — MUST match the workspace's
+            // effectiveImprovement helper or the two surfaces will
+            // disagree (root cause of the bug a client saw in a
+            // meeting):
+            //   1. CMA draft override (adj.improvement_value)
+            //   2. c.improvement_value (singular, broker-saved
+            //      provenanced override)
+            //   3. c.improvements_value (plural, populated by import
+            //      extraction from appraisal/MLS) — this fallback was
+            //      missing on the report before PR #37, which made
+            //      imported MLS comps show Adjusted = Total even when
+            //      the DB had a populated improvements_value and the
+            //      map popup correctly showed the discount.
             const landOnlyPpa = (c: Comp): number | null => {
               const acres = Number(c.acres) || 0;
               if (acres <= 0) return null;
@@ -421,6 +435,8 @@ export default function ClientReport({ params }: ClientReportProps) {
                   ? Number(adj.improvement_value)
                   : (c as any).improvement_value != null
                   ? Number((c as any).improvement_value)
+                  : (c as any).improvements_value != null && Number((c as any).improvements_value) > 0
+                  ? Number((c as any).improvements_value)
                   : null;
               const adjusted = total - (imp ?? 0);
               return adjusted > 0 ? adjusted / acres : null;
@@ -447,9 +463,20 @@ export default function ClientReport({ params }: ClientReportProps) {
             );
             const sharedSubjectTotals = subjectTotals(sharedAverages, subjAcres);
 
+            // Whether ANY comp in this CMA has an improvement signal to
+            // back out (broker override, provenanced singular field, OR
+            // appraisal-extracted plural field). Drives the value-range
+            // slider's "use land-only range" decision. The plural-field
+            // fallback was missing before PR #37, which silently caused
+            // MLS-imported CMAs to render the all-in range even when
+            // they had populated improvements_value.
             const hasAnyAdjustedComp = comps.some((c) => {
               const adj = adjMap[c.id] || {};
-              return (adj.improvement_value != null) || ((c as any).improvement_value != null);
+              return (
+                adj.improvement_value != null
+                || (c as any).improvement_value != null
+                || ((c as any).improvements_value != null && Number((c as any).improvements_value) > 0)
+              );
             });
             // Broker's Opinion of Value — supports two modes:
             //   'lump_sum'  → one number (broker_opinion_value is the total)
