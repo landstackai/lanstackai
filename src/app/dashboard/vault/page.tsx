@@ -3,12 +3,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, Trash2, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion, Sparkles, X } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion, Sparkles, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { reverseGeocodeCity } from '@/lib/utils/reverseGeocode';
 import CompCard from '@/components/comp/CompCard';
 import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
+import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import { useSearchParams } from 'next/navigation';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { getRegionForCounty, getRegionsInDisplayOrder, UNASSIGNED_REGION } from '@/lib/utils/texasRegions';
@@ -1278,8 +1279,20 @@ export default function VaultPage() {
                                   <td className="py-2.5 px-2 text-xs text-ink/80 whitespace-nowrap">
                                     {r.label}
                                   </td>
-                                  <td className="py-2.5 px-4 text-right text-[10px] text-ink-2 whitespace-nowrap">
+                                  <td className="py-2.5 px-2 text-right text-[10px] text-ink-2 whitespace-nowrap">
                                     {c.created_at ? new Date(c.created_at).toLocaleDateString() : ''}
+                                  </td>
+                                  {/* Delete affordance — 2-step confirm so brokers
+                                      can't nuke a comp by accident while scanning
+                                      this list. stopPropagation is baked into
+                                      DeleteConfirmButton so the row's onClick
+                                      (which navigates to /review/[id]) doesn't fire. */}
+                                  <td className="py-2.5 px-3 text-right whitespace-nowrap w-px">
+                                    <DeleteConfirmButton
+                                      variant="icon"
+                                      title="Delete this comp"
+                                      onConfirm={() => handleDeleteComp(c.id)}
+                                    />
                                   </td>
                                 </tr>
                               );
@@ -1625,9 +1638,15 @@ export default function VaultPage() {
                                 <span className="text-ink-3">—</span>
                               )}
                             </td>
-                            {/* Hover actions */}
+                            {/* Row actions — Edit hides until hover (low
+                                priority, visual noise otherwise). Delete is
+                                ALWAYS visible (subtle text-ink-3 idle state)
+                                because: (a) destructive controls shouldn't be
+                                hidden behind hover, and (b) the 2-step confirm
+                                pill needs to persist even if the user hovers
+                                off the row mid-confirmation. */}
                             <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                              <div className="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <div className="inline-flex items-center gap-1">
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -1635,20 +1654,20 @@ export default function VaultPage() {
                                     setShowAddModal(true);
                                   }}
                                   title="Edit"
-                                  className="p-1 rounded text-ink-2 hover:text-ink hover:bg-cream"
+                                  className="p-1 rounded text-ink-2 hover:text-ink hover:bg-cream opacity-0 group-hover:opacity-100 transition-opacity"
                                 >
                                   <Edit size={12} />
                                 </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDeleteComp(comp.id);
-                                  }}
-                                  title="Delete"
-                                  className="p-1 rounded text-ink-2 hover:text-red-600 hover:bg-red-50"
-                                >
-                                  <Trash2 size={12} />
-                                </button>
+                                {/* 2-step delete: click trash → "Confirm
+                                    delete?" red pill → click again to commit.
+                                    Auto-reverts after 5s or on outside click /
+                                    Escape. Persists regardless of row hover. */}
+                                <DeleteConfirmButton
+                                  variant="icon"
+                                  title="Delete this comp"
+                                  onConfirm={() => handleDeleteComp(comp.id)}
+                                  className="opacity-50 group-hover:opacity-100"
+                                />
                               </div>
                             </td>
                           </tr>
