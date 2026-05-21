@@ -1,10 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { CMA } from '@/types';
 import { formatCurrency, formatAcres } from '@/lib/utils';
+import { computeCmaAverages, subjectTotals, type CmaComp } from '@/lib/utils/cmaMath';
+import { properCase } from '@/lib/utils/properCase';
 import { FileText, Plus, MapPin, Trash2, Share2, AlertCircle, Eye, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -28,6 +30,10 @@ type CMARow = CMA & {
 export default function CMALibraryPage() {
   const [cmas, setCmas] = useState<CMARow[]>([]);
   const [loading, setLoading] = useState(true);
+  // Live comp data keyed by id, used to recompute CMA value ranges
+  // on the fly instead of trusting the (often-stale) saved
+  // value_low/mid/high snapshot. See computeCmaAverages docstring.
+  const [compsById, setCompsById] = useState<Record<string, CmaComp>>({});
   const [disclosureCMA, setDisclosureCMA] = useState<CMARow | null>(null);
   const [disclosureChecked, setDisclosureChecked] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -47,7 +53,28 @@ export default function CMALibraryPage() {
     if (error) {
       toast.error(error.message);
     } else {
-      setCmas((data || []) as any);
+      const rows = (data || []) as CMARow[];
+      setCmas(rows);
+
+      // Batch-fetch ALL comps referenced by ANY CMA in this list. One
+      // round trip rather than N. Then we can compute averages live in
+      // useMemo per render — saved value_low/mid/high becomes a fallback
+      // only used while these are loading.
+      const allCompIds = new Set<string>();
+      for (const r of rows) {
+        (r.selected_comp_ids || []).forEach((id) => id && allCompIds.add(id));
+      }
+      if (allCompIds.size > 0) {
+        const { data: comps } = await supabase
+          .from('comps')
+          .select('id,acres,sale_price,improvements_value,improvement_value,improvement_source')
+          .in('id', Array.from(allCompIds));
+        if (comps) {
+          const byId: Record<string, CmaComp> = {};
+          for (const c of comps as CmaComp[]) byId[c.id] = c;
+          setCompsById(byId);
+        }
+      }
     }
     setLoading(false);
   };
@@ -170,8 +197,29 @@ export default function CMALibraryPage() {
           </div>
         ) : (
           cmas.map(cma => {
-            const compCount = cma.selected_comp_ids?.length || 0;
+            const compIds = cma.selected_comp_ids || [];
+            const compCount = compIds.length;
             const isSharedWithMe = currentUserId != null && cma.created_by != null && cma.created_by !== currentUserId;
+
+            // ─── Live recompute of the value range ──────────────────
+            // Resolve the CMA's comp IDs against compsById (batch-fetched
+            // above). When at least one comp is available, recompute
+            // averages + subject totals via the shared cmaMath helpers
+            // so the list view ALWAYS agrees with the workspace +
+            // printable report. Falls back to the saved value_low/mid/
+            // high snapshot only when comps haven't loaded yet (initial
+            // render) or when none of the referenced comps still exist
+            // (deleted from vault).
+            const liveComps = compIds.map((id) => compsById[id]).filter((c): c is CmaComp => Boolean(c));
+            const subjAcres = Number(cma.subject_acres) || 0;
+            const computed = liveComps.length > 0
+              ? subjectTotals(computeCmaAverages(liveComps, cma.comp_adjustments), subjAcres).total
+              : null;
+            const showLow = computed?.low ?? cma.value_low;
+            const showMid = computed?.mid ?? cma.value_mid;
+            const showHigh = computed?.high ?? cma.value_high;
+            const hasRange = (showMid != null && showMid > 0) || (showLow != null && showLow > 0);
+
             return (
               <div
                 key={cma.id}
@@ -181,7 +229,7 @@ export default function CMALibraryPage() {
                   <Link href={`/dashboard/map?cma=${cma.id}`} className="flex-1 min-w-0 group">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="font-bold text-base text-ink group-hover:text-slate-blue-2 transition-colors truncate">
-                        {cma.subject_name || 'Untitled CMA'}
+                        {properCase(cma.subject_name) || 'Untitled CMA'}
                       </h2>
                       {isSharedWithMe && (
                         <span
@@ -194,7 +242,7 @@ export default function CMALibraryPage() {
                       )}
                     </div>
                     <p className="text-xs text-ink-2 mt-1">
-                      <span className="text-ink-2">{cma.subject_county}, {cma.subject_state}</span>
+                      <span className="text-ink-2">{properCase(cma.subject_county)}, {cma.subject_state}</span>
                       <span className="text-ink-3 mx-1.5">·</span>
                       {formatAcres(cma.subject_acres)}
                       <span className="text-ink-3 mx-1.5">·</span>
@@ -202,12 +250,16 @@ export default function CMALibraryPage() {
                       <span className="text-ink-3 mx-1.5">·</span>
                       {new Date(cma.created_at).toLocaleDateString()}
                     </p>
-                    {cma.value_mid != null && (
+                    {hasRange ? (
                       <p className="text-sm font-bold text-olive-2 font-mono mt-2">
-                        {formatCurrency(cma.value_low || 0)} – {formatCurrency(cma.value_high || 0)}
+                        {formatCurrency(showLow || 0)} – {formatCurrency(showHigh || 0)}
                         <span className="text-ink-3 font-normal text-xs ml-2">
-                          (mid {formatCurrency(cma.value_mid)})
+                          (mid {formatCurrency(showMid || 0)})
                         </span>
+                      </p>
+                    ) : (
+                      <p className="text-xs text-ink-3 italic mt-2">
+                        Value range pending — open the CMA to recompute
                       </p>
                     )}
                   </Link>

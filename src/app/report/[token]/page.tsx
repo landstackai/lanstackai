@@ -4,6 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { CMA, Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
+import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
+import { properCase } from '@/lib/utils/properCase';
 import { MapPin, ThumbsUp, ThumbsDown, HelpCircle, Layers, ArrowUpDown, ChevronDown, ExternalLink, Printer, MessageCircle, X } from 'lucide-react';
 import { FeatureChip, isStrongFeature } from '@/components/comp/FeatureChip';
 import mapboxgl from 'mapbox-gl';
@@ -164,7 +166,7 @@ export default function ClientReport({ params }: ClientReportProps) {
           box-shadow:0 0 0 4px rgba(200,80,63,0.35), 0 6px 18px rgba(0,0,0,.5);
           animation:subjectPulse 2.4s ease-in-out infinite;
         `;
-        sEl.title = cma.subject_name || 'Subject';
+        sEl.title = properCase(cma.subject_name) || 'Subject';
         const sm = new mapboxgl.Marker({ element: sEl }).setLngLat([subjLng, subjLat]).addTo(map.current);
         markersRef.current.push(sm);
         points.push([subjLng, subjLat]);
@@ -434,6 +436,17 @@ export default function ClientReport({ params }: ClientReportProps) {
             const lMid = avg(landOnly);
             const lHigh = landOnly.length ? Math.max(...landOnly) : 0;
 
+            // Shared cmaMath helper for the three-card display below.
+            // Same canonical definitions as the workspace + list view.
+            // The legacy bindings above (allIn/landOnly/aMid/lMid) still
+            // feed downstream logic — slider math, BOV computed values,
+            // the broker's-read PPA recommendation — so we keep them.
+            const sharedAverages = computeCmaAverages(
+              comps as any,
+              (cma as any).comp_adjustments
+            );
+            const sharedSubjectTotals = subjectTotals(sharedAverages, subjAcres);
+
             const hasAnyAdjustedComp = comps.some((c) => {
               const adj = adjMap[c.id] || {};
               return (adj.improvement_value != null) || ((c as any).improvement_value != null);
@@ -554,38 +567,46 @@ export default function ClientReport({ params }: ClientReportProps) {
                       <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
                       <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
                     </div>
-                    <p className="text-sm font-semibold text-ink">{cma.subject_name}</p>
+                    {/* Subject name pretty-printed so the report doesn't
+                        look like a CAD parcel printout when the source
+                        record is ALL CAPS ("CARAWAY PARTNERS LTD"). */}
+                    <p className="text-sm font-semibold text-ink">{properCase(cma.subject_name)}</p>
                     <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
                       <MapPin size={10} className="text-ink-3" />
-                      {cma.subject_county}, {cma.subject_state} · {formatAcres(subjAcres)}
+                      {properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}
                     </p>
                   </div>
                 </div>
 
-                {/* ============ SECTION 2 — TOTAL PRICE PER ACRE (mirrors broker All-In) ============ */}
-                {allIn.length > 0 && (
+                {/* ============ SECTION 2 — THREE FLAVORS OF $/ACRE ============
+                    Same three-card display as the broker workspace, in the
+                    same order: Total → Land-Only → Adjusted. Each card
+                    shows Low/Mid/High alongside the subject-property total
+                    at that PPA. Cards omit when their sample size is 0
+                    (e.g., no comps have improvements → no Land-Only card). */}
+                {sharedAverages.total.n > 0 && (
                   <div className="px-4 pb-4 space-y-2">
                     <div className="bg-white border border-beige rounded-xl overflow-hidden">
                       <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
                         <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
-                        <p className="text-[9px] text-ink-3 font-mono">{allIn.length} of {comps.length} comps</p>
+                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.total.n} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
                             <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aLow * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.low != null ? formatPPA(sharedAverages.total.low) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.low != null ? formatCurrency(sharedSubjectTotals.total.low) : '—'}</td>
                           </tr>
                           <tr className="border-t border-beige/60">
                             <td className="px-3 py-2 text-olive-2 font-semibold">Mid</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatPPA(aMid)}</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{formatCurrency(aMid * subjAcres)}</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedAverages.total.mid != null ? formatPPA(sharedAverages.total.mid) : '—'}</td>
+                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedSubjectTotals.total.mid != null ? formatCurrency(sharedSubjectTotals.total.mid) : '—'}</td>
                           </tr>
                           <tr className="border-t border-beige/60">
                             <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(aHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(aHigh * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.high != null ? formatPPA(sharedAverages.total.high) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.high != null ? formatCurrency(sharedSubjectTotals.total.high) : '—'}</td>
                           </tr>
                         </tbody>
                       </table>
@@ -596,36 +617,74 @@ export default function ClientReport({ params }: ClientReportProps) {
                   </div>
                 )}
 
-                {/* ============ SECTION 3 — ADJUSTED PRICE PER ACRE (LAND ONLY) ============ */}
-                {landOnly.length > 0 && hasAnyAdjustedComp && (
+                {sharedAverages.landOnly.n > 0 && (
                   <div className="px-4 pb-4 space-y-2">
                     <div className="bg-white border border-beige rounded-xl overflow-hidden">
                       <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Adjusted Price Per Acre <span className="text-ink-3 normal-case tracking-normal">(land only)</span></p>
-                        <p className="text-[9px] text-ink-3 font-mono">{landOnly.length} of {comps.length} comps</p>
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                          Average Land-Only Price Per Acre
+                          <span className="text-ink-3 normal-case tracking-normal"> (improved comps)</span>
+                        </p>
+                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.landOnly.n} of {comps.length} comps</p>
                       </div>
                       <table className="w-full text-xs">
                         <tbody className="font-mono">
                           <tr>
                             <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lLow)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lLow * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.low != null ? formatPPA(sharedAverages.landOnly.low) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.low != null ? formatCurrency(sharedSubjectTotals.landOnly.low) : '—'}</td>
                           </tr>
                           <tr className="border-t border-beige/60">
-                            <td className="px-3 py-2 text-amber-800 font-semibold">Mid</td>
-                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatPPA(lMid)}</td>
-                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{formatCurrency(lMid * subjAcres)}</td>
+                            <td className="px-3 py-2 text-slate-blue-2 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedAverages.landOnly.mid != null ? formatPPA(sharedAverages.landOnly.mid) : '—'}</td>
+                            <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedSubjectTotals.landOnly.mid != null ? formatCurrency(sharedSubjectTotals.landOnly.mid) : '—'}</td>
                           </tr>
                           <tr className="border-t border-beige/60">
                             <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatPPA(lHigh)}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{formatCurrency(lHigh * subjAcres)}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.high != null ? formatPPA(sharedAverages.landOnly.high) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.high != null ? formatCurrency(sharedSubjectTotals.landOnly.high) : '—'}</td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
                     <p className="text-[10px] text-ink-3 leading-relaxed px-1">
-                      $/acre with structures (houses, barns) subtracted — a fairer comparison for raw land.
+                      $/acre with improvements (houses, barns) backed out — what raw dirt is trading for.
+                    </p>
+                  </div>
+                )}
+
+                {sharedAverages.adjusted.n > 0 && hasAnyAdjustedComp && (
+                  <div className="px-4 pb-4 space-y-2">
+                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                          Average Adjusted Price Per Acre
+                          <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
+                        </p>
+                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.adjusted.n} of {comps.length} comps</p>
+                      </div>
+                      <table className="w-full text-xs">
+                        <tbody className="font-mono">
+                          <tr>
+                            <td className="px-3 py-1.5 text-ink-2">Low</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.adjusted.low != null ? formatPPA(sharedAverages.adjusted.low) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.adjusted.low != null ? formatCurrency(sharedSubjectTotals.adjusted.low) : '—'}</td>
+                          </tr>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-2 text-amber-800 font-semibold">Mid</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{sharedAverages.adjusted.mid != null ? formatPPA(sharedAverages.adjusted.mid) : '—'}</td>
+                            <td className="text-right px-3 py-2 text-amber-800 font-semibold tabular-nums">{sharedSubjectTotals.adjusted.mid != null ? formatCurrency(sharedSubjectTotals.adjusted.mid) : '—'}</td>
+                          </tr>
+                          <tr className="border-t border-beige/60">
+                            <td className="px-3 py-1.5 text-ink-2">High</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.adjusted.high != null ? formatPPA(sharedAverages.adjusted.high) : '—'}</td>
+                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.adjusted.high != null ? formatCurrency(sharedSubjectTotals.adjusted.high) : '—'}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
+                      $/acre after broker's per-comp adjustments for terrain, road frontage, water, etc.
                     </p>
                   </div>
                 )}
@@ -821,7 +880,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                           <div className="px-3 py-2">
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
-                                <span className="truncate">{comp.property_name || `${comp.county} County`}</span>
+                                <span className="truncate">{properCase(comp.property_name) || `${properCase(comp.county)} County`}</span>
                                 {(comp as any).has_improvements && (
                                   <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
                                     IMPROVED
