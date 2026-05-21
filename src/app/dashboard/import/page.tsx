@@ -791,6 +791,105 @@ async function locateCompForImport(comp: any) {
   return geocodeAddressFallback(comp);
 }
 
+// ─── Aerial attribution (shared between single-shot + chunked paths) ──
+//
+// Past failure mode: extractFromChunkedPdf (the >5-page path) never
+// extracted aerials at all because the per-page extraction lived
+// inside sendMessage and wasn't pulled into the chunked path. Every
+// 6+ page upload lost its thumbnails silently.
+//
+// The fix is structural: both paths now route through this helper, so
+// fixes to attribution heuristics auto-apply everywhere AND we get one
+// place to diagnose misses. Returns the count of comps that got an
+// aerial attached, so callers can surface that in the verification UX.
+function attachAerialsToComps(
+  comps: any[],
+  sourceAerial: string | null | Array<{ page: number; dataUrl: string }>,
+): { attached: number; missed: number } {
+  let attached = 0;
+  let missed = 0;
+  if (!Array.isArray(comps) || comps.length === 0) return { attached, missed };
+  if (!sourceAerial) {
+    return { attached: 0, missed: comps.length };
+  }
+
+  if (typeof sourceAerial === 'string') {
+    // Single-comp case: only safe to attach when exactly one comp came
+    // back. Otherwise we'd put the same aerial on every comp (wrong).
+    if (comps.length === 1) {
+      comps[0].aerialImage = sourceAerial;
+      return { attached: 1, missed: 0 };
+    }
+    return { attached: 0, missed: comps.length };
+  }
+
+  if (!Array.isArray(sourceAerial) || sourceAerial.length === 0) {
+    return { attached: 0, missed: comps.length };
+  }
+
+  // Multi-comp / multi-page case: attribute each aerial to a comp via
+  // its cite-the-source citations. Each citation looks like
+  // "page 2 · transaction data · 'Sale Price' row" — we count which
+  // page each comp's citations reference most and pick that page's
+  // aerial. Falls back to index alignment when citations have no page.
+  for (let i = 0; i < comps.length; i++) {
+    const c = comps[i];
+    const citations: string[] = [
+      c?.acres_source,
+      c?.sale_price_source,
+      c?.price_per_acre_source,
+      c?.ppa_land_only_source,
+    ].filter((x: any) => typeof x === 'string');
+
+    const pageHits: Record<number, number> = {};
+    for (const cite of citations) {
+      const matches = Array.from(cite.matchAll(/\bpage\s+(\d+)|\bp\.\s*(\d+)/gi));
+      for (const m of matches) {
+        const pg = Number(m[1] ?? m[2]);
+        if (Number.isFinite(pg) && pg > 0) {
+          pageHits[pg] = (pageHits[pg] || 0) + 1;
+        }
+      }
+    }
+
+    let dominantPage: number | null = null;
+    let bestCount = 0;
+    for (const [pg, count] of Object.entries(pageHits)) {
+      if (count > bestCount) {
+        dominantPage = Number(pg);
+        bestCount = count;
+      }
+    }
+
+    // Heuristic for TX appraisal PDFs: aerials usually sit on the LEAD
+    // page of a 2-page comp (page 1 of "Land Sale 1" pair, page 3 of
+    // "Land Sale 2" pair). When the dominant citation page comes back
+    // even-numbered, also try the prior odd page — that's almost always
+    // where the aerial lives in this format.
+    const candidatePages: number[] = [];
+    if (dominantPage != null) {
+      candidatePages.push(dominantPage);
+      if (dominantPage % 2 === 0) candidatePages.push(dominantPage - 1);
+      else candidatePages.push(dominantPage + 1);
+    }
+    let aerial = null as { page: number; dataUrl: string } | null;
+    for (const pg of candidatePages) {
+      const hit = sourceAerial.find((a) => a.page === pg);
+      if (hit) { aerial = hit; break; }
+    }
+    // Final fallback: index alignment (comp 0 → first aerial, etc.).
+    if (!aerial) aerial = sourceAerial[i] || null;
+
+    if (aerial) {
+      c.aerialImage = aerial.dataUrl;
+      attached += 1;
+    } else {
+      missed += 1;
+    }
+  }
+  return { attached, missed };
+}
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
@@ -889,60 +988,16 @@ export default function ImportPage() {
       // that comp's primary page. Aerial from that page → that comp.
       // Fallback: if no citation has a page number, attach the aerial
       // at the same index as the comp (comp 1 → page 1's aerial).
-      if (sourceAerial && Array.isArray(data.comps) && data.comps.length > 0) {
-        if (typeof sourceAerial === 'string') {
-          // Single-comp case: attach the single best aerial. Only valid
-          // when exactly one comp came back — otherwise we'd attach the
-          // same aerial to all comps (wrong).
-          if (data.comps.length === 1) {
-            (data.comps[0] as any).aerialImage = sourceAerial;
-          }
-        } else if (Array.isArray(sourceAerial) && sourceAerial.length > 0) {
-          // Multi-comp case: attribute each aerial to a comp via
-          // citations or index fallback.
-          for (let i = 0; i < data.comps.length; i++) {
-            const c = data.comps[i];
-            // Gather all citation strings for this comp
-            const citations = [
-              c?.acres_source,
-              c?.sale_price_source,
-              c?.price_per_acre_source,
-              c?.ppa_land_only_source,
-            ].filter((x: any) => typeof x === 'string') as string[];
-            // Tally page references — match patterns like "page 2",
-            // "page N", or "p. 3"
-            const pageHits: Record<number, number> = {};
-            for (const cite of citations) {
-              // Array.from rather than for-of — tsconfig has no target set
-              // so RegExpStringIterator can't be spread/iterated directly.
-              const matches = Array.from(cite.matchAll(/\bpage\s+(\d+)|\bp\.\s*(\d+)/gi));
-              for (const m of matches) {
-                const pg = Number(m[1] ?? m[2]);
-                if (Number.isFinite(pg) && pg > 0) {
-                  pageHits[pg] = (pageHits[pg] || 0) + 1;
-                }
-              }
-            }
-            // Pick the page with the most citation references
-            let dominantPage: number | null = null;
-            let bestCount = 0;
-            for (const [pg, count] of Object.entries(pageHits)) {
-              if (count > bestCount) {
-                dominantPage = Number(pg);
-                bestCount = count;
-              }
-            }
-            // If no page found in citations, fall back to index (comp 0
-            // → first aerial, comp 1 → second aerial, etc.). Not perfect
-            // but better than nothing.
-            const aerial =
-              (dominantPage != null
-                ? sourceAerial.find((a) => a.page === dominantPage)
-                : null) || sourceAerial[i] || null;
-            if (aerial) {
-              (data.comps[i] as any).aerialImage = aerial.dataUrl;
-            }
-          }
+      if (Array.isArray(data.comps) && data.comps.length > 0) {
+        const { attached, missed } = attachAerialsToComps(
+          data.comps as any[],
+          sourceAerial ?? null,
+        );
+        if (missed > 0) {
+          console.warn(
+            `[import] aerial attribution: ${attached}/${attached + missed} comps got a thumbnail. ` +
+            `${missed} missed — either the PDF lacked embedded raster images on that page, or citation→page heuristic failed.`
+          );
         }
       }
 
@@ -1415,6 +1470,16 @@ export default function ImportPage() {
     //
     // Dedupe by (name|date|price) collapses the same comp seen in
     // overlapping chunks.
+    //
+    // ⚠️ Aerial extraction: kick this off in PARALLEL with the AI
+    // chunks. Previously this path NEVER extracted aerials — only
+    // sendMessage (≤5 page path) did — so every 6+ page upload lost
+    // its thumbnails silently. Same per-page extractor as the
+    // single-shot path, same attribution helper after dedupe.
+    const aerialsPromise = extractLargestAerialPerPage(file).catch(
+      () => [] as Array<{ page: number; dataUrl: string }>
+    );
+
     const CHUNK_SIZE = 4;
     const STRIDE = 3;
     const chunks: string[][] = [];
@@ -1511,6 +1576,35 @@ export default function ImportPage() {
     const dedupedComps = Array.from(byKey.values());
     if (dedupedComps.length < allComps.length) {
       console.log(`[chunked] deduped: ${allComps.length} raw → ${dedupedComps.length} unique`);
+    }
+
+    // Attach the per-page aerials that were extracted in parallel with
+    // the AI chunks. Same helper the ≤5-page path uses, so improvements
+    // to attribution heuristics apply everywhere automatically.
+    const aerialsPerPage = await aerialsPromise;
+    const sourceAerialForAttribution: string | null | Array<{ page: number; dataUrl: string }> =
+      aerialsPerPage.length === 0
+        ? null
+        : aerialsPerPage.length === 1
+          ? aerialsPerPage[0].dataUrl
+          : aerialsPerPage;
+    const { attached, missed } = attachAerialsToComps(
+      dedupedComps,
+      sourceAerialForAttribution,
+    );
+    if (dedupedComps.length > 0) {
+      console.log(
+        `[chunked] aerial attribution: ${attached}/${dedupedComps.length} comps got thumbnails ` +
+        `(${aerialsPerPage.length} aerials found across ${images.length} pages)`
+      );
+      if (missed > 0 && aerialsPerPage.length === 0) {
+        console.warn(
+          `[chunked] no aerials found in PDF — embedded images may be smaller than ` +
+          `MIN_IMAGE_DIMENSION (200px), or the PDF stores pages as flattened scans ` +
+          `(JBIG2/grayscale) which the extractor skips. ${missed} comp${missed === 1 ? '' : 's'} ` +
+          `will show without a source thumbnail.`
+        );
+      }
     }
 
     // Run browser auto-locate for each unique comp (overrides any AI-guessed
@@ -2176,8 +2270,23 @@ export default function ImportPage() {
                                 className="w-full h-32 object-cover rounded border border-beige"
                               />
                             ) : (
-                              <div className="w-full h-32 bg-cream border border-beige rounded p-2 text-[10px] text-ink-2 flex flex-col gap-0.5 overflow-hidden">
-                                <div className="text-ink-3 uppercase tracking-wide">Source data</div>
+                              // No aerial AND no source lat/lng — show the
+                              // text panel + an EXPLICIT "no aerial found"
+                              // chip so the broker isn't left wondering why
+                              // the thumbnail is missing. Silent failure is
+                              // the worst UX: previously the user had to
+                              // notice "hmm, this card has no picture" and
+                              // ask. Now the card tells them.
+                              <div className="w-full h-32 bg-cream border border-beige rounded p-2 text-[10px] text-ink-2 flex flex-col gap-0.5 overflow-hidden relative">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-ink-3 uppercase tracking-wide">Source data</span>
+                                  <span
+                                    className="text-[8px] uppercase tracking-wide px-1 py-px rounded bg-amber-50 border border-amber-300 text-amber-700"
+                                    title="No embedded aerial photo was found in the source PDF for this comp's pages. Common causes: scanned-as-image PDFs, images smaller than the 200px threshold, or the AI's citations didn't reference any page with an embedded image."
+                                  >
+                                    No aerial
+                                  </span>
+                                </div>
                                 {comp.grantee && <div className="text-ink truncate">→ {comp.grantee}</div>}
                                 {comp.grantor && <div className="text-ink-2 truncate">from {comp.grantor}</div>}
                                 {comp.address && <div className="text-ink-2 truncate">{comp.address}</div>}
