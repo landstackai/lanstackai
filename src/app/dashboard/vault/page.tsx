@@ -123,8 +123,12 @@ export default function VaultPage() {
   const [sortKey, setSortKey] = useState<SortKey>('county');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   // ─── Group-by mode ─────────────────────────────────────────────
-  // The vault can render the comp list flat or grouped:
-  //   'none'         — flat table, sorted by sortKey (legacy behavior)
+  // The vault renders the comp list grouped — county or region. The
+  // group header rows show "Totals · N" in the City column with the
+  // aggregate values aligned under each data column (Acres, Total,
+  // Per Acre, Adjusted). The toggle lives in a slim header bar on
+  // the table card itself, right above the column headers.
+  //
   //   'alphabetical' — county group headers in alphabetical order
   //                    (Atascosa → Blanco → Comal …) with per-county
   //                    aggregate stats above each group
@@ -133,9 +137,11 @@ export default function VaultPage() {
   //                    Falls back to a single 'Unassigned' bucket
   //                    until the county→region map in
   //                    src/lib/utils/texasRegions.ts is populated.
-  // Defaults to 'alphabetical' — most useful starting point for
-  // brokers scanning by county. Toggle is in the vault header.
-  type GroupBy = 'none' | 'alphabetical' | 'regional';
+  //
+  // The previous 'none' / Flat mode was removed — column-sort headers
+  // still work WITHIN groups, so brokers who want "biggest at top"
+  // get it without needing an ungrouped view.
+  type GroupBy = 'alphabetical' | 'regional';
   const [groupBy, setGroupBy] = useState<GroupBy>('alphabetical');
   // "Needs Location" filter — show only comps with missing coordinates. Useful
   // after batch imports where rural addresses didn't geocode.
@@ -600,43 +606,9 @@ export default function VaultPage() {
 
         </div>
 
-        {/* Group-by toggle — sits below the main toolbar so it has
-            breathing room from the search bar / scope tabs. Three
-            modes: Flat (no grouping), County (alphabetical group
-            headers), Region (region headers with county subgroups).
-            Only shown in list view since groups don't make sense
-            in the card-grid layout. */}
-        {viewMode === 'list' && (
-          <div className="flex items-center gap-2 mt-3">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3">
-              Group
-            </span>
-            <div className="inline-flex bg-cream border border-beige rounded-lg p-0.5">
-              {([
-                { key: 'none' as const, label: 'Flat' },
-                { key: 'alphabetical' as const, label: 'County' },
-                { key: 'regional' as const, label: 'Region' },
-              ]).map(({ key, label }) => (
-                <button
-                  key={key}
-                  onClick={() => setGroupBy(key)}
-                  className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-all ${
-                    groupBy === key
-                      ? 'bg-white text-ink shadow-sm border border-beige-2'
-                      : 'text-ink-2 hover:text-ink'
-                  }`}
-                  title={
-                    key === 'none' ? 'No grouping — flat list sorted by column'
-                    : key === 'alphabetical' ? 'Group by county, alphabetical (Atascosa → Wilson)'
-                    : 'Group by region (Hill Country / South Texas / …), counties sub-grouped'
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Group-by toggle moved out of the toolbar — see the slim
+            header bar on the table card below. The toggle controls
+            the TABLE, so it lives next to the table. */}
 
         {/* ─── AI filter chips row ─────────────────────────────────────
             Renders one chip per active criterion from aiCriteria. Click
@@ -1057,16 +1029,12 @@ export default function VaultPage() {
             // the active sort key.
             const sorted = (() => {
               const splitRows = splitCountyRows(sortedBase);
-              // When grouping by county or region we always need rows in
-              // county-alphabetical order so the group rendering is
-              // deterministic. Sort by county when sortKey is 'county'
-              // OR groupBy is active.
-              if (sortKey === 'county' || groupBy !== 'none') {
-                return [...splitRows].sort((a, b) =>
-                  a._displayCounty.localeCompare(b._displayCounty) * (sortDir === 'asc' ? 1 : -1)
-                );
-              }
-              return splitRows;
+              // Grouping is always active now (county or region) — every
+              // render needs rows in county-alphabetical order so the
+              // group headers can be deterministically inserted.
+              return [...splitRows].sort((a, b) =>
+                a._displayCounty.localeCompare(b._displayCounty) * (sortDir === 'asc' ? 1 : -1)
+              );
             })();
 
             // ─── Group rendering — build an interleaved list of group
@@ -1146,12 +1114,7 @@ export default function VaultPage() {
 
             const renderRows: RenderRow[] = [];
 
-            if (groupBy === 'none') {
-              // Flat — no group headers
-              for (const r of sorted) {
-                renderRows.push({ kind: 'comp', key: r._rowKey, row: r });
-              }
-            } else if (groupBy === 'alphabetical') {
+            if (groupBy === 'alphabetical') {
               // County groups, alphabetical. Aggregate stats per county.
               const byCounty = new Map<string, typeof sorted>();
               for (const r of sorted) {
@@ -1329,6 +1292,39 @@ export default function VaultPage() {
                 )}
 
               <div className="bg-white border border-beige rounded-xl overflow-hidden shadow-sm">
+                {/* Table-card header bar — slim row above the column
+                    headers. Left side shows a calm status indicator
+                    ("Grouped by county"); right side has the County
+                    vs Region toggle. Lives WITH the table so the
+                    broker sees cause + effect adjacent. */}
+                <div className="flex items-center justify-between px-4 py-2.5 border-b border-beige bg-cream/30">
+                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3">
+                    Grouped by {groupBy === 'alphabetical' ? 'county' : 'region'}
+                  </span>
+                  <div className="inline-flex bg-white border border-beige rounded-lg p-0.5">
+                    {([
+                      { key: 'alphabetical' as const, label: 'County' },
+                      { key: 'regional' as const, label: 'Region' },
+                    ]).map(({ key, label }) => (
+                      <button
+                        key={key}
+                        onClick={() => setGroupBy(key)}
+                        className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-all ${
+                          groupBy === key
+                            ? 'bg-olive-tint text-olive-2 border border-olive-border'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                        title={
+                          key === 'alphabetical'
+                            ? 'Group by county, alphabetical (Atascosa → Wilson)'
+                            : 'Group by region (Hill Country / South Texas / …), counties sub-grouped'
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead className="bg-cream/60 border-b border-beige sticky top-0 z-10">
@@ -1355,16 +1351,20 @@ export default function VaultPage() {
                         if (entry.kind === 'group-region') {
                           return (
                             <tr key={entry.key} className="bg-cream/80 border-t-2 border-beige-2 first:border-t-0">
-                              {/* County + City columns hold the region label */}
-                              <td colSpan={2} className="px-4 py-3">
-                                <div className="flex items-baseline gap-3">
-                                  <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-ink">
-                                    {entry.label}
-                                  </span>
-                                  <span className="text-[11px] text-ink-2 font-mono tabular-nums">
-                                    {entry.count} {entry.count === 1 ? 'comp' : 'comps'}
-                                  </span>
-                                </div>
+                              {/* County column → region name (e.g. "Hill Country") */}
+                              <td className="py-3 px-3">
+                                <span className="text-[13px] font-semibold text-ink">
+                                  {entry.label}
+                                </span>
+                              </td>
+                              {/* City column → "Totals · N" semantic label in bold */}
+                              <td className="py-3 px-3">
+                                <span className="text-[12px] font-bold text-ink">
+                                  Totals
+                                </span>
+                                <span className="text-[11px] text-ink-3 font-mono tabular-nums ml-1.5">
+                                  · {entry.count}
+                                </span>
                               </td>
                               {/* Acres column — total acres across region */}
                               <td className="px-3 py-3 text-right">
@@ -1418,16 +1418,23 @@ export default function VaultPage() {
                           const isNested = groupBy === 'regional';
                           return (
                             <tr key={entry.key} className={`${isNested ? 'bg-cream/40' : 'bg-cream/60'} border-t border-beige`}>
-                              {/* County + City columns hold the county label */}
-                              <td colSpan={2} className={`${isNested ? 'pl-8 pr-3' : 'px-4'} py-2`}>
-                                <div className="flex items-baseline gap-2.5">
-                                  <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-2">
-                                    {entry.label}{isNested ? '' : ' County'}
-                                  </span>
-                                  <span className="text-[10px] text-ink-3 font-mono tabular-nums">
-                                    {entry.count}
-                                  </span>
-                                </div>
+                              {/* County column → county name (matches comp rows
+                                  below so the eye reads consistently) */}
+                              <td className={`py-2 ${isNested ? 'pl-8 pr-3' : 'px-3'}`}>
+                                <span className="text-[12px] font-semibold text-ink">
+                                  {entry.label}
+                                </span>
+                              </td>
+                              {/* City column → "Totals · N" semantic label,
+                                  bold so the eye reads "this row is the
+                                  totals row, not a specific comp." */}
+                              <td className="py-2 px-3">
+                                <span className="text-[12px] font-bold text-ink">
+                                  Totals
+                                </span>
+                                <span className="text-[11px] text-ink-3 font-mono tabular-nums ml-1.5">
+                                  · {entry.count}
+                                </span>
                               </td>
                               {/* Acres column — total acres across county */}
                               <td className="px-3 py-2 text-right">
