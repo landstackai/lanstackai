@@ -1076,22 +1076,25 @@ export default function VaultPage() {
             //   'group-county'  → county header row (spans all cols)
             //   'comp'          → actual comp data row
             // groupBy === 'none' produces a flat list with no headers.
-            type RegionHeaderRow = {
-              kind: 'group-region';
+            // Group headers carry TWO separate medians so the table columns
+            // are summarized accurately:
+            //   medianPpaTotal    — median of price_per_acre (Total $/Ac)
+            //                       across ALL comps in the group
+            //   medianPpaAdjusted — median of ppa_land_only (Adjusted $/Ac)
+            //                       across ONLY comps that have an adjustment
+            // Previously the header showed a single mixed median (adjusted
+            // preferred), which made the value confusing — sometimes total,
+            // sometimes adjusted, never explicit which one.
+            type GroupHeaderCommon = {
               key: string;
               label: string;
               count: number;
               totalVolume: number;
-              medianPpa: number | null;
+              medianPpaTotal: number | null;
+              medianPpaAdjusted: number | null;
             };
-            type CountyHeaderRow = {
-              kind: 'group-county';
-              key: string;
-              label: string;
-              count: number;
-              totalVolume: number;
-              medianPpa: number | null;
-            };
+            type RegionHeaderRow = GroupHeaderCommon & { kind: 'group-region' };
+            type CountyHeaderRow = GroupHeaderCommon & { kind: 'group-county' };
             type CompRowEntry = {
               kind: 'comp';
               key: string;
@@ -1110,11 +1113,31 @@ export default function VaultPage() {
                 ? (filtered[mid - 1] + filtered[mid]) / 2
                 : filtered[mid];
             };
-            const groupStats = (rows: typeof sorted): { count: number; totalVolume: number; medianPpa: number | null } => {
+            const groupStats = (rows: typeof sorted): {
+              count: number;
+              totalVolume: number;
+              medianPpaTotal: number | null;
+              medianPpaAdjusted: number | null;
+            } => {
               const count = rows.length;
               const totalVolume = rows.reduce((s, r) => s + (r.sale_price || 0), 0);
-              const ppaList = rows.map((r) => r.ppa_land_only || r.price_per_acre || 0);
-              return { count, totalVolume, medianPpa: median(ppaList) };
+              // Total $/Ac median uses price_per_acre across ALL rows
+              const totalPpaList = rows.map((r) => r.price_per_acre || 0);
+              // Adjusted $/Ac median is computed ONLY from rows that have
+              // a real adjustment — skip rows where ppa_land_only is null/0
+              // so the median represents actual land-only sales, not a
+              // diluted mix of "adjusted" and "no adjustment available."
+              const adjPpaList: number[] = [];
+              for (const r of rows) {
+                const v = r.ppa_land_only;
+                if (typeof v === 'number' && v > 0) adjPpaList.push(v);
+              }
+              return {
+                count,
+                totalVolume,
+                medianPpaTotal: median(totalPpaList),
+                medianPpaAdjusted: adjPpaList.length > 0 ? median(adjPpaList) : null,
+              };
             };
 
             const renderRows: RenderRow[] = [];
@@ -1144,7 +1167,8 @@ export default function VaultPage() {
                   label: c,
                   count: s.count,
                   totalVolume: s.totalVolume,
-                  medianPpa: s.medianPpa,
+                  medianPpaTotal: s.medianPpaTotal,
+                  medianPpaAdjusted: s.medianPpaAdjusted,
                 });
                 for (const r of rows) {
                   renderRows.push({ kind: 'comp', key: r._rowKey, row: r });
@@ -1180,7 +1204,8 @@ export default function VaultPage() {
                   label: region,
                   count: regS.count,
                   totalVolume: regS.totalVolume,
-                  medianPpa: regS.medianPpa,
+                  medianPpaTotal: regS.medianPpaTotal,
+                  medianPpaAdjusted: regS.medianPpaAdjusted,
                 });
                 // County sub-groups, alphabetical within the region
                 const counties = Array.from(countyMap.keys()).sort((a, b) => a.localeCompare(b));
@@ -1193,7 +1218,8 @@ export default function VaultPage() {
                     label: c,
                     count: s.count,
                     totalVolume: s.totalVolume,
-                    medianPpa: s.medianPpa,
+                    medianPpaTotal: s.medianPpaTotal,
+                    medianPpaAdjusted: s.medianPpaAdjusted,
                   });
                   for (const r of rows) {
                     renderRows.push({ kind: 'comp', key: `${region}::${r._rowKey}`, row: r });
@@ -1340,15 +1366,26 @@ export default function VaultPage() {
                                   </span>
                                 )}
                               </td>
-                              {/* Per Acre column — median, olive-tinted */}
+                              {/* Per Acre column — median of price_per_acre
+                                  across all comps in the region (olive) */}
                               <td className="px-3 py-3 text-right">
-                                {entry.medianPpa != null && (
+                                {entry.medianPpaTotal != null && (
                                   <span className="text-[12px] font-semibold text-olive-2 font-mono tabular-nums">
-                                    {formatPPA(entry.medianPpa)}
+                                    {formatPPA(entry.medianPpaTotal)}
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-3" />
+                              {/* Adjusted column — median of ppa_land_only
+                                  across only comps with an adjustment.
+                                  Empty when no comp in the region has
+                                  an adjustment so the column isn't noisy. */}
+                              <td className="px-3 py-3 text-right">
+                                {entry.medianPpaAdjusted != null && (
+                                  <span className="text-[12px] font-semibold text-amber-800 font-mono tabular-nums">
+                                    {formatPPA(entry.medianPpaAdjusted)}
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-3 py-3" />
                               <td className="w-16" />
                             </tr>
@@ -1383,15 +1420,26 @@ export default function VaultPage() {
                                   </span>
                                 )}
                               </td>
-                              {/* Per Acre column — median, olive-tinted */}
+                              {/* Per Acre column — median of price_per_acre
+                                  across all comps in the county (olive) */}
                               <td className="px-3 py-2 text-right">
-                                {entry.medianPpa != null && (
+                                {entry.medianPpaTotal != null && (
                                   <span className="text-[11px] font-semibold text-olive-2 font-mono tabular-nums">
-                                    {formatPPA(entry.medianPpa)}
+                                    {formatPPA(entry.medianPpaTotal)}
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-2" />
+                              {/* Adjusted column — median of ppa_land_only
+                                  across only comps with an adjustment.
+                                  Amber-toned to match the comp row's
+                                  adjusted value styling. */}
+                              <td className="px-3 py-2 text-right">
+                                {entry.medianPpaAdjusted != null && (
+                                  <span className="text-[11px] font-semibold text-amber-800 font-mono tabular-nums">
+                                    {formatPPA(entry.medianPpaAdjusted)}
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-3 py-2" />
                               <td className="w-16" />
                             </tr>
