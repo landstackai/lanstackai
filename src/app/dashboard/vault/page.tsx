@@ -1089,6 +1089,7 @@ export default function VaultPage() {
               key: string;
               label: string;
               count: number;
+              totalAcres: number;
               totalVolume: number;
               medianPpaTotal: number | null;
               medianPpaAdjusted: number | null;
@@ -1115,11 +1116,13 @@ export default function VaultPage() {
             };
             const groupStats = (rows: typeof sorted): {
               count: number;
+              totalAcres: number;
               totalVolume: number;
               medianPpaTotal: number | null;
               medianPpaAdjusted: number | null;
             } => {
               const count = rows.length;
+              const totalAcres = rows.reduce((s, r) => s + (r.acres || 0), 0);
               const totalVolume = rows.reduce((s, r) => s + (r.sale_price || 0), 0);
               // Total $/Ac median uses price_per_acre across ALL rows
               const totalPpaList = rows.map((r) => r.price_per_acre || 0);
@@ -1134,6 +1137,7 @@ export default function VaultPage() {
               }
               return {
                 count,
+                totalAcres,
                 totalVolume,
                 medianPpaTotal: median(totalPpaList),
                 medianPpaAdjusted: adjPpaList.length > 0 ? median(adjPpaList) : null,
@@ -1166,6 +1170,7 @@ export default function VaultPage() {
                   key: `cty-${c}`,
                   label: c,
                   count: s.count,
+                  totalAcres: s.totalAcres,
                   totalVolume: s.totalVolume,
                   medianPpaTotal: s.medianPpaTotal,
                   medianPpaAdjusted: s.medianPpaAdjusted,
@@ -1203,6 +1208,7 @@ export default function VaultPage() {
                   key: `reg-${region}`,
                   label: region,
                   count: regS.count,
+                  totalAcres: regS.totalAcres,
                   totalVolume: regS.totalVolume,
                   medianPpaTotal: regS.medianPpaTotal,
                   medianPpaAdjusted: regS.medianPpaAdjusted,
@@ -1217,6 +1223,7 @@ export default function VaultPage() {
                     key: `reg-${region}-cty-${c}`,
                     label: c,
                     count: s.count,
+                    totalAcres: s.totalAcres,
                     totalVolume: s.totalVolume,
                     medianPpaTotal: s.medianPpaTotal,
                     medianPpaAdjusted: s.medianPpaAdjusted,
@@ -1348,7 +1355,8 @@ export default function VaultPage() {
                         if (entry.kind === 'group-region') {
                           return (
                             <tr key={entry.key} className="bg-cream/80 border-t-2 border-beige-2 first:border-t-0">
-                              <td colSpan={3} className="px-4 py-3">
+                              {/* County + City columns hold the region label */}
+                              <td colSpan={2} className="px-4 py-3">
                                 <div className="flex items-baseline gap-3">
                                   <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-ink">
                                     {entry.label}
@@ -1357,6 +1365,14 @@ export default function VaultPage() {
                                     {entry.count} {entry.count === 1 ? 'comp' : 'comps'}
                                   </span>
                                 </div>
+                              </td>
+                              {/* Acres column — total acres across region */}
+                              <td className="px-3 py-3 text-right">
+                                {entry.totalAcres > 0 && (
+                                  <span className="text-[12px] font-semibold text-ink font-mono tabular-nums">
+                                    {formatAcres(entry.totalAcres)}
+                                  </span>
+                                )}
                               </td>
                               {/* Total Price column */}
                               <td className="px-3 py-3 text-right">
@@ -1402,7 +1418,8 @@ export default function VaultPage() {
                           const isNested = groupBy === 'regional';
                           return (
                             <tr key={entry.key} className={`${isNested ? 'bg-cream/40' : 'bg-cream/60'} border-t border-beige`}>
-                              <td colSpan={3} className={`${isNested ? 'pl-8 pr-3' : 'px-4'} py-2`}>
+                              {/* County + City columns hold the county label */}
+                              <td colSpan={2} className={`${isNested ? 'pl-8 pr-3' : 'px-4'} py-2`}>
                                 <div className="flex items-baseline gap-2.5">
                                   <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-2">
                                     {entry.label}{isNested ? '' : ' County'}
@@ -1411,6 +1428,14 @@ export default function VaultPage() {
                                     {entry.count}
                                   </span>
                                 </div>
+                              </td>
+                              {/* Acres column — total acres across county */}
+                              <td className="px-3 py-2 text-right">
+                                {entry.totalAcres > 0 && (
+                                  <span className="text-[11px] font-semibold text-ink font-mono tabular-nums">
+                                    {formatAcres(entry.totalAcres)}
+                                  </span>
+                                )}
                               </td>
                               {/* Total Price column */}
                               <td className="px-3 py-2 text-right">
