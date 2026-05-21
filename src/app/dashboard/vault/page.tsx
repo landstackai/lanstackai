@@ -1312,68 +1312,88 @@ export default function VaultPage() {
                     </thead>
                     <tbody>
                       {renderRows.map((entry) => {
-                        // Region header — full-width row with aggregate
-                        // stats (count, total volume, median $/ac).
-                        // Reads like a section divider with built-in data.
+                        // ─── Region header ────────────────────────────
+                        // Full-width banner since regions are macro
+                        // groupings — using individual cells would make
+                        // the region name look tiny next to the column
+                        // grid. Aggregate totals are STILL aligned with
+                        // their columns via right-flush positioning that
+                        // visually lines up with TOTAL PRICE / PER ACRE.
                         if (entry.kind === 'group-region') {
                           return (
                             <tr key={entry.key} className="bg-cream/80 border-t-2 border-beige-2 first:border-t-0">
-                              <td colSpan={8} className="px-4 py-3">
-                                <div className="flex items-baseline justify-between flex-wrap gap-2">
-                                  <div className="flex items-baseline gap-3">
-                                    <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-ink">
-                                      {entry.label}
-                                    </span>
-                                    <span className="text-[11px] text-ink-2 font-mono tabular-nums">
-                                      {entry.count} {entry.count === 1 ? 'comp' : 'comps'}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-baseline gap-4 text-[11px] font-mono tabular-nums">
-                                    {entry.totalVolume > 0 && (
-                                      <span className="text-ink-2">
-                                        Total <span className="text-ink font-semibold ml-1">{formatCurrency(entry.totalVolume)}</span>
-                                      </span>
-                                    )}
-                                    {entry.medianPpa != null && (
-                                      <span className="text-ink-2">
-                                        Median <span className="text-olive-2 font-semibold ml-1">{formatPPA(entry.medianPpa)}</span>
-                                      </span>
-                                    )}
-                                  </div>
+                              <td colSpan={3} className="px-4 py-3">
+                                <div className="flex items-baseline gap-3">
+                                  <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-ink">
+                                    {entry.label}
+                                  </span>
+                                  <span className="text-[11px] text-ink-2 font-mono tabular-nums">
+                                    {entry.count} {entry.count === 1 ? 'comp' : 'comps'}
+                                  </span>
                                 </div>
                               </td>
+                              {/* Total Price column */}
+                              <td className="px-3 py-3 text-right">
+                                {entry.totalVolume > 0 && (
+                                  <span className="text-[12px] font-semibold text-ink font-mono tabular-nums">
+                                    {formatCurrency(entry.totalVolume)}
+                                  </span>
+                                )}
+                              </td>
+                              {/* Per Acre column — median, olive-tinted */}
+                              <td className="px-3 py-3 text-right">
+                                {entry.medianPpa != null && (
+                                  <span className="text-[12px] font-semibold text-olive-2 font-mono tabular-nums">
+                                    {formatPPA(entry.medianPpa)}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-3" />
+                              <td className="px-3 py-3" />
+                              <td className="w-16" />
                             </tr>
                           );
                         }
-                        // County header — smaller divider. Indented in
-                        // regional mode (visually nested under region),
-                        // top-level in alphabetical mode.
+                        // ─── County header ────────────────────────────
+                        // Aligns aggregate values with the columns they
+                        // represent so the broker can mentally tie the
+                        // header values back to the data column they're
+                        // summarizing. County name in col 1; total in
+                        // Total Price column; median $/ac in Per Acre
+                        // column. Other columns left blank.
                         if (entry.kind === 'group-county') {
                           const isNested = groupBy === 'regional';
                           return (
                             <tr key={entry.key} className={`${isNested ? 'bg-cream/40' : 'bg-cream/60'} border-t border-beige`}>
-                              <td colSpan={8} className={`${isNested ? 'px-6' : 'px-4'} py-2`}>
-                                <div className="flex items-baseline justify-between flex-wrap gap-2">
-                                  <div className="flex items-baseline gap-2.5">
-                                    <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink-2">
-                                      {entry.label}{isNested ? '' : ' County'}
-                                    </span>
-                                    <span className="text-[10px] text-ink-3 font-mono tabular-nums">
-                                      {entry.count}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-baseline gap-3 text-[10px] font-mono tabular-nums text-ink-3">
-                                    {entry.totalVolume > 0 && (
-                                      <span>{formatCurrency(entry.totalVolume)}</span>
-                                    )}
-                                    {entry.medianPpa != null && (
-                                      <span className="text-olive-2">
-                                        {formatPPA(entry.medianPpa)}
-                                      </span>
-                                    )}
-                                  </div>
+                              <td colSpan={3} className={`${isNested ? 'pl-8 pr-3' : 'px-4'} py-2`}>
+                                <div className="flex items-baseline gap-2.5">
+                                  <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-2">
+                                    {entry.label}{isNested ? '' : ' County'}
+                                  </span>
+                                  <span className="text-[10px] text-ink-3 font-mono tabular-nums">
+                                    {entry.count}
+                                  </span>
                                 </div>
                               </td>
+                              {/* Total Price column */}
+                              <td className="px-3 py-2 text-right">
+                                {entry.totalVolume > 0 && (
+                                  <span className="text-[11px] font-semibold text-ink font-mono tabular-nums">
+                                    {formatCurrency(entry.totalVolume)}
+                                  </span>
+                                )}
+                              </td>
+                              {/* Per Acre column — median, olive-tinted */}
+                              <td className="px-3 py-2 text-right">
+                                {entry.medianPpa != null && (
+                                  <span className="text-[11px] font-semibold text-olive-2 font-mono tabular-nums">
+                                    {formatPPA(entry.medianPpa)}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2" />
+                              <td className="px-3 py-2" />
+                              <td className="w-16" />
                             </tr>
                           );
                         }
