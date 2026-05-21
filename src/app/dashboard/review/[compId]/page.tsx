@@ -922,15 +922,16 @@ export default function ReviewPage() {
   // surfacing Reselect Mode immediately saves a click and signals
   // "this is the workflow."
   //
-  // Pre-fills the owner search with grantee (the new owner) since
-  // grantee is more likely to match current parcel records than grantor.
-  // Broker can clear/edit if grantee isn't useful.
+  // Owner-search input is intentionally LEFT EMPTY — the floating
+  // bar at the top of the map shows the comp's grantee + grantor as
+  // clickable suggestion chips below it, so the broker sees both
+  // options and picks the one they want (vs us guessing for them).
   //
   // Guards: only fires once per comp id, only when comp has no lat/lng
   // (otherwise the location is fine and broker is just visiting), and
   // only after the map is loaded so enterReselectMode can do its work.
   // Lives down here (not next to its declaration) because
-  // enterReselectMode is declared on line 858+.
+  // enterReselectMode is declared above.
   useEffect(() => {
     if (!comp || !mapLoaded) return;
     if (mode !== 'view') return;
@@ -940,11 +941,6 @@ export default function ReviewPage() {
       || (comp.latitude == null || comp.longitude == null);
     if (!needsLocation) return;
     reselectAutoFiredRef.current = comp.id;
-    if (comp.grantee) {
-      setOwnerQuery(comp.grantee);
-    } else if (comp.grantor) {
-      setOwnerQuery(comp.grantor);
-    }
     // Wait so the geocode-fallback flyTo settles before Reselect's
     // zoom-to-13.5 logic kicks in (avoids double-animating).
     const t = setTimeout(() => {
@@ -957,8 +953,12 @@ export default function ReviewPage() {
   // available — drastically narrows results (common surnames otherwise
   // return hundreds of state-wide matches). On success: stash matches +
   // pan/fit the map to their bbox so broker sees what came back.
-  const runOwnerSearch = useCallback(async () => {
-    const q = ownerQuery.trim();
+  // Optional overrideQuery: when called immediately after setOwnerQuery
+  // (e.g. from suggestion-chip click), the captured closure still has
+  // the OLD ownerQuery value. Pass the new value directly via override
+  // to avoid the stale-closure search.
+  const runOwnerSearch = useCallback(async (overrideQuery?: string) => {
+    const q = (overrideQuery ?? ownerQuery).trim();
     if (q.length < 3) {
       setOwnerSearchError('Type at least 3 characters');
       return;
@@ -1460,9 +1460,58 @@ export default function ReviewPage() {
               )}
             </button>
           </div>
-          {/* Match-count chip — sits just below the search bar when
-              results come back, like the vault's filter chips. Subtle
-              olive tint so it's visible without competing. */}
+          {/* Suggestion chips — show the comp's grantee + grantor as
+              one-click search options. Visible when the input is empty
+              and we have at least one party name to suggest. Click =
+              fill input AND fire the search immediately (one tap =
+              done). The broker sees BOTH names and chooses, rather
+              than us auto-prefilling one. */}
+          {(() => {
+            if (ownerQuery.trim().length > 0) return null;
+            // Build chip set from grantee + grantor (split grantor on commas
+            // since deeds sometimes list multiple sellers). Cap at 3 to keep
+            // the row compact.
+            const chips: string[] = [];
+            if (comp.grantee) chips.push(comp.grantee.trim());
+            if (comp.grantor) {
+              comp.grantor.split(',').map((s) => s.trim()).filter(Boolean).forEach((n) => {
+                if (!chips.includes(n)) chips.push(n);
+              });
+            }
+            const visible = chips.slice(0, 3);
+            if (visible.length === 0) return null;
+            const fillAndAsk = (name: string) => {
+              setOwnerQuery(name);
+              // Pass `name` directly to runOwnerSearch so the search uses
+              // the new value (avoids the stale-closure issue where the
+              // captured runOwnerSearch reads the OLD ownerQuery state).
+              if (mode !== 'reselect') {
+                enterReselectMode();
+                setTimeout(() => runOwnerSearch(name), 900);
+              } else {
+                setTimeout(() => runOwnerSearch(name), 30);
+              }
+            };
+            return (
+              <div className="mt-1.5 flex items-center gap-1.5 flex-wrap bg-white/90 backdrop-blur border border-beige rounded-md px-2.5 py-1.5 shadow-sm">
+                <span className="text-[10px] font-medium uppercase tracking-[0.06em] text-ink-3">Try</span>
+                {visible.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => fillAndAsk(name)}
+                    className="inline-flex items-center px-2 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded-full text-[11px] font-medium hover:bg-olive-tint hover:border-olive transition-colors"
+                    title={`Search "${name}" in ${comp?.county || 'this county'}`}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
+          {/* Match-count chip — sits below the search bar when results
+              come back. Subtle olive tint so it's visible without
+              competing with the map underneath. */}
           {ownerMatches && ownerMatches.length > 0 && (
             <div className="mt-1.5 bg-white border border-beige rounded-md px-2.5 py-1.5 flex items-center justify-between gap-2 shadow-sm">
               <p className="text-[11px] text-olive-2 truncate">
@@ -1622,212 +1671,11 @@ export default function ReviewPage() {
             </p>
           </div>
 
-          {/* RESELECT MODE BANNER — replaces normal action flow with the
-              selection controls when broker is actively re-picking parcels.
-              Shows running stats so broker can see how acreage compares
-              to the appraisal target as they click. */}
-          {mode === 'reselect' && (
-            <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
-              <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
-                <Edit3 size={12} />
-                Reselect mode
-              </div>
-              {loadingParcels ? (
-                <div className="flex items-center gap-2 text-xs text-ink-2">
-                  <Loader2 size={12} className="animate-spin" />
-                  Loading nearby parcels…
-                </div>
-              ) : (
-                <>
-                  <p className="text-[11px] text-ink-2 leading-relaxed">
-                    Click parcels on the map to add/remove them from the
-                    cluster. Selected parcels are gold; unselected are
-                    thin gray outlines.
-                  </p>
-
-                  {/* OWNER SEARCH — find parcels by appraisal-district
-                      owner name (e.g. "Grundhoefer Farms"). Matches
-                      render in sky-blue and are clickable to add to the
-                      cluster. Scoped to comp.county when known.
-                      Useful when the bbox fetch misses parcels — pin
-                      was wrong, or the cluster spans further than the
-                      initial viewport. */}
-                  <div className="border-t border-olive-border pt-2 space-y-2">
-                    <label className="text-[10px] uppercase tracking-wide text-ink-3 flex items-center gap-1.5">
-                      <Search size={10} />
-                      Search by owner name
-                      {comp?.county && (
-                        <span className="text-ink-3 normal-case tracking-normal">
-                          · {comp.county} only
-                        </span>
-                      )}
-                    </label>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="text"
-                        value={ownerQuery}
-                        onChange={(e) => setOwnerQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            runOwnerSearch();
-                          }
-                        }}
-                        placeholder="e.g. Grundhoefer Farms"
-                        disabled={ownerSearching}
-                        className="flex-1 bg-cream/60 border border-beige rounded px-2 py-1 text-xs text-ink placeholder-ink-3 focus:outline-none focus:border-olive disabled:opacity-50"
-                      />
-                      <button
-                        onClick={runOwnerSearch}
-                        disabled={ownerSearching || ownerQuery.trim().length < 3}
-                        className="px-2.5 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
-                        title="Search TxGIO by owner"
-                      >
-                        {ownerSearching ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
-                      </button>
-                    </div>
-                    {ownerSearchError && (
-                      <div className="text-[10px] text-red-700 leading-relaxed">{ownerSearchError}</div>
-                    )}
-                    {ownerMatches && ownerMatches.length > 0 && (
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="text-sky-700">
-                          {ownerMatches.length} match{ownerMatches.length === 1 ? '' : 'es'} (sky blue) — click to add
-                        </span>
-                        <button
-                          onClick={clearOwnerSearch}
-                          className="text-ink-3 hover:text-ink-2 underline"
-                          title="Clear owner matches"
-                        >
-                          clear
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {reselectStats && (
-                    <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
-                      <div>
-                        <span className="text-ink-3">Selected:</span>{' '}
-                        <span className="text-ink font-bold font-mono">{reselectStats.count}</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Total:</span>{' '}
-                        <span className="text-ink font-bold font-mono">{reselectStats.totalAcres.toFixed(1)}ac</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Target:</span>{' '}
-                        <span className="text-ink-2 font-mono">{reselectStats.target.toFixed(1)}ac</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Δ:</span>{' '}
-                        <span className={`font-mono font-bold ${
-                          reselectStats.delta == null ? 'text-ink-2' :
-                          reselectStats.delta < 0.05 ? 'text-olive' :
-                          reselectStats.delta < 0.15 ? 'text-amber-600' :
-                          'text-red-500'
-                        }`}>
-                          {reselectStats.delta != null ? `${(reselectStats.delta * 100).toFixed(1)}%` : '—'}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    <button
-                      onClick={cancelReselect}
-                      disabled={reselectSaving}
-                      className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
-                    >
-                      <X size={12} />
-                      Cancel
-                    </button>
-                    <button
-                      onClick={saveReselect}
-                      disabled={reselectSaving || selectedPropIds.size === 0}
-                      className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {reselectSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                      {reselectSaving ? 'Saving…' : 'Save'}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* DRAW MODE BANNER — broker draws a freehand polygon. Click
-              to add vertices, double-click to close the polygon. Once
-              closed, the drawn feature shows area + vertex count, and
-              Save commits it as the new boundary_geojson (clearing
-              parcel_id because drawn polygons don't correspond to
-              TxGIO parcels). */}
-          {mode === 'draw' && (
-            <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
-              <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
-                <Pencil size={12} />
-                Draw mode
-              </div>
-              {!drawnFeature ? (
-                <p className="text-[11px] text-ink-2 leading-relaxed">
-                  Click points on the map to draw the boundary. Double-
-                  click to close the polygon. Cancel exits without
-                  saving.
-                </p>
-              ) : (
-                <>
-                  <p className="text-[11px] text-ink-2 leading-relaxed">
-                    Boundary drawn. Drag vertices to adjust, or save to
-                    commit as the new comp boundary.
-                  </p>
-                  {drawStats && (
-                    <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
-                      <div>
-                        <span className="text-ink-3">Vertices:</span>{' '}
-                        <span className="text-ink font-bold font-mono">{drawStats.vertexCount}</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Area:</span>{' '}
-                        <span className="text-ink font-bold font-mono">{drawStats.acres.toFixed(1)}ac</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Target:</span>{' '}
-                        <span className="text-ink-2 font-mono">{drawStats.target.toFixed(1)}ac</span>
-                      </div>
-                      <div>
-                        <span className="text-ink-3">Δ:</span>{' '}
-                        <span className={`font-mono font-bold ${
-                          drawStats.delta == null ? 'text-ink-2' :
-                          drawStats.delta < 0.05 ? 'text-olive' :
-                          drawStats.delta < 0.15 ? 'text-amber-600' :
-                          'text-red-500'
-                        }`}>
-                          {drawStats.delta != null ? `${(drawStats.delta * 100).toFixed(1)}%` : '—'}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  onClick={cancelDraw}
-                  disabled={drawSaving}
-                  className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
-                >
-                  <X size={12} />
-                  Cancel
-                </button>
-                <button
-                  onClick={saveDraw}
-                  disabled={drawSaving || !drawnFeature}
-                  className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {drawSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                  {drawSaving ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </div>
-          )}
+          {/* Reselect Mode + Draw Mode banners moved down to the
+              "Workflow section" (under Grantor/Grantee). Subject info,
+              transaction details, description, and parties read first;
+              the location-fixing tools live in a single consistent slot
+              below them. See the workflow section ~150 lines down. */}
 
           {/* Status badges — same set as the vault list uses */}
           <div className="flex flex-wrap gap-1.5">
@@ -1955,13 +1803,216 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* ─── Workflow actions: Reselect + Draw + Verify ─────────────
-              Moved here (was at the bottom of the panel) so when a comp
-              with needs_location_review lands, the broker sees the
-              fix-the-location tools immediately below the transaction
-              parties — the natural reading order is subject → financials
-              → who-bought-it → "now I'll place the pin." Hidden in
-              reselect/draw mode (those each have their own banner). */}
+          {/* ─── Workflow section ────────────────────────────────────
+              ONE slot, three possible renders:
+                view  → action-row buttons (Reselect / Draw / Verify)
+                reselect → Reselect Mode banner (with owner search, stats)
+                draw  → Draw Mode banner (with vertex/area stats)
+              All three render in the SAME vertical position so the
+              property info above (Acres / Description / Grantor) stays
+              stable regardless of mode. */}
+
+          {/* RESELECT MODE BANNER */}
+          {mode === 'reselect' && (
+            <div className="border-t border-beige pt-3">
+              <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
+                <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
+                  <Edit3 size={12} />
+                  Reselect mode
+                </div>
+                {loadingParcels ? (
+                  <div className="flex items-center gap-2 text-xs text-ink-2">
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading nearby parcels…
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-ink-2 leading-relaxed">
+                      Click parcels on the map to add/remove them from the
+                      cluster. Selected parcels are gold; unselected are
+                      thin gray outlines.
+                    </p>
+
+                    {/* OWNER SEARCH — same state as the floating search
+                        bar at the top of the map. Either input fills
+                        ownerQuery so the broker can use whichever is
+                        closer to their cursor. */}
+                    <div className="border-t border-olive-border pt-2 space-y-2">
+                      <label className="text-[10px] uppercase tracking-wide text-ink-3 flex items-center gap-1.5">
+                        <Search size={10} />
+                        Search by owner name
+                        {comp?.county && (
+                          <span className="text-ink-3 normal-case tracking-normal">
+                            · {comp.county} only
+                          </span>
+                        )}
+                      </label>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={ownerQuery}
+                          onChange={(e) => setOwnerQuery(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              runOwnerSearch();
+                            }
+                          }}
+                          placeholder="e.g. Grundhoefer Farms"
+                          disabled={ownerSearching}
+                          className="flex-1 bg-cream/60 border border-beige rounded px-2 py-1 text-xs text-ink placeholder-ink-3 focus:outline-none focus:border-olive disabled:opacity-50"
+                        />
+                        <button
+                          onClick={() => runOwnerSearch()}
+                          disabled={ownerSearching || ownerQuery.trim().length < 3}
+                          className="px-2.5 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
+                          title="Search TxGIO by owner"
+                        >
+                          {ownerSearching ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+                        </button>
+                      </div>
+                      {ownerSearchError && (
+                        <div className="text-[10px] text-red-700 leading-relaxed">{ownerSearchError}</div>
+                      )}
+                      {ownerMatches && ownerMatches.length > 0 && (
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-sky-700">
+                            {ownerMatches.length} match{ownerMatches.length === 1 ? '' : 'es'} (sky blue) — click to add
+                          </span>
+                          <button
+                            onClick={clearOwnerSearch}
+                            className="text-ink-3 hover:text-ink-2 underline"
+                            title="Clear owner matches"
+                          >
+                            clear
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {reselectStats && (
+                      <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+                        <div>
+                          <span className="text-ink-3">Selected:</span>{' '}
+                          <span className="text-ink font-bold font-mono">{reselectStats.count}</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Total:</span>{' '}
+                          <span className="text-ink font-bold font-mono">{reselectStats.totalAcres.toFixed(1)}ac</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Target:</span>{' '}
+                          <span className="text-ink-2 font-mono">{reselectStats.target.toFixed(1)}ac</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Δ:</span>{' '}
+                          <span className={`font-mono font-bold ${
+                            reselectStats.delta == null ? 'text-ink-2' :
+                            reselectStats.delta < 0.05 ? 'text-olive' :
+                            reselectStats.delta < 0.15 ? 'text-amber-600' :
+                            'text-red-500'
+                          }`}>
+                            {reselectStats.delta != null ? `${(reselectStats.delta * 100).toFixed(1)}%` : '—'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <button
+                        onClick={cancelReselect}
+                        disabled={reselectSaving}
+                        className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                      >
+                        <X size={12} />
+                        Cancel
+                      </button>
+                      <button
+                        onClick={saveReselect}
+                        disabled={reselectSaving || selectedPropIds.size === 0}
+                        className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {reselectSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                        {reselectSaving ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* DRAW MODE BANNER */}
+          {mode === 'draw' && (
+            <div className="border-t border-beige pt-3">
+              <div className="bg-olive-tint border border-olive-border rounded-lg p-3 space-y-3">
+                <div className="flex items-center gap-1.5 text-olive-2 font-bold text-xs uppercase tracking-wide">
+                  <Pencil size={12} />
+                  Draw mode
+                </div>
+                {!drawnFeature ? (
+                  <p className="text-[11px] text-ink-2 leading-relaxed">
+                    Click points on the map to draw the boundary. Double-
+                    click to close the polygon. Cancel exits without
+                    saving.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-ink-2 leading-relaxed">
+                      Boundary drawn. Drag vertices to adjust, or save to
+                      commit as the new comp boundary.
+                    </p>
+                    {drawStats && (
+                      <div className="text-xs grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+                        <div>
+                          <span className="text-ink-3">Vertices:</span>{' '}
+                          <span className="text-ink font-bold font-mono">{drawStats.vertexCount}</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Area:</span>{' '}
+                          <span className="text-ink font-bold font-mono">{drawStats.acres.toFixed(1)}ac</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Target:</span>{' '}
+                          <span className="text-ink-2 font-mono">{drawStats.target.toFixed(1)}ac</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-3">Δ:</span>{' '}
+                          <span className={`font-mono font-bold ${
+                            drawStats.delta == null ? 'text-ink-2' :
+                            drawStats.delta < 0.05 ? 'text-olive' :
+                            drawStats.delta < 0.15 ? 'text-amber-600' :
+                            'text-red-500'
+                          }`}>
+                            {drawStats.delta != null ? `${(drawStats.delta * 100).toFixed(1)}%` : '—'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={cancelDraw}
+                    disabled={drawSaving}
+                    className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige-2 text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
+                  >
+                    <X size={12} />
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveDraw}
+                    disabled={drawSaving || !drawnFeature}
+                    className="py-2 bg-olive hover:bg-olive-2 text-white rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {drawSaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                    {drawSaving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* VIEW MODE ACTIONS — only when not actively reselecting/drawing */}
           {mode === 'view' && (
             <div className="border-t border-beige pt-3 space-y-2">
               <button
