@@ -653,7 +653,26 @@ export default function ClientReport({ params }: ClientReportProps) {
                   </div>
                 )}
 
-                {sharedAverages.adjusted.n > 0 && hasAnyAdjustedComp && (
+                {/* Adjusted card gate: show whenever the adjusted
+                    averages actually differ from Total. The legacy
+                    `hasAnyAdjustedComp` flag only checked the singular
+                    `improvement_value` field + broker draft overrides
+                    — it ignored the `improvements_value` (plural) field
+                    that import-extraction populates, so post-MLS-import
+                    CMAs were hiding the Adjusted card even when the
+                    helper had real numbers. The diff check below is
+                    the actual question we care about: "is Adjusted
+                    showing the client something distinct from Total?"
+                    If yes, render. If no (vacant-land-only CMA), hide
+                    as redundant. */}
+                {(() => {
+                  const a = sharedAverages.adjusted;
+                  const t = sharedAverages.total;
+                  if (a.n === 0) return false;
+                  if (a.mid == null || t.mid == null) return false;
+                  // 1¢/ac threshold — anything below that is rounding noise.
+                  return Math.abs(a.mid - t.mid) > 1;
+                })() && (
                   <div className="px-4 pb-4 space-y-2">
                     <div className="bg-white border border-beige rounded-xl overflow-hidden">
                       <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
