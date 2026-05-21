@@ -4241,6 +4241,16 @@ export default function MapPage() {
                 // and clears the inactive-mode columns. Optimistic local update
                 // so the right-panel re-renders instantly. Now also handles the
                 // optional house-breakdown columns (sqft, ppsf, additional vertical).
+                //
+                // Self-healing on schema-cache misses: if Supabase's PostgREST
+                // cache is stale (a column exists in the DB but the API layer
+                // hasn't picked it up yet, OR a migration genuinely hasn't been
+                // applied), the update would otherwise fail with three toast
+                // errors like "Could not find the 'broker_opinion_value'
+                // column of 'cmas' in the schema cache". We parse that, strip
+                // the offending field, retry. The broker's opinion still
+                // saves with whatever columns ARE in the cache. Mirrors the
+                // pattern used for comp inserts in src/app/dashboard/import.
                 const saveBov = async (patch: {
                   mode: BovMode | null;
                   total: number | null;
@@ -4264,11 +4274,39 @@ export default function MapPage() {
                   if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
-                  const { error } = await supabase
-                    .from('cmas')
-                    .update(fields)
-                    .eq('id', viewingCMA.id);
-                  if (error) toast.error(error.message);
+
+                  let current = { ...fields };
+                  const droppedCols: string[] = [];
+                  const MAX_RETRIES = 8;
+                  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                    const { error } = await supabase
+                      .from('cmas')
+                      .update(current)
+                      .eq('id', viewingCMA.id);
+                    if (!error) {
+                      if (droppedCols.length > 0) {
+                        console.warn(
+                          `[saveBov] saved without columns missing from schema cache: ${droppedCols.join(', ')}. ` +
+                          `Run NOTIFY pgrst, 'reload schema'; in Supabase SQL editor, or apply pending migrations.`
+                        );
+                      }
+                      return;
+                    }
+                    const msg = String(error.message || '');
+                    const m = msg.match(/Could not find the '([\w_]+)' column/);
+                    if (!m) {
+                      toast.error(msg);
+                      return;
+                    }
+                    const missingCol = m[1];
+                    if (!(missingCol in current)) {
+                      toast.error(msg);
+                      return;
+                    }
+                    delete current[missingCol];
+                    droppedCols.push(missingCol);
+                  }
+                  toast.error('Save failed after stripping unknown columns. Reload Supabase schema cache.');
                 };
 
                 // ─── LUMP SUM handlers ───
