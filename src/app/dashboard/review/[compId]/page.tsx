@@ -34,10 +34,11 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // quirk). MapboxDraw CSS is also loaded globally there.
 // @ts-expect-error — turf v6.5 .d.ts not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2, Sparkles, ExternalLink, Link as LinkIcon, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2, Sparkles, ExternalLink, Link as LinkIcon } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { buildOwnerSearchChips } from '@/lib/utils/abbreviateOwner';
 import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
+import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
@@ -940,6 +941,21 @@ export default function ReviewPage() {
       setSaving(false);
     }
   }, [comp, saving, supabase]);
+
+  // Delete this comp. Wrapped in DeleteConfirmButton's 2-step on the
+  // UI side so brokers can't nuke it accidentally — by the time we get
+  // here, they've already clicked through the confirm pill. On success
+  // we navigate back to the vault (no comp to stay on anymore).
+  const handleDeleteComp = useCallback(async () => {
+    if (!comp) return;
+    const { error } = await supabase.from('comps').delete().eq('id', comp.id);
+    if (error) {
+      toast.error(`Delete failed: ${error.message}`);
+      throw error; // surface to DeleteConfirmButton so it resets to idle
+    }
+    toast.success('Comp deleted');
+    router.push('/dashboard/vault');
+  }, [comp, supabase, router]);
 
   // ── Stage B: Reselect parcels mode ──────────────────────────────────
   // Broker enters this mode to fix a wrong cluster — click parcels on
@@ -2144,6 +2160,22 @@ export default function ReviewPage() {
                 <Check size={12} />
                 {comp.needs_location_review ? 'Mark verified' : 'Verified'}
               </button>
+              {/* Destructive action — separated from the constructive
+                  buttons above by a tight dotted divider so the eye
+                  registers it as a different category. 2-step confirm
+                  (click "Delete comp" → "Confirm delete?" pill → click
+                  again to commit, auto-reverts in 5s). On confirm we
+                  delete + bounce the broker back to the vault since
+                  there's nothing to review anymore. */}
+              <div className="pt-2 mt-1 border-t border-dashed border-beige flex justify-center">
+                <DeleteConfirmButton
+                  variant="label"
+                  label="Delete comp"
+                  confirmLabel="Confirm delete?"
+                  title="Permanently delete this comp"
+                  onConfirm={handleDeleteComp}
+                />
+              </div>
             </div>
           )}
 

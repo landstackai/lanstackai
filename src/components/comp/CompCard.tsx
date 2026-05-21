@@ -2,8 +2,9 @@
 
 import { Comp } from '@/types';
 import { formatCurrency, formatPPA, formatAcres, formatDate } from '@/lib/utils';
-import { MapPin, Lock, Users, Globe, Edit, Trash2, ChevronRight } from 'lucide-react';
+import { MapPin, Lock, Users, Globe, Edit, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
+import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 
 interface CompCardProps {
   comp: Comp;
@@ -88,19 +89,22 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
           </div>
         </div>
 
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="flex items-center gap-1">
           <button
             onClick={(e) => { e.stopPropagation(); onEdit(); }}
-            className="p-1.5 rounded-lg hover:bg-white/5 text-ink-2 hover:text-ink transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/5 text-ink-2 hover:text-ink transition-colors opacity-0 group-hover:opacity-100 transition-opacity"
           >
             <Edit size={13} />
           </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1.5 rounded-lg hover:bg-red-400/10 text-ink-2 hover:text-red-500 transition-colors"
-          >
-            <Trash2 size={13} />
-          </button>
+          {/* 2-step delete — see DeleteConfirmButton. Always visible (low
+              opacity in idle) so the confirming pill persists even when
+              the user hovers off the card mid-confirmation. */}
+          <DeleteConfirmButton
+            variant="icon"
+            onConfirm={onDelete}
+            title="Delete this comp"
+            className="opacity-50 group-hover:opacity-100"
+          />
         </div>
 
         <VisibilityIcon size={10} className="text-ink-3 flex-shrink-0" />
@@ -125,10 +129,12 @@ export default function CompCard({ comp, onEdit, onDelete, viewMode, isSelected,
             className="p-1 rounded hover:bg-white/5 text-ink-3 hover:text-ink">
             <Edit size={12} />
           </button>
-          <button onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-red-400/10 text-ink-3 hover:text-red-500">
-            <Trash2 size={12} />
-          </button>
+          {/* 2-step delete — protects against accidental wipes in grid view */}
+          <DeleteConfirmButton
+            variant="icon"
+            onConfirm={onDelete}
+            title="Delete this comp"
+          />
         </div>
       </div>
 
