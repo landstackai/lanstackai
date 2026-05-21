@@ -35,6 +35,11 @@ export type CmaComp = {
   improvements_value?: number | null;
   improvement_value?: number | null;
   improvement_source?: 'appraiser' | 'agent_verified' | 'broker_estimate' | null;
+  // Needed for the Land-Only sample logic. Vacant comps (has_improvements
+  // === false) contribute to Land-Only at their total $/Ac — they ARE
+  // raw dirt. Without this flag, the helper has to exclude any comp
+  // missing improvements_value and the sample size silently undercounts.
+  has_improvements?: boolean | null;
 };
 
 export type CmaAdjustmentMap = Record<
@@ -65,9 +70,24 @@ const landOnlyPpa = (c: CmaComp): number | null => {
   const p = num(c.sale_price);
   if (a <= 0 || p <= 0) return null;
   const imp = c.improvements_value;
-  if (imp == null) return null; // no improvement data → skip (don't conflate with total)
-  const land = p - num(imp);
-  return land > 0 ? land / a : null;
+  if (imp != null) {
+    // Improved comp with an itemized improvement value: back it out.
+    const land = p - num(imp);
+    return land > 0 ? land / a : null;
+  }
+  // No itemized improvement value. Two cases:
+  //   (a) Vacant comp (has_improvements === false) → already raw dirt;
+  //       its total $/Ac IS its land-only $/Ac. Include it.
+  //   (b) Improved comp with no extracted improvement value
+  //       (has_improvements === true with improvements_value null) →
+  //       we genuinely don't know the dollar value of the structures,
+  //       so we can't fairly back them out. Exclude.
+  //   (c) Unknown (has_improvements null) → conservatively exclude.
+  //       Most imports populate has_improvements, so this is rare.
+  if (c.has_improvements === false) {
+    return p / a;
+  }
+  return null;
 };
 
 const adjustedPpa = (c: CmaComp, adj: CmaAdjustmentMap): number | null => {

@@ -623,7 +623,6 @@ export default function ClientReport({ params }: ClientReportProps) {
                       <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
                         <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
                           Average Land-Only Price Per Acre
-                          <span className="text-ink-3 normal-case tracking-normal"> (improved comps)</span>
                         </p>
                         <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.landOnly.n} of {comps.length} comps</p>
                       </div>
