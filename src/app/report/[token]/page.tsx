@@ -897,52 +897,102 @@ export default function ClientReport({ params }: ClientReportProps) {
                           }`}
                         >
                           <div className="px-3 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
-                                <span className="truncate">{properCase(comp.property_name) || `${properCase(comp.county)} County`}</span>
-                                {(comp as any).has_improvements && (
-                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
-                                    IMPROVED
-                                  </span>
-                                )}
-                                {(comp as any).irrigation === 'Strong' && (
-                                  <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
-                                    IRRIGATION
-                                  </span>
-                                )}
-                                {isAdjusted && (
-                                  <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>
-                                )}
-                                {effSrc === 'agent_verified' && (
-                                  <span
-                                    className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
-                                    title="An agent involved in this transaction verified the improvement value."
-                                  >
-                                    Agent-Verified
-                                  </span>
-                                )}
-                                {isBrokerEstimated && (
-                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-400/30 text-amber-700 font-bold flex-shrink-0">
-                                    Broker-est
-                                  </span>
-                                )}
-                              </p>
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                {dist != null && (
-                                  <p className="text-[10px] text-ink-3 font-mono">{dist.toFixed(1)} mi</p>
-                                )}
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); toggleExpanded(comp.id); }}
-                                  className="p-0.5 rounded text-ink-3 hover:text-ink hover:bg-cream-2 transition-colors"
-                                  title={expandedCompIds.has(comp.id) ? 'Hide details' : 'Show details'}
-                                >
-                                  <ChevronDown
-                                    size={14}
-                                    className={`transition-transform ${expandedCompIds.has(comp.id) ? 'rotate-180' : ''}`}
-                                  />
-                                </button>
-                              </div>
-                            </div>
+                            {(() => {
+                              // Listing link — surface on the COLLAPSED card so
+                              // clients can click straight to the listing without
+                              // having to expand each comp. Prefers source_links[0]
+                              // (multi-link case) over source_url (legacy single
+                              // string). Null when neither exists; the cell omits.
+                              const listingLinks: any[] = (comp as any).source_links || [];
+                              const listingUrl: string | null =
+                                listingLinks.length > 0
+                                  ? listingLinks[0]?.url
+                                  : (comp as any).source_url || null;
+                              return (
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
+                                    {/* Property name doubles as the listing link
+                                        when one exists. Clients reach for it first
+                                        ("can I see this property?") — make it a
+                                        target. When no link, render as a plain
+                                        span so it doesn't look misleadingly
+                                        clickable. */}
+                                    {listingUrl ? (
+                                      <a
+                                        href={listingUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="truncate text-ink hover:text-slate-blue-2 hover:underline decoration-slate-blue-2/40 underline-offset-2 transition-colors"
+                                        title="Open the listing in a new tab"
+                                      >
+                                        {properCase(comp.property_name) || `${properCase(comp.county)} County`}
+                                      </a>
+                                    ) : (
+                                      <span className="truncate">{properCase(comp.property_name) || `${properCase(comp.county)} County`}</span>
+                                    )}
+                                    {(comp as any).has_improvements && (
+                                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
+                                        IMPROVED
+                                      </span>
+                                    )}
+                                    {(comp as any).irrigation === 'Strong' && (
+                                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-purple-400/10 text-purple-600 rounded flex-shrink-0">
+                                        IRRIGATION
+                                      </span>
+                                    )}
+                                    {isAdjusted && (
+                                      <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>
+                                    )}
+                                    {effSrc === 'agent_verified' && (
+                                      <span
+                                        className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
+                                        title="An agent involved in this transaction verified the improvement value."
+                                      >
+                                        Agent-Verified
+                                      </span>
+                                    )}
+                                    {isBrokerEstimated && (
+                                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-400/30 text-amber-700 font-bold flex-shrink-0">
+                                        Broker-est
+                                      </span>
+                                    )}
+                                  </p>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    {dist != null && (
+                                      <p className="text-[10px] text-ink-3 font-mono">{dist.toFixed(1)} mi</p>
+                                    )}
+                                    {/* Secondary listing affordance — an explicit
+                                        external-link icon. Some clients won't
+                                        notice the underlined property name;
+                                        the icon signals "click here, opens a
+                                        new tab" universally. */}
+                                    {listingUrl && (
+                                      <a
+                                        href={listingUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="p-0.5 rounded text-ink-3 hover:text-slate-blue-2 hover:bg-slate-blue/10 transition-colors"
+                                        title="Open listing in a new tab"
+                                      >
+                                        <ExternalLink size={13} />
+                                      </a>
+                                    )}
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); toggleExpanded(comp.id); }}
+                                      className="p-0.5 rounded text-ink-3 hover:text-ink hover:bg-cream-2 transition-colors"
+                                      title={expandedCompIds.has(comp.id) ? 'Hide details' : 'Show details'}
+                                    >
+                                      <ChevronDown
+                                        size={14}
+                                        className={`transition-transform ${expandedCompIds.has(comp.id) ? 'rotate-180' : ''}`}
+                                      />
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                             {/* 4-column grid (matches CMA workspace) */}
                             <div className="grid grid-cols-4 gap-2 mt-2 text-[10px] font-mono">
                               <div>
