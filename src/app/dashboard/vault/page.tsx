@@ -1293,14 +1293,16 @@ export default function VaultPage() {
 
               <div className="bg-white border border-beige rounded-xl overflow-hidden shadow-sm">
                 {/* Table-card header bar — slim row above the column
-                    headers. Left side shows a calm status indicator
-                    ("Grouped by county"); right side has the County
-                    vs Region toggle. Lives WITH the table so the
-                    broker sees cause + effect adjacent. */}
+                    headers. LEFT: County | Region toggle (the primary
+                    control, placed where the eye lands first, directly
+                    above the County column it controls). RIGHT: calm
+                    summary stats giving glanceable shape ("7 counties
+                    · 34 properties"). */}
                 <div className="flex items-center justify-between px-4 py-2.5 border-b border-beige bg-cream/30">
-                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3">
-                    Grouped by {groupBy === 'alphabetical' ? 'county' : 'region'}
-                  </span>
+                  {/* LEFT — toggle pill. Active state: white bg + olive
+                      border, matches the Lump Sum / Land + Improvements
+                      toggle pattern from the CMA Opinion of Value
+                      section for consistency across the app. */}
                   <div className="inline-flex bg-white border border-beige rounded-lg p-0.5">
                     {([
                       { key: 'alphabetical' as const, label: 'County' },
@@ -1311,7 +1313,7 @@ export default function VaultPage() {
                         onClick={() => setGroupBy(key)}
                         className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-all ${
                           groupBy === key
-                            ? 'bg-olive-tint text-olive-2 border border-olive-border'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
                             : 'text-ink-2 hover:text-ink'
                         }`}
                         title={
@@ -1324,6 +1326,26 @@ export default function VaultPage() {
                       </button>
                     ))}
                   </div>
+                  {/* RIGHT — summary stats. In County mode: counties +
+                      properties. In Region mode: also include region
+                      count. Computed from the renderRows array since
+                      that's already grouped + deduped. */}
+                  {(() => {
+                    const countyCount = renderRows.filter((r) => r.kind === 'group-county').length;
+                    const regionCount = renderRows.filter((r) => r.kind === 'group-region').length;
+                    const compCount = renderRows.filter((r) => r.kind === 'comp').length;
+                    const parts: string[] = [];
+                    if (groupBy === 'regional' && regionCount > 0) {
+                      parts.push(`${regionCount} ${regionCount === 1 ? 'region' : 'regions'}`);
+                    }
+                    parts.push(`${countyCount} ${countyCount === 1 ? 'county' : 'counties'}`);
+                    parts.push(`${compCount} ${compCount === 1 ? 'property' : 'properties'}`);
+                    return (
+                      <span className="text-[11px] text-ink-3 font-mono tabular-nums">
+                        {parts.join(' · ')}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
