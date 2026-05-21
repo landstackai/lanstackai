@@ -92,14 +92,27 @@ export function abbreviateOwner(rawName: string | null | undefined): string | nu
 
 /**
  * Build a chip set for the review-page search suggestions.
- * Generates up to 3 chips, varied to teach broker search strategies:
- *   - abbreviated grantee (if present)
- *   - abbreviated grantor surname(s) (deduped, max 1)
- *   - one combined "surname + county" chip showing refinement
+ *
+ * Generates up to 4 chips intentionally varied to teach broker search
+ * strategies — each chip is a different *type* of query so the chip
+ * set itself demonstrates the spectrum from broad to specific:
+ *
+ *   1. Abbreviated grantee     "Eatwell"         — distinctive word
+ *   2. Abbreviated grantor     "Burrow"          — surname (broadest match)
+ *   3. Full grantor name       "David Burrow"    — specific person
+ *   4. Combined refinement     "Burrow Gonzales County"  — narrow w/ place
+ *
+ * Why a full-name chip in addition to the surname: TxGIO's owner index
+ * sometimes stores "DAVID BURROW" precisely; the surname-only search
+ * returns hundreds of state-wide Burrows. Showing the full name as an
+ * option signals "you can refine further if needed."
  *
  * Multi-party grantors ("David Burrow, Justin Burrow") get split on
- * commas and deduplicated by abbreviated form — so "Burrow" only
- * shows once even if multiple Burrows are on the deed.
+ * commas; we use the first party for the surname + full-name chips.
+ *
+ * Dedup logic: if the abbreviation EQUALS the full name (single-word
+ * party like just "Burrow"), the full-name chip is skipped to avoid
+ * a duplicate.
  */
 export function buildOwnerSearchChips(opts: {
   grantee?: string | null;
@@ -123,18 +136,29 @@ export function buildOwnerSearchChips(opts: {
     if (a) add(a);
   }
 
-  // 2) Abbreviated grantor (first party only — multiple grantors usually
-  //    share a surname, so the first one's surname covers the family)
+  // First-party grantor (e.g. "David Burrow" out of "David Burrow, Justin Burrow")
+  let firstGrantor: string | null = null;
   let grantorAbbr: string | null = null;
   if (opts.grantor) {
-    const firstParty = opts.grantor.split(',').map((s) => s.trim()).filter(Boolean)[0];
-    if (firstParty) {
-      grantorAbbr = abbreviateOwner(firstParty);
-      if (grantorAbbr) add(grantorAbbr);
+    const candidate = opts.grantor.split(',').map((s) => s.trim()).filter(Boolean)[0] ?? '';
+    if (candidate) {
+      firstGrantor = candidate;
+      grantorAbbr = abbreviateOwner(candidate);
     }
   }
 
-  // 3) Combined chip — picks the most distinctive seed (grantor surname
+  // 2) Abbreviated grantor (surname)
+  if (grantorAbbr) add(grantorAbbr);
+
+  // 3) Full grantor name — only when meaningfully different from the
+  //    abbreviated surname (single-word parties skip this to avoid dup)
+  if (firstGrantor && grantorAbbr) {
+    if (firstGrantor.toLowerCase() !== grantorAbbr.toLowerCase()) {
+      add(firstGrantor);
+    }
+  }
+
+  // 4) Combined chip — picks the most distinctive seed (grantor surname
   //    preferred; grantee abbreviation as fallback) + county
   if (opts.county) {
     const seed = grantorAbbr ?? (opts.grantee ? abbreviateOwner(opts.grantee) : null);
@@ -143,5 +167,5 @@ export function buildOwnerSearchChips(opts: {
     }
   }
 
-  return chips.slice(0, 3);
+  return chips.slice(0, 4);
 }
