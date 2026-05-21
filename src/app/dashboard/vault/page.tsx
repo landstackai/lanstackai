@@ -11,6 +11,7 @@ import CompModal from '@/components/comp/CompModal';
 import QuickCapture from '@/components/comp/QuickCapture';
 import { useSearchParams } from 'next/navigation';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
+import { getRegionForCounty, getRegionsInDisplayOrder, UNASSIGNED_REGION } from '@/lib/utils/texasRegions';
 import toast from 'react-hot-toast';
 
 // Heuristic city extractor — comps store free-text "address" (e.g.
@@ -121,6 +122,21 @@ export default function VaultPage() {
   // expose date as a sortable column).
   const [sortKey, setSortKey] = useState<SortKey>('county');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  // ─── Group-by mode ─────────────────────────────────────────────
+  // The vault can render the comp list flat or grouped:
+  //   'none'         — flat table, sorted by sortKey (legacy behavior)
+  //   'alphabetical' — county group headers in alphabetical order
+  //                    (Atascosa → Blanco → Comal …) with per-county
+  //                    aggregate stats above each group
+  //   'regional'     — region group headers (Hill Country / South
+  //                    Texas / etc.) with county sub-groups inside.
+  //                    Falls back to a single 'Unassigned' bucket
+  //                    until the county→region map in
+  //                    src/lib/utils/texasRegions.ts is populated.
+  // Defaults to 'alphabetical' — most useful starting point for
+  // brokers scanning by county. Toggle is in the vault header.
+  type GroupBy = 'none' | 'alphabetical' | 'regional';
+  const [groupBy, setGroupBy] = useState<GroupBy>('alphabetical');
   // "Needs Location" filter — show only comps with missing coordinates. Useful
   // after batch imports where rural addresses didn't geocode.
   const [needsLocationOnly, setNeedsLocationOnly] = useState(false);
@@ -584,6 +600,44 @@ export default function VaultPage() {
 
         </div>
 
+        {/* Group-by toggle — sits below the main toolbar so it has
+            breathing room from the search bar / scope tabs. Three
+            modes: Flat (no grouping), County (alphabetical group
+            headers), Region (region headers with county subgroups).
+            Only shown in list view since groups don't make sense
+            in the card-grid layout. */}
+        {viewMode === 'list' && (
+          <div className="flex items-center gap-2 mt-3">
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3">
+              Group
+            </span>
+            <div className="inline-flex bg-cream border border-beige rounded-lg p-0.5">
+              {([
+                { key: 'none' as const, label: 'Flat' },
+                { key: 'alphabetical' as const, label: 'County' },
+                { key: 'regional' as const, label: 'Region' },
+              ]).map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => setGroupBy(key)}
+                  className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-all ${
+                    groupBy === key
+                      ? 'bg-white text-ink shadow-sm border border-beige-2'
+                      : 'text-ink-2 hover:text-ink'
+                  }`}
+                  title={
+                    key === 'none' ? 'No grouping — flat list sorted by column'
+                    : key === 'alphabetical' ? 'Group by county, alphabetical (Atascosa → Wilson)'
+                    : 'Group by region (Hill Country / South Texas / …), counties sub-grouped'
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* ─── AI filter chips row ─────────────────────────────────────
             Renders one chip per active criterion from aiCriteria. Click
             an X on any chip to remove just that criterion (table re-
@@ -1003,13 +1057,150 @@ export default function VaultPage() {
             // the active sort key.
             const sorted = (() => {
               const splitRows = splitCountyRows(sortedBase);
-              if (sortKey === 'county') {
+              // When grouping by county or region we always need rows in
+              // county-alphabetical order so the group rendering is
+              // deterministic. Sort by county when sortKey is 'county'
+              // OR groupBy is active.
+              if (sortKey === 'county' || groupBy !== 'none') {
                 return [...splitRows].sort((a, b) =>
                   a._displayCounty.localeCompare(b._displayCounty) * (sortDir === 'asc' ? 1 : -1)
                 );
               }
               return splitRows;
             })();
+
+            // ─── Group rendering — build an interleaved list of group
+            // headers + comp rows. Each entry has a `kind` discriminator
+            // so the table tbody can render the right component:
+            //   'group-region'  → region header row (spans all cols)
+            //   'group-county'  → county header row (spans all cols)
+            //   'comp'          → actual comp data row
+            // groupBy === 'none' produces a flat list with no headers.
+            type RegionHeaderRow = {
+              kind: 'group-region';
+              key: string;
+              label: string;
+              count: number;
+              totalVolume: number;
+              medianPpa: number | null;
+            };
+            type CountyHeaderRow = {
+              kind: 'group-county';
+              key: string;
+              label: string;
+              count: number;
+              totalVolume: number;
+              medianPpa: number | null;
+            };
+            type CompRowEntry = {
+              kind: 'comp';
+              key: string;
+              row: typeof sorted[number];
+            };
+            type RenderRow = RegionHeaderRow | CountyHeaderRow | CompRowEntry;
+
+            // Helpers — median of a numeric array, group stats from a
+            // bag of comps. Used by both county + region grouping.
+            const median = (xs: number[]): number | null => {
+              const filtered = xs.filter((n) => Number.isFinite(n) && n > 0);
+              if (filtered.length === 0) return null;
+              filtered.sort((a, b) => a - b);
+              const mid = Math.floor(filtered.length / 2);
+              return filtered.length % 2 === 0
+                ? (filtered[mid - 1] + filtered[mid]) / 2
+                : filtered[mid];
+            };
+            const groupStats = (rows: typeof sorted): { count: number; totalVolume: number; medianPpa: number | null } => {
+              const count = rows.length;
+              const totalVolume = rows.reduce((s, r) => s + (r.sale_price || 0), 0);
+              const ppaList = rows.map((r) => r.ppa_land_only || r.price_per_acre || 0);
+              return { count, totalVolume, medianPpa: median(ppaList) };
+            };
+
+            const renderRows: RenderRow[] = [];
+
+            if (groupBy === 'none') {
+              // Flat — no group headers
+              for (const r of sorted) {
+                renderRows.push({ kind: 'comp', key: r._rowKey, row: r });
+              }
+            } else if (groupBy === 'alphabetical') {
+              // County groups, alphabetical. Aggregate stats per county.
+              const byCounty = new Map<string, typeof sorted>();
+              for (const r of sorted) {
+                const c = r._displayCounty || '—';
+                if (!byCounty.has(c)) byCounty.set(c, []);
+                byCounty.get(c)!.push(r);
+              }
+              const counties = Array.from(byCounty.keys()).sort((a, b) =>
+                a.localeCompare(b) * (sortDir === 'asc' ? 1 : -1)
+              );
+              for (const c of counties) {
+                const rows = byCounty.get(c)!;
+                const s = groupStats(rows);
+                renderRows.push({
+                  kind: 'group-county',
+                  key: `cty-${c}`,
+                  label: c,
+                  count: s.count,
+                  totalVolume: s.totalVolume,
+                  medianPpa: s.medianPpa,
+                });
+                for (const r of rows) {
+                  renderRows.push({ kind: 'comp', key: r._rowKey, row: r });
+                }
+              }
+            } else {
+              // Regional — region headers with county sub-groups inside.
+              // Uses src/lib/utils/texasRegions.ts; until that map is
+              // populated, every comp falls into 'Unassigned' and the
+              // view collapses to a single region group (still works).
+              const byRegion = new Map<string, Map<string, typeof sorted>>();
+              const usedRegions = new Set<string>();
+              for (const r of sorted) {
+                const region = getRegionForCounty(r._displayCounty);
+                usedRegions.add(region);
+                if (!byRegion.has(region)) byRegion.set(region, new Map());
+                const countyMap = byRegion.get(region)!;
+                const c = r._displayCounty || '—';
+                if (!countyMap.has(c)) countyMap.set(c, []);
+                countyMap.get(c)!.push(r);
+              }
+              const regionOrder = getRegionsInDisplayOrder(usedRegions);
+              for (const region of regionOrder) {
+                const countyMap = byRegion.get(region);
+                if (!countyMap) continue;
+                // Region-level stats — aggregate across all comps in the region
+                const allInRegion: typeof sorted = [];
+                countyMap.forEach((rows) => allInRegion.push(...rows));
+                const regS = groupStats(allInRegion);
+                renderRows.push({
+                  kind: 'group-region',
+                  key: `reg-${region}`,
+                  label: region,
+                  count: regS.count,
+                  totalVolume: regS.totalVolume,
+                  medianPpa: regS.medianPpa,
+                });
+                // County sub-groups, alphabetical within the region
+                const counties = Array.from(countyMap.keys()).sort((a, b) => a.localeCompare(b));
+                for (const c of counties) {
+                  const rows = countyMap.get(c)!;
+                  const s = groupStats(rows);
+                  renderRows.push({
+                    kind: 'group-county',
+                    key: `reg-${region}-cty-${c}`,
+                    label: c,
+                    count: s.count,
+                    totalVolume: s.totalVolume,
+                    medianPpa: s.medianPpa,
+                  });
+                  for (const r of rows) {
+                    renderRows.push({ kind: 'comp', key: `${region}::${r._rowKey}`, row: r });
+                  }
+                }
+              }
+            }
             // Column headers: medium weight, looser tracking — feels
             // like an Excel/CoStar data tool. NOT all caps tracking-wider
             // (that's old-school); use mixed-case font-medium for that
@@ -1120,7 +1311,74 @@ export default function VaultPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sorted.map((comp) => {
+                      {renderRows.map((entry) => {
+                        // Region header — full-width row with aggregate
+                        // stats (count, total volume, median $/ac).
+                        // Reads like a section divider with built-in data.
+                        if (entry.kind === 'group-region') {
+                          return (
+                            <tr key={entry.key} className="bg-cream/80 border-t-2 border-beige-2 first:border-t-0">
+                              <td colSpan={8} className="px-4 py-3">
+                                <div className="flex items-baseline justify-between flex-wrap gap-2">
+                                  <div className="flex items-baseline gap-3">
+                                    <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-ink">
+                                      {entry.label}
+                                    </span>
+                                    <span className="text-[11px] text-ink-2 font-mono tabular-nums">
+                                      {entry.count} {entry.count === 1 ? 'comp' : 'comps'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-baseline gap-4 text-[11px] font-mono tabular-nums">
+                                    {entry.totalVolume > 0 && (
+                                      <span className="text-ink-2">
+                                        Total <span className="text-ink font-semibold ml-1">{formatCurrency(entry.totalVolume)}</span>
+                                      </span>
+                                    )}
+                                    {entry.medianPpa != null && (
+                                      <span className="text-ink-2">
+                                        Median <span className="text-olive-2 font-semibold ml-1">{formatPPA(entry.medianPpa)}</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        }
+                        // County header — smaller divider. Indented in
+                        // regional mode (visually nested under region),
+                        // top-level in alphabetical mode.
+                        if (entry.kind === 'group-county') {
+                          const isNested = groupBy === 'regional';
+                          return (
+                            <tr key={entry.key} className={`${isNested ? 'bg-cream/40' : 'bg-cream/60'} border-t border-beige`}>
+                              <td colSpan={8} className={`${isNested ? 'px-6' : 'px-4'} py-2`}>
+                                <div className="flex items-baseline justify-between flex-wrap gap-2">
+                                  <div className="flex items-baseline gap-2.5">
+                                    <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink-2">
+                                      {entry.label}{isNested ? '' : ' County'}
+                                    </span>
+                                    <span className="text-[10px] text-ink-3 font-mono tabular-nums">
+                                      {entry.count}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-baseline gap-3 text-[10px] font-mono tabular-nums text-ink-3">
+                                    {entry.totalVolume > 0 && (
+                                      <span>{formatCurrency(entry.totalVolume)}</span>
+                                    )}
+                                    {entry.medianPpa != null && (
+                                      <span className="text-olive-2">
+                                        {formatPPA(entry.medianPpa)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        }
+                        // Comp row — same rendering as before
+                        const comp = entry.row;
                         // City resolution priority:
                         //   1. comp.city — structured column, set by the lazy
                         //      reverse-geocode backfill or future import flow
@@ -1139,7 +1397,7 @@ export default function VaultPage() {
                         const alsoIn = comp._alsoIn || [];
                         return (
                           <tr
-                            key={comp._rowKey || comp.id}
+                            key={entry.key}
                             onClick={() => {
                               setEditingComp(comp);
                               setShowAddModal(true);
