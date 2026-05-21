@@ -2913,7 +2913,13 @@ export default function MapPage() {
 
     displayComps.forEach(comp => {
       if (!comp.latitude || !comp.longitude) return;
-      const ppa = comp.ppa_land_only || comp.price_per_acre || 0;
+      // Pin label uses TOTAL $/Ac (sale_price / acres), NOT the adjusted
+      // land-only PPA — this matches the popup's "Total $/Ac" column and
+      // keeps the pin label consistent with how comps appear in the
+      // vault's "Per Acre" header. Adjusted PPA is still surfaced in the
+      // popup grid and the CMA workspace for brokers who want to see
+      // the land-only delta.
+      const ppa = comp.price_per_acre || 0;
       const baseColor = STATUS_COLORS[comp.status] || '#94a3b8';
       const isCmaSelected = cmaMode && cmaCompIds.includes(comp.id);
       const color = isCmaSelected ? '#60a5fa' : baseColor;
@@ -4029,6 +4035,26 @@ export default function MapPage() {
 
         // Effective improvement value for a comp in this CMA: CMA-level
         // adjustment wins, else the comp's own improvement_value, else null.
+        // Resolve the improvement value to subtract for land-only PPA.
+        // Two DB fields with similar names:
+        //   - improvements_value (plural): populated by appraisal/MLS
+        //     extraction. The DB-generated ppa_land_only column derives
+        //     from this — so it's what the map popup + vault Adjusted
+        //     column already reflect.
+        //   - improvement_value (singular): the CMA-only override with
+        //     provenance (appraiser / agent_verified / broker_estimate).
+        //
+        // Resolution order (most-authoritative wins):
+        //   1. CMA draft override (broker actively editing in this flow)
+        //   2. c.improvement_value (provenanced override saved earlier)
+        //   3. c.improvements_value (import-time extraction) — labeled
+        //      as 'appraiser' source since that's where it came from
+        //
+        // Before step 3 was added, an imported MLS comp with
+        // improvements_value=$400K but no provenanced override showed
+        // Adjusted $/Ac == Total $/Ac in this panel even though the
+        // map popup correctly showed the discount. The two surfaces
+        // now agree.
         const effectiveImprovement = (c: Comp): { value: number | null; source: 'appraiser' | 'agent_verified' | 'broker_estimate' | null } => {
           const adj = compAdjustmentsDraft[c.id] || {};
           if (adj.improvement_value != null) {
@@ -4036,6 +4062,9 @@ export default function MapPage() {
           }
           if (c.improvement_value != null) {
             return { value: Number(c.improvement_value), source: c.improvement_source ?? null };
+          }
+          if (c.improvements_value != null && Number(c.improvements_value) > 0) {
+            return { value: Number(c.improvements_value), source: 'appraiser' };
           }
           return { value: null, source: null };
         };
