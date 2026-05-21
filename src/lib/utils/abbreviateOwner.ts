@@ -93,26 +93,29 @@ export function abbreviateOwner(rawName: string | null | undefined): string | nu
 /**
  * Build a chip set for the review-page search suggestions.
  *
- * Generates up to 4 chips intentionally varied to teach broker search
+ * Generates up to 5 chips intentionally varied to teach broker search
  * strategies — each chip is a different *type* of query so the chip
  * set itself demonstrates the spectrum from broad to specific:
  *
- *   1. Abbreviated grantee     "Eatwell"         — distinctive word
- *   2. Abbreviated grantor     "Burrow"          — surname (broadest match)
- *   3. Full grantor name       "David Burrow"    — specific person
- *   4. Combined refinement     "Burrow Gonzales County"  — narrow w/ place
+ *   1. Full grantee name       "Eatwell River Farms Trust"  — canonical
+ *                              entity as it appears on the deed
+ *   2. Abbreviated grantee     "Eatwell"                    — distinctive word
+ *   3. Abbreviated grantor     "Burrow"                     — surname (broadest match)
+ *   4. Full grantor name       "David Burrow"               — specific person
+ *   5. Combined refinement     "Burrow Gonzales County"     — narrow w/ place
  *
- * Why a full-name chip in addition to the surname: TxGIO's owner index
- * sometimes stores "DAVID BURROW" precisely; the surname-only search
- * returns hundreds of state-wide Burrows. Showing the full name as an
- * option signals "you can refine further if needed."
+ * Per broker request, the FULL grantee leads — TxGIO sometimes
+ * indexes the canonical entity name and a precise match has the
+ * highest signal-to-noise. The abbreviated variant follows to cover
+ * the case where TxGIO truncated or reformatted the name.
  *
  * Multi-party grantors ("David Burrow, Justin Burrow") get split on
  * commas; we use the first party for the surname + full-name chips.
  *
- * Dedup logic: if the abbreviation EQUALS the full name (single-word
- * party like just "Burrow"), the full-name chip is skipped to avoid
- * a duplicate.
+ * Dedup logic: if a chip's text matches one already in the set
+ * (case-insensitive), it's skipped to avoid duplicates — e.g. a
+ * single-word grantee "Burrow" would only render once even though
+ * both the "full" and "abbreviated" paths produce the same string.
  */
 export function buildOwnerSearchChips(opts: {
   grantee?: string | null;
@@ -130,7 +133,12 @@ export function buildOwnerSearchChips(opts: {
     chips.push(t);
   };
 
-  // 1) Abbreviated grantee
+  // 1) Full grantee name — canonical entity as on the deed
+  if (opts.grantee) {
+    add(opts.grantee.trim());
+  }
+
+  // 2) Abbreviated grantee — distinctive word for fuzzy matches
   if (opts.grantee) {
     const a = abbreviateOwner(opts.grantee);
     if (a) add(a);
@@ -147,19 +155,18 @@ export function buildOwnerSearchChips(opts: {
     }
   }
 
-  // 2) Abbreviated grantor (surname)
+  // 3) Abbreviated grantor (surname) — broadest person match
   if (grantorAbbr) add(grantorAbbr);
 
-  // 3) Full grantor name — only when meaningfully different from the
-  //    abbreviated surname (single-word parties skip this to avoid dup)
+  // 4) Full grantor name — specific person; deduped against surname
   if (firstGrantor && grantorAbbr) {
     if (firstGrantor.toLowerCase() !== grantorAbbr.toLowerCase()) {
       add(firstGrantor);
     }
   }
 
-  // 4) Combined chip — picks the most distinctive seed (grantor surname
-  //    preferred; grantee abbreviation as fallback) + county
+  // 5) Combined refinement — picks the most distinctive seed (grantor
+  //    surname preferred; grantee abbreviation as fallback) + county
   if (opts.county) {
     const seed = grantorAbbr ?? (opts.grantee ? abbreviateOwner(opts.grantee) : null);
     if (seed) {
@@ -167,5 +174,5 @@ export function buildOwnerSearchChips(opts: {
     }
   }
 
-  return chips.slice(0, 4);
+  return chips.slice(0, 5);
 }
