@@ -36,6 +36,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import * as turf from '@turf/turf';
 import { ArrowLeft, Check, AlertTriangle, MapPinOff, Clock, ImageOff, PanelRightClose, PanelRightOpen, Edit3, X, Save, Loader2, Pencil, Search, ChevronDown, ChevronRight, Maximize2, Sparkles, ExternalLink, Link as LinkIcon, Trash2 } from 'lucide-react';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
+import { buildOwnerSearchChips } from '@/lib/utils/abbreviateOwner';
 import { useMapHover } from '@/lib/hooks/useMapHover';
 import toast from 'react-hot-toast';
 
@@ -1460,25 +1461,27 @@ export default function ReviewPage() {
               )}
             </button>
           </div>
-          {/* Suggestion chips — show the comp's grantee + grantor as
-              one-click search options. Visible when the input is empty
-              and we have at least one party name to suggest. Click =
-              fill input AND fire the search immediately (one tap =
-              done). The broker sees BOTH names and chooses, rather
-              than us auto-prefilling one. */}
+          {/* Suggestion chips — abbreviated search examples that teach
+              the broker effective TxGIO query patterns. Three flavors:
+                1. Abbreviated grantee  e.g. "Eatwell" (entity strip)
+                2. Abbreviated grantor  e.g. "Burrow"  (person surname)
+                3. Combined chip        e.g. "Burrow Gonzales County"
+                                         (name + place = refinement)
+              The abbreviation algorithm lives in
+              lib/utils/abbreviateOwner.ts (entity vs person heuristic
+              + smart truncation before generic stop words like
+              River / Ranch / Trust / LLC).
+
+              Chips hide as soon as the broker types — they only
+              surface when the input is empty. Click = fill input +
+              auto-enter Reselect Mode + fire the search. */}
           {(() => {
             if (ownerQuery.trim().length > 0) return null;
-            // Build chip set from grantee + grantor (split grantor on commas
-            // since deeds sometimes list multiple sellers). Cap at 3 to keep
-            // the row compact.
-            const chips: string[] = [];
-            if (comp.grantee) chips.push(comp.grantee.trim());
-            if (comp.grantor) {
-              comp.grantor.split(',').map((s) => s.trim()).filter(Boolean).forEach((n) => {
-                if (!chips.includes(n)) chips.push(n);
-              });
-            }
-            const visible = chips.slice(0, 3);
+            const visible = buildOwnerSearchChips({
+              grantee: comp.grantee,
+              grantor: comp.grantor,
+              county: comp.county,
+            });
             if (visible.length === 0) return null;
             const fillAndAsk = (name: string) => {
               setOwnerQuery(name);
@@ -1501,7 +1504,7 @@ export default function ReviewPage() {
                     type="button"
                     onClick={() => fillAndAsk(name)}
                     className="inline-flex items-center px-2 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded-full text-[11px] font-medium hover:bg-olive-tint hover:border-olive transition-colors"
-                    title={`Search "${name}" in ${comp?.county || 'this county'}`}
+                    title={`Search "${name}"${comp?.county ? ` in ${comp.county} County` : ''}`}
                   >
                     {name}
                   </button>
