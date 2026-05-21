@@ -220,6 +220,12 @@ export default function MapPage() {
   const [bovAddlVerticalInput, setBovAddlVerticalInput] = useState<string>('');
   // UI toggle for the optional house-breakdown expander.
   const [bovHouseBreakdownOpen, setBovHouseBreakdownOpen] = useState(false);
+  // Suggested List Price — broker-set override for the headline number
+  // on the client report. NULL/empty here means "auto-default to BOV
+  // total × 1.10" (the standard 10% negotiation cushion). Persisted to
+  // cmas.suggested_list_price; falls back to compute on display.
+  // See docs/DESIGN_DECISIONS.md (sticker-shock framing).
+  const [bovListPriceInput, setBovListPriceInput] = useState<string>('');
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -1976,6 +1982,27 @@ export default function MapPage() {
       setBovMode('breakdown');
     } else {
       setBovMode('lump_sum');
+    }
+
+    // Suggested List Price — broker's saved override OR default to
+    // BOV total × 1.10. Empty input only when there's no BOV at all
+    // yet (broker hasn't entered an opinion of value).
+    const savedListPrice = cma?.suggested_list_price;
+    const listNum = savedListPrice != null ? Number(savedListPrice) : NaN;
+    if (Number.isFinite(listNum) && listNum > 0) {
+      setBovListPriceInput(String(Math.round(listNum)));
+    } else {
+      // No saved override → seed with BOV × 1.10 when BOV is set,
+      // else empty.
+      const bovForList =
+        (Number.isFinite(lumpNum) && lumpNum > 0)
+          ? lumpNum
+          : ((Number.isFinite(landNum) ? landNum : 0) + (Number.isFinite(impNum) ? impNum : 0));
+      if (bovForList > 0) {
+        setBovListPriceInput(String(Math.round(bovForList * 1.10)));
+      } else {
+        setBovListPriceInput('');
+      }
     }
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -4328,6 +4355,11 @@ export default function MapPage() {
                   houseSqft?: number | null;
                   housePpsf?: number | null;
                   additionalVertical?: number | null;
+                  // suggestedListPrice: optional — only included when the
+                  // broker explicitly edits the list-price input. Omitted
+                  // keys preserve the existing DB value (vs null which
+                  // would clear it). Same pattern as houseSqft etc.
+                  suggestedListPrice?: number | null;
                 }) => {
                   const fields: any = {
                     broker_opinion_mode: patch.mode,
@@ -4341,6 +4373,7 @@ export default function MapPage() {
                   if ('houseSqft' in patch) fields.broker_opinion_house_sqft = patch.houseSqft;
                   if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
                   if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
+                  if ('suggestedListPrice' in patch) fields.suggested_list_price = patch.suggestedListPrice;
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
 
@@ -4613,6 +4646,7 @@ export default function MapPage() {
                 const inputCls = 'w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono tabular-nums outline-none transition-all';
 
                 return (
+                  <>
                   <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
@@ -4793,6 +4827,92 @@ export default function MapPage() {
                       </>
                     )}
                   </div>
+
+                  {/* ─── Suggested List Price ──────────────────────────
+                      The HEADLINE number on the client report. Defaults
+                      to BOV total × 1.10 (10% negotiation cushion —
+                      typical for TX ranch land); broker can override.
+
+                      Why a separate concept from BOV: BOV is "what I
+                      think it'll close at." List price is "what we put
+                      on the sign so the seller has room to negotiate
+                      down." Leading with the list price on the client
+                      report prevents sticker shock — the seller anchors
+                      on the aspirational number first.
+
+                      Lives inside the BOV editor IIFE so it has direct
+                      access to saveBov + bov*Input locals. */}
+                  {(() => {
+                    const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
+                    const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
+                    const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
+                    const effectiveBov = bovT > 0 ? bovT : landV + impV;
+                    if (effectiveBov <= 0) return null;
+                    const defaultListPrice = Math.round(effectiveBov * 1.10);
+                    const savedOverride = viewingCMA?.suggested_list_price;
+                    const currentList = bovListPriceInput
+                      ? Number(bovListPriceInput)
+                      : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
+                    const cushion = effectiveBov > 0 && currentList > 0
+                      ? ((currentList - effectiveBov) / effectiveBov) * 100
+                      : 10;
+                    return (
+                      <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
+                        <div className="flex items-baseline justify-between">
+                          <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
+                          <p className="text-[10px] text-ink-3 font-mono">
+                            {cushion >= 0 ? '+' : ''}{cushion.toFixed(0)}% above BOV
+                          </p>
+                        </div>
+                        <div className="relative">
+                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                          <input
+                            type="number"
+                            placeholder={String(defaultListPrice)}
+                            value={bovListPriceInput}
+                            onChange={(e) => setBovListPriceInput(e.target.value)}
+                            onBlur={() => {
+                              const raw = bovListPriceInput.trim();
+                              const n = raw === '' ? null : Number(raw);
+                              saveBov({
+                                mode: bovMode,
+                                total: Number(bovTotalInput) || null,
+                                landValue: Number(bovLandTotalInput) || null,
+                                improvementValue: Number(bovImprovementInput) || null,
+                                suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
+                              });
+                            }}
+                            className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                          />
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Headline on the client report. Negotiation cushion baked in — expected sale lands around {formatCurrency(effectiveBov)}.
+                          {savedOverride != null && (
+                            <>
+                              {' '}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBovListPriceInput('');
+                                  saveBov({
+                                    mode: bovMode,
+                                    total: Number(bovTotalInput) || null,
+                                    landValue: Number(bovLandTotalInput) || null,
+                                    improvementValue: Number(bovImprovementInput) || null,
+                                    suggestedListPrice: null,
+                                  });
+                                }}
+                                className="text-olive-2 hover:text-olive underline decoration-olive-2/40 underline-offset-2"
+                              >
+                                Reset to default
+                              </button>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    );
+                  })()}
+                  </>
                 );
               })()}
 

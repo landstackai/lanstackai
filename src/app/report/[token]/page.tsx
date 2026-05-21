@@ -691,17 +691,59 @@ export default function ClientReport({ params }: ClientReportProps) {
                     use. Revisit this if there's broker demand for
                     surfacing the override-aggregate to clients. */}
 
-                {/* ============ SECTION 4 — BROKER'S OPINION OF VALUE / RECOMMENDED VALUE ============
-                    Headline of the report. Three render modes:
-                      1. Breakdown — Land + Improvement itemization (broker chose this in workspace)
-                      2. Lump Sum — single number (the original render)
-                      3. Computed — falls back to CMA averages when broker hasn't set an opinion
-                    All three live on a calm white card with a soft cream-2 inner panel so the
-                    headline pops without screaming. */}
-                {suggestedValue > 0 && (
+                {/* ============ SECTION 4 — SUGGESTED LIST PRICE + BOV ============
+                    Headline of the report — leads with the broker's
+                    SUGGESTED LIST PRICE (BOV × 1.10 default, or broker
+                    override). The BOV becomes the supporting "expected
+                    sale" detail underneath. Three render modes preserved:
+                      1. Breakdown — Land + Improvement itemization
+                      2. Lump Sum — single number
+                      3. Computed — falls back to CMA averages when
+                         broker hasn't set an opinion
+                    The list price framing prevents sticker shock: the
+                    seller anchors on the aspirational number first, the
+                    expected sale lands as "with negotiation room baked
+                    in" rather than "this is what it's worth, sorry." */}
+                {suggestedValue > 0 && (() => {
+                  // List price resolution: broker override > BOV × 1.10.
+                  // When suggestedValue is the COMPUTED (no broker
+                  // opinion entered) average from comps, we still
+                  // surface a list price — it just defaults to the
+                  // computed value × 1.10.
+                  const savedListPrice = (cma as any).suggested_list_price;
+                  const savedListNum = savedListPrice != null ? Number(savedListPrice) : NaN;
+                  const listPrice = Number.isFinite(savedListNum) && savedListNum > 0
+                    ? savedListNum
+                    : Math.round(suggestedValue * 1.10);
+                  const showHero = listPrice > 0 && listPrice > suggestedValue;
+                  // Build the supporting-line copy — "Most deals close
+                  // around $6.75M. Comparable sales support a $3.29M–$8.22M range."
+                  // Falls back to a shorter version when range data is missing.
+                  return (
+                    <>
+                    {showHero && (
+                      <div className="mx-4 mb-3 p-5 rounded-2xl bg-white border border-beige shadow-sm">
+                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
+                          Suggested List Price
+                        </p>
+                        <p className="text-4xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
+                          {formatCurrency(listPrice)}
+                        </p>
+                        <p className="text-[11px] text-ink-2 leading-relaxed mt-3">
+                          Negotiation cushion built in. Most deals close around{' '}
+                          <span className="font-semibold text-ink">{formatCurrency(suggestedValue)}</span>
+                          {rngHigh > rngLow && (
+                            <>
+                              {' '}— comparable sales support a{' '}
+                              <span className="font-mono">{formatCurrency(rngLow * subjAcres)}–{formatCurrency(rngHigh * subjAcres)}</span>{' '}range.
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    )}
                   <div className="mx-4 mb-4 p-5 rounded-2xl bg-white border border-beige shadow-sm">
                     <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
-                      {usingBrokerOpinion ? "Broker's Opinion of Value" : 'Recommended Value'}
+                      {showHero ? 'Expected Sale' : (usingBrokerOpinion ? "Broker's Opinion of Value" : 'Recommended Value')}
                     </p>
 
                     {isBreakdown ? (
@@ -813,7 +855,9 @@ export default function ClientReport({ params }: ClientReportProps) {
                         : `Based on the average across ${allIn.length} comparable ${allIn.length === 1 ? 'sale' : 'sales'}.`}
                     </p>
                   </div>
-                )}
+                    </>
+                  );
+                })()}
 
                 {/* ============ SECTION 5 — COMPARABLE SALES (mirrors broker comp list) ============ */}
                 <div className="flex-1 px-4 pb-4">
