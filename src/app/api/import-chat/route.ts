@@ -61,6 +61,29 @@ TYPE D — Closing statement / HUD-1 / settlement statement:
   → Extract what you can (sale_price, sale_date, grantor, grantee, address).
      Set confidence appropriately low for missing fields.
 
+TYPE E — MLS Sold sheet / agent-facing listing summary:
+  Layout looks like an MLS report (Sold/Closed status, DOM, list price,
+  sold price, agent contact blocks, photos). Common headings:
+  "Sold by:", "Listed by:", "Listing Agent:", "Selling Agent:",
+  "Buyer's Agent:", "Co-Op Agent:", "Office:", "MLS #".
+  → Extract as 1 comp. Set is_comparable=true.
+
+  CRITICAL — these MLS roles are AGENTS, NOT grantor/grantee:
+    * "Sold by:"        → the LISTING agent (NOT the seller)
+    * "Listed by:"      → the LISTING agent
+    * "Listing Agent:"  → the LISTING agent
+    * "Selling Agent:"  → the BUYER'S agent (still an agent, not the buyer)
+    * "Buyer's Agent:"  → the BUYER'S agent
+    * "Co-Op Agent:"    → the cooperating agent
+  None of these are parties to the deed. DO NOT put any of these names
+  in grantor or grantee. If the MLS sheet doesn't separately show
+  "Seller:" / "Owner:" / "Buyer:" fields, return grantor: null and
+  grantee: null — better empty than wrong.
+
+  An MLS sheet's "Address" field IS authoritative and should be
+  extracted as the comp's address (we use it to drop a map pin when
+  parcel lookup by owner is unavailable).
+
 When you find comparable sales in a document:
 - Extract ALL comps, not just the subject property
 - Type-A single-property docs ARE comps. Do NOT exclude them just because
@@ -195,7 +218,17 @@ Each comp should have these fields:
   "parcel_id": string or null,
   "recording_number": string or null,
   "grantor": string or null,
+  // Grantor = the SELLER (the party giving up title). Only the actual
+  // seller belongs here. On MLS sold sheets, "Sold by:" / "Listed by:" /
+  // "Listing Agent:" name the LISTING AGENT, not the seller — never
+  // copy an agent's name into grantor. If only the agent is named, set
+  // grantor: null.
   "grantee": string or null,
+  // Grantee = the BUYER (the party receiving title). Only the actual
+  // buyer belongs here. On MLS sold sheets, "Selling Agent:" / "Buyer's
+  // Agent:" / "Co-Op Agent:" name the BUYER'S AGENT, not the buyer —
+  // never copy an agent's name into grantee. If only the agent is
+  // named, set grantee: null.
   "financing": string or null,
   "minerals_sold": string or null,
   "confirmation_source": string or null,
