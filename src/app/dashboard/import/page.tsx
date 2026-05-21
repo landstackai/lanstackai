@@ -1516,7 +1516,26 @@ export default function ImportPage() {
           body: JSON.stringify({
             messages: [{
               role: 'user',
-              content: `[Document uploaded]\nExtract any comparable land sales visible on these pages. This is part ${chunkIdx + 1} of ${chunks.length} of a multi-page appraisal report.`,
+              content:
+                `[Document uploaded]\n` +
+                `Extract any comparable land sales visible on these pages. ` +
+                `This is part ${chunkIdx + 1} of ${chunks.length} of a multi-page appraisal report.\n\n` +
+                // Chunk-context guard: appraisal PDFs span 2 pages per comp
+                // (aerial+ID on page N, REMARKS on page N+1). With overlapping
+                // chunks the AI sometimes sees ONLY the REMARKS half and
+                // fabricates a comp out of it — same property name + acres,
+                // every other field null. The fragment then survives dedupe
+                // because nulls don't match the full comp's key. Tell the AI
+                // explicitly to skip these — the next chunk will catch the
+                // same comp complete.
+                `CRITICAL — only extract a comp if you can see BOTH the aerial/identification ` +
+                `section AND structured transaction data (sale price, sale date, OR ` +
+                `grantor/grantee names) on these pages. If you only see a property ` +
+                `description / REMARKS / narrative paragraph for a sale WITHOUT the ` +
+                `accompanying transaction table, DO NOT return that as a comp — it's a ` +
+                `tail-end fragment from the previous chunk and the comp will be captured ` +
+                `completely in another chunk. Return an empty comps array for such ` +
+                `fragments.`,
             }],
             images: chunks[chunkIdx],
           }),
@@ -1549,31 +1568,106 @@ export default function ImportPage() {
       }
     }
 
-    // Deduplicate by (property_name + sale_date + sale_price). When the same
-    // comp appears in multiple overlapping chunks, prefer the version with
-    // the most complete data — specifically, the one with a boundary
-    // geometry (from server-side enrichment), then the one with coords.
-    // Otherwise the first occurrence wins.
+    // ─── Two-pass dedupe ─────────────────────────────────────────────
+    //
+    // Pass 1 (PRIMARY KEY — exact match on transactional identity):
+    //   key = property_name | grantee | sale_date | sale_price
+    //   This collapses the same comp seen in multiple overlapping chunks
+    //   when BOTH copies have the transactional fields populated.
+    //
+    // Pass 2 (SECONDARY KEY — semantic match on physical identity):
+    //   key = county | round(acres, 1dp)
+    //   Catches the failure mode where one chunk sees the full comp and
+    //   another chunk sees ONLY the REMARKS half (no sale_date,
+    //   sale_price, grantor, grantee — so the primary key differs). The
+    //   fragment has the same acres + county; merge into the populated
+    //   sibling, preferring the version with more transactional fields.
+    //
+    // Without pass 2, the user got a phantom 4th comp from a 3-comp PDF:
+    // Land Sale 2 (141.88 ac) showed up twice — once fully populated,
+    // once as REMARKS-only with all other fields null.
+    const compleness = (c: any): number => {
+      // Score of how "complete" a comp is. Higher = more fields populated.
+      // Used to pick which copy wins when two comps collide.
+      let s = 0;
+      if (c.sale_price && Number(c.sale_price) > 0) s += 4;
+      if (c.sale_date) s += 3;
+      if (c.grantee) s += 2;
+      if (c.grantor) s += 2;
+      if (c.address) s += 1;
+      if (c.property_name) s += 1;
+      if (c.geometry) s += 2;
+      if (c.latitude != null) s += 1;
+      return s;
+    };
+
+    // Pass 1: exact-match dedupe.
     const byKey = new Map<string, any>();
     for (const c of allComps) {
-      // Include grantee in the key so two distinct transactions of the SAME
-      // property name (e.g. Wesla Ranches → 4F and Wesla Ranches → 9L) don't
-      // collapse to one. Without grantee, AI mis-extracted or near-duplicate
-      // sales got merged into one comp.
       const key = `${(c.property_name || '').toLowerCase().trim()}|${(c.grantee || '').toLowerCase().trim()}|${c.sale_date || ''}|${c.sale_price || 0}`;
       const existing = byKey.get(key);
       if (!existing) {
         byKey.set(key, c);
         continue;
       }
-      // Prefer the one with geometry, then with coords, then keep existing
-      const newScore = (c.geometry ? 2 : 0) + (c.latitude != null ? 1 : 0);
-      const oldScore = (existing.geometry ? 2 : 0) + (existing.latitude != null ? 1 : 0);
-      if (newScore > oldScore) {
-        byKey.set(key, c);
-      }
+      // Pick the more complete record, with geometry/coords as a tiebreaker.
+      const newScore = compleness(c);
+      const oldScore = compleness(existing);
+      if (newScore > oldScore) byKey.set(key, c);
     }
-    const dedupedComps = Array.from(byKey.values());
+    let dedupedComps = Array.from(byKey.values());
+
+    // Pass 2: collapse chunk-overlap fragments by (county | acres-to-0.1).
+    // Iterate sorted by completeness DESC so the populated copy lands in
+    // the map first and the fragment gets dropped (not the reverse).
+    const sorted = [...dedupedComps].sort((a, b) => compleness(b) - compleness(a));
+    const bySemantic = new Map<string, any>();
+    for (const c of sorted) {
+      const acres = Number(c.acres);
+      if (!Number.isFinite(acres) || acres <= 0 || !c.county) {
+        // Can't form a semantic key — keep as-is, push under a unique-by-ref key.
+        bySemantic.set(`__nokey_${bySemantic.size}`, c);
+        continue;
+      }
+      const semKey = `${String(c.county).toLowerCase().trim()}|${acres.toFixed(1)}`;
+      const existing = bySemantic.get(semKey);
+      if (!existing) {
+        bySemantic.set(semKey, c);
+        continue;
+      }
+      // Both have same county+acres. The richer one already won the slot
+      // (we sorted DESC by completeness). This second one is the fragment
+      // — drop it. Log so we can spot recurring patterns.
+      console.warn(
+        `[chunked] dropped chunk-overlap fragment: ${acres}ac ${c.county} ` +
+        `(completeness ${compleness(c)} vs winner ${compleness(existing)}). ` +
+        `Fragment description: "${(c.description || '').slice(0, 60)}..."`
+      );
+    }
+    dedupedComps = Array.from(bySemantic.values());
+
+    // Pass 3: drop hollow comps. A comp with NONE of {sale_price, sale_date,
+    // grantor, grantee} is almost certainly a chunk fragment that escaped
+    // pass 2 (e.g., AI got the acres wrong by a hair so the semantic key
+    // didn't match). Better to drop than to show the broker a phantom row.
+    const hollowDropped: any[] = [];
+    dedupedComps = dedupedComps.filter((c) => {
+      const hasAny = (c.sale_price && Number(c.sale_price) > 0) ||
+        c.sale_date || c.grantor || c.grantee;
+      if (!hasAny) {
+        hollowDropped.push(c);
+        return false;
+      }
+      return true;
+    });
+    if (hollowDropped.length > 0) {
+      console.warn(
+        `[chunked] dropped ${hollowDropped.length} hollow comp${hollowDropped.length === 1 ? '' : 's'} ` +
+        `with no sale_price / sale_date / grantor / grantee — likely chunk fragments. ` +
+        `Acres: ${hollowDropped.map((c) => c.acres).join(', ')}`
+      );
+    }
+
     if (dedupedComps.length < allComps.length) {
       console.log(`[chunked] deduped: ${allComps.length} raw → ${dedupedComps.length} unique`);
     }
