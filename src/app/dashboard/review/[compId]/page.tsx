@@ -24,7 +24,7 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
@@ -83,7 +83,27 @@ type Comp = {
 export default function ReviewPage() {
   const params = useParams<{ compId: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
+
+  // Where to navigate after the broker finishes reviewing. Default is the
+  // vault (existing behavior). When the import flow opens this page via
+  // ?return=import, navigate back to /dashboard/import so the broker can
+  // pick up the remaining unreviewed comps from the same import batch
+  // without losing the verification-card view.
+  const returnTo = searchParams?.get('return') === 'import'
+    ? '/dashboard/import'
+    : '/dashboard/vault';
+  const isFromImport = returnTo === '/dashboard/import';
+
+  // Auto-navigate after a successful review step. Only fires when the
+  // broker came from the import flow (so we don't break the existing
+  // "stay on page after Mark verified" behavior for vault → review).
+  // Small delay so the success toast is readable before the route change.
+  const autoReturnIfFromImport = useCallback(() => {
+    if (!isFromImport) return;
+    setTimeout(() => router.push('/dashboard/import'), 700);
+  }, [isFromImport, router]);
 
   const [comp, setComp] = useState<Comp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -936,11 +956,12 @@ export default function ReviewPage() {
         toast.success('Marked verified');
         setComp({ ...comp, needs_location_review: false });
         setAerialCollapsed(true); // Hide the verification tool now that it's done
+        autoReturnIfFromImport();
       }
     } finally {
       setSaving(false);
     }
-  }, [comp, saving, supabase]);
+  }, [comp, saving, supabase, autoReturnIfFromImport]);
 
   // Delete this comp. Wrapped in DeleteConfirmButton's 2-step on the
   // UI side so brokers can't nuke it accidentally — by the time we get
@@ -1219,6 +1240,7 @@ export default function ReviewPage() {
         setOwnerQuery('');
         setOwnerMatches(null);
         setOwnerSearchError(null);
+        autoReturnIfFromImport();
       }
     } finally {
       setReselectSaving(false);
@@ -1325,11 +1347,12 @@ export default function ReviewPage() {
         });
         setMode('view');
         setDrawnFeature(null);
+        autoReturnIfFromImport();
       }
     } finally {
       setDrawSaving(false);
     }
-  }, [comp, drawnFeature, drawSaving, supabase]);
+  }, [comp, drawnFeature, drawSaving, supabase, autoReturnIfFromImport]);
 
   // Compute area of drawn polygon for side panel stats
   const drawStats = (() => {
@@ -1474,15 +1497,18 @@ export default function ReviewPage() {
           </div>
         )}
 
-        {/* Top bar: back link + comp label (absolute over map) */}
+        {/* Top bar: back link + comp label (absolute over map). When the
+            broker came from the import flow, the back link returns there so
+            they can pick up the remaining unreviewed comps from the same
+            batch instead of getting dropped into the vault. */}
         <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 max-w-[40%]">
           <button
-            onClick={() => router.push('/dashboard/vault')}
+            onClick={() => router.push(returnTo)}
             className="text-ink-2 hover:text-ink flex items-center gap-1 text-xs"
-            title="Back to vault"
+            title={isFromImport ? 'Back to import' : 'Back to vault'}
           >
             <ArrowLeft size={14} />
-            Vault
+            {isFromImport ? 'Import' : 'Vault'}
           </button>
           <span className="text-ink-3">·</span>
           <span className="text-sm font-semibold text-ink truncate">{label}</span>

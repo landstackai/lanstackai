@@ -926,6 +926,61 @@ export default function ImportPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // ─── Session persistence (round-trip from review page) ───────────────
+  //
+  // The "Needs review" button on each verification card saves all comps
+  // and navigates to /dashboard/review/[id]?return=import. The review
+  // page sends the broker back here after they finish (Mark verified /
+  // Save reselect / Save draw). For the broker to see the OTHER unreviewed
+  // comps from the same import batch when they return, we have to
+  // preserve this page's state — React state is gone after navigation,
+  // so we mirror messages + pendingComps to sessionStorage.
+  //
+  // SESSION_STORAGE_KEY scopes per-tab; survives back/forward + page
+  // reload during the same session, evaporates on tab close. Don't use
+  // localStorage — stale extraction cards persisting across days would
+  // be more confusing than useful.
+  const SESSION_STORAGE_KEY = 'import-session';
+
+  // Restore on first mount. Wrapped in try/catch because malformed
+  // sessionStorage (manual user edit, version mismatch) shouldn't crash
+  // the import page — fall back to the empty-greeting initial state.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return;
+      const restored = JSON.parse(raw);
+      if (Array.isArray(restored?.messages) && restored.messages.length > 0) {
+        setMessages(restored.messages);
+      }
+      if (Array.isArray(restored?.pendingComps)) {
+        setPendingComps(restored.pendingComps);
+      }
+    } catch {
+      // Stale or malformed — ignore, the user gets a fresh page.
+    }
+    // Run-once on mount; no dependencies (initial state restore only).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist on every state change. Skip the empty initial state (just
+  // the greeting + no comps) to keep stored payloads small. Wrapped in
+  // try/catch because sessionStorage can throw on quota exceeded — a
+  // missing persist is recoverable, a thrown render is not.
+  useEffect(() => {
+    try {
+      const hasContent = messages.length > 1 || pendingComps.length > 0;
+      if (hasContent) {
+        sessionStorage.setItem(
+          SESSION_STORAGE_KEY,
+          JSON.stringify({ messages, pendingComps })
+        );
+      }
+    } catch {
+      // Quota exceeded or storage disabled — non-fatal.
+    }
+  }, [messages, pendingComps]);
+
   const isDocumentPaste = (text: string): boolean => {
     if (text.length < 150) return false;
     const patterns = [
@@ -2091,6 +2146,30 @@ export default function ImportPage() {
             <p className="text-xs text-ink-3">Upload PDF, paste text, or describe a property</p>
           </div>
           <div className="ml-auto flex gap-2">
+            {/* Start fresh — only appears when there's a persisted session
+                from a prior upload. Wipes the sessionStorage cache + clears
+                local state so the next upload starts with a clean greeting.
+                Without this, brokers stay parked on yesterday's extraction
+                cards forever. */}
+            {(messages.length > 1 || pendingComps.length > 0) && (
+              <button
+                onClick={() => {
+                  try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch {}
+                  setMessages([{
+                    role: 'assistant',
+                    content: "Hi! I'm ready to help you import comps. Upload a PDF, paste text from an appraisal or closing statement, or share a property description. I'll extract the comparable sales data automatically.",
+                    timestamp: new Date().toISOString(),
+                  }]);
+                  setPendingComps([]);
+                  toast.success('Import session cleared', { duration: 1800 });
+                }}
+                title="Clear the current import session so you can start a new upload"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-cream border border-beige rounded-lg text-xs font-semibold text-ink-2 hover:text-ink hover:border-olive transition-colors"
+              >
+                <X size={12} />
+                Start fresh
+              </button>
+            )}
             <button
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-cream border border-beige rounded-lg text-xs font-semibold text-ink-2 hover:text-ink hover:border-olive transition-colors"
@@ -2282,8 +2361,23 @@ export default function ImportPage() {
                         )}
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1">
-                            <p className="text-sm font-bold text-ink">
-                              {comp.property_name || `${comp.county} County — ${comp.acres} ac`}
+                            <p className="text-sm font-bold text-ink flex items-center gap-1.5">
+                              <span>{comp.property_name || `${comp.county} County — ${comp.acres} ac`}</span>
+                              {/* When the broker has already sent this comp
+                                  to review (or saved it as verified), the
+                                  card shows a checkmark badge so they can
+                                  visually scan the batch and see what's
+                                  done at a glance. The buttons below also
+                                  switch to "Open in review" — see the
+                                  action row a few hundred lines down. */}
+                              {(comp as any)._savedId && (
+                                <span
+                                  className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-olive-tint border border-olive-border text-olive-2"
+                                  title="Already saved to your vault — click Open in review to refine"
+                                >
+                                  <Check size={10} /> Saved
+                                </span>
+                              )}
                             </p>
                             <p className="text-xs text-ink-2 mt-0.5">
                               {comp.county}, {comp.state} · {comp.acres} acres
@@ -2414,7 +2508,26 @@ export default function ImportPage() {
                           </div>
                         </div>
 
-                        {/* Two-button verification action row */}
+                        {/* Verification action row.
+                            UNSAVED state: two buttons — "Looks right"
+                              (verifies + saves) or "Needs review" (saves
+                              all + opens this one in review workspace).
+                            SAVED state: single "Open in review" link.
+                              Comp is already in the vault from the prior
+                              "Needs review" click — re-saving would
+                              duplicate. The broker either opens it to
+                              keep refining, or moves on to the next card. */}
+                        {(comp as any)._savedId ? (
+                          <div className="mt-3">
+                            <button
+                              onClick={() => router.push(`/dashboard/review/${(comp as any)._savedId}?return=import`)}
+                              className="w-full py-2 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border text-olive-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              <Clock size={12} />
+                              Open in review →
+                            </button>
+                          </div>
+                        ) : (
                         <div className="mt-3 grid grid-cols-2 gap-2">
                           <button
                             onClick={() => saveComp(comp, { needsReview: false })}
@@ -2437,21 +2550,55 @@ export default function ImportPage() {
                               //
                               // Same-tab nav avoids Safari popup blocker
                               // entirely. The bulk-save preserves work.
-                              const others = pendingComps.filter((c) => c !== comp);
-                              let currentId: string | null = null;
+                              //
+                              // ⚠️ Skip already-saved comps. If the broker
+                              // came back from /dashboard/review and is now
+                              // clicking a DIFFERENT card's Needs review,
+                              // the others were saved on the FIRST click —
+                              // re-saving would create duplicates. Each
+                              // comp gets _savedId stamped after save; if
+                              // present, we skip the insert and just open
+                              // the existing row in review.
+                              const compIsSaved = Boolean((comp as any)._savedId);
+                              const others = pendingComps.filter((c) => c !== comp && !((c as any)._savedId));
+                              let currentId: string | null = (comp as any)._savedId ?? null;
                               try {
-                                const [currentResult] = await Promise.all([
-                                  saveComp(comp, { needsReview: true, silent: false }),
-                                  ...others.map((c) =>
-                                    saveComp(c, { needsReview: true, silent: true })
-                                  ),
-                                ]);
-                                currentId = currentResult?.id ?? null;
-                                if (others.length > 0) {
-                                  toast.success(
-                                    `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
-                                    { duration: 2500 }
-                                  );
+                                if (compIsSaved) {
+                                  // Comp already in DB — just open it for
+                                  // review. Save the OTHER unsaved comps
+                                  // silently as a safety net.
+                                  if (others.length > 0) {
+                                    const otherResults = await Promise.all(
+                                      others.map((c) => saveComp(c, { needsReview: true, silent: true }))
+                                    );
+                                    others.forEach((c, idx) => {
+                                      const id = otherResults[idx]?.id;
+                                      if (id) (c as any)._savedId = id;
+                                    });
+                                    setMessages((prev) => [...prev]); // force re-render so chips update
+                                  }
+                                } else {
+                                  const [currentResult, ...otherResults] = await Promise.all([
+                                    saveComp(comp, { needsReview: true, silent: false }),
+                                    ...others.map((c) =>
+                                      saveComp(c, { needsReview: true, silent: true })
+                                    ),
+                                  ]);
+                                  currentId = currentResult?.id ?? null;
+                                  // Stamp _savedId on every saved comp so a
+                                  // second visit doesn't re-insert them.
+                                  if (currentId) (comp as any)._savedId = currentId;
+                                  others.forEach((c, idx) => {
+                                    const id = otherResults[idx]?.id;
+                                    if (id) (c as any)._savedId = id;
+                                  });
+                                  setMessages((prev) => [...prev]); // persist the _savedId tags
+                                  if (others.length > 0) {
+                                    toast.success(
+                                      `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
+                                      { duration: 2500 }
+                                    );
+                                  }
                                 }
                               } catch (e) {
                                 console.error('[needs-review] parallel save failed:', e);
@@ -2461,8 +2608,16 @@ export default function ImportPage() {
                               // when the save succeeded; fall back to the
                               // vault when the save failed (so broker can
                               // still see what landed).
+                              //
+                              // `?return=import` tells the review page to
+                              // navigate back to /dashboard/import after the
+                              // broker hits Mark verified / Save reselect /
+                              // Save draw — instead of stranding them on the
+                              // vault. The import page restores its cards
+                              // from sessionStorage so the remaining
+                              // unreviewed comps are right there.
                               if (currentId) {
-                                router.push(`/dashboard/review/${currentId}`);
+                                router.push(`/dashboard/review/${currentId}?return=import`);
                               } else {
                                 router.push('/dashboard/vault');
                               }
@@ -2474,6 +2629,7 @@ export default function ImportPage() {
                             Needs review
                           </button>
                         </div>
+                        )}
                       </div>
                       );
                     })}
