@@ -3906,9 +3906,14 @@ export default function MapPage() {
                       ))}
                     </div>
                     {cmaPhase === 'subject' ? (
+                      // Primary CTA — was bg-blue-500/20 + text-blue-200,
+                      // a leftover from the dark theme that rendered as
+                      // ghost-text on the new cream surface. Solid slate-
+                      // blue + white text matches the app's "Save CMA"
+                      // button and is legible at a glance.
                       <button
                         onClick={lockSubjectTract}
-                        className="w-full mt-1 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-slate-blue/40 hover:border-slate-blue text-xs font-bold text-blue-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full mt-1 py-2 bg-slate-blue hover:bg-slate-blue-2 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-sm"
                       >
                         <Combine size={12} /> Lock Subject Tract → Pick Comps
                       </button>
@@ -3977,7 +3982,11 @@ export default function MapPage() {
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-ink font-bold">Mid</span>
-                    <span className="font-mono font-bold text-blue-200">{formatCurrency(ppaMid * acres)}</span>
+                    {/* text-blue-200 was leftover dark-theme — invisible on
+                        the slate-blue/10 cream surface. Use the brand's
+                        slate-blue-2 (dark enough for cream) with extra
+                        weight so the headline value stands out. */}
+                    <span className="font-mono font-bold text-slate-blue-2">{formatCurrency(ppaMid * acres)}</span>
                   </div>
                   <div className="flex justify-between text-xs">
                     <span className="text-ink-2">High</span>
@@ -3989,11 +3998,15 @@ export default function MapPage() {
                 </div>
               )}
 
-              {/* Save */}
+              {/* Save — was bg-blue-500 (Tailwind default blue, which
+                  rendered as washed-out powder blue on cream). Switched
+                  to the app's slate-blue brand color for consistency
+                  with Lock Subject Tract above and the rest of the
+                  CMA-blue accents. */}
               <button
                 onClick={saveCMA}
                 disabled={savingCMA || cmaCompIds.length === 0 || (!cmaEditingId && cmaSubjectParcels.length === 0)}
-                className="w-full py-2.5 bg-blue-500 hover:bg-blue-400 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-full py-2.5 bg-slate-blue hover:bg-slate-blue-2 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
               >
                 <Save size={14} />
                 {savingCMA ? 'Saving…' : 'Save CMA'}

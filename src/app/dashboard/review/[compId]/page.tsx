@@ -1889,9 +1889,17 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* Transaction parties */}
-          {(comp.grantor || comp.grantee) && (
+          {/* Transaction parties + street address. Address rides in
+              the same block as grantor/grantee since they're all
+              "who/where" metadata and brokers scan them together. Shown
+              first because it's the most concrete locator — especially
+              valuable for MLS-sourced comps where grantor/grantee may
+              be null but the address is reliable. */}
+          {(comp.grantor || comp.grantee || comp.address) && (
             <div className="border-t border-beige pt-3 space-y-1.5 text-xs">
+              {comp.address && (
+                <KeyValue k="Address" v={comp.address} />
+              )}
               {comp.grantee && (
                 <KeyValue k="Grantee" v={comp.grantee} />
               )}
