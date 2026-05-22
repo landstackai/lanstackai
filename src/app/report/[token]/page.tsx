@@ -12,6 +12,17 @@ import mapboxgl from 'mapbox-gl';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
+// Brand palette — kept in sync with the broker map (src/app/dashboard/map/page.tsx)
+// so a client opening the share report sees the same pin visual language they
+// would on the live map. Status color rings let the client distinguish Sold /
+// Active / Pending at a glance, same as the broker's view.
+const STATUS_COLORS: Record<string, string> = {
+  Sold: '#A8B57A',      // olive-light — primary "land transaction" color
+  Active: '#7B9FCE',    // slate-blue-light — on-market listings
+  Pending: '#E8B872',   // amber-warm — under contract
+  Withdrawn: '#75716A', // cream-3-text — muted "off-market"
+};
+
 interface ClientReportProps {
   params: { token: string };
 }
@@ -191,19 +202,38 @@ export default function ClientReport({ params }: ClientReportProps) {
         }
       }
 
-      // Comp pins
+      // Comp pins — match the broker map's pin treatment exactly so
+      // clients see the same visual language as the live dashboard:
+      //   - Warm dark base (#1A1815)
+      //   - Cream-1 number text (reads on ANY satellite color, key for
+      //     mixed terrain)
+      //   - Status-colored ring (Sold = olive, Active = slate-blue,
+      //     Pending = amber, Withdrawn = muted gray) so the client can
+      //     spot transaction type at a glance, same as the broker can
+      //   - Same padding + radius + shadow so two surfaces feel like
+      //     one app
+      // Label uses Total $/Ac (sale_price / acres) to match the pin
+      // label convention on the broker map — Adjusted $/Ac was a known
+      // source of inconsistency that PR #27 resolved across surfaces.
       comps.forEach((comp) => {
         if (comp.latitude == null || comp.longitude == null) return;
         const el = document.createElement('div');
         el.dataset.compId = comp.id;
+        const statusColor = STATUS_COLORS[(comp as any).status] || '#A8B57A';
+        el.dataset.statusColor = statusColor; // read by hover-effect useEffect
         el.style.cssText = `
-          background:#1A1815;border:2px solid #A8B57A;border-radius:20px;
-          padding:4px 8px;font-family:'DM Mono',monospace;font-size:11px;
-          font-weight:700;color:#A8B57A;cursor:pointer;white-space:nowrap;
+          background:#1A1815;
+          border:1.5px solid ${statusColor};
+          border-radius:20px;
+          padding:4px 9px;font-family:'DM Mono',monospace;font-size:11px;
+          font-weight:700;color:#F5F1E8;white-space:nowrap;cursor:pointer;
           box-shadow:0 2px 10px rgba(0,0,0,.4);
-          transition:border-color .15s, box-shadow .15s, color .15s;
+          transition:border-color .15s, box-shadow .15s;
         `;
-        el.textContent = `$${Math.round((comp.ppa_land_only || comp.price_per_acre || 0) / 1000)}k`;
+        // Match the broker map's Total $/Ac label convention (PR #27).
+        // Falls back to ppa_land_only only if total isn't populated.
+        const totalForLabel = (comp as any).price_per_acre || comp.ppa_land_only || 0;
+        el.textContent = `$${Math.round(totalForLabel / 1000)}k`;
 
         // Hover preview popup — exact mirror of the collapsed comp card in
         // the share report's Comparable Sales list (header + 4-col grid).
@@ -300,20 +330,25 @@ export default function ClientReport({ params }: ClientReportProps) {
     else map.current.once('load', apply);
   }, [cma, comps, mapReady]);
 
-  // Imperative hover highlight on pins. Matches the CMA workspace color
-  // scheme: blue-400 ring + border on hover (instead of sage).
+  // Imperative hover highlight on pins. Mirrors the broker map's
+  // treatment exactly so a client viewing the share link sees the same
+  // visual language: olive glow on hover, status-colored ring at rest,
+  // cream-1 text always. Each pin carries its base status color in
+  // dataset.statusColor (set at marker creation) so we don't have to
+  // re-resolve from the comp lookup on every hover tick.
   useEffect(() => {
     markerElsRef.current.forEach((el, id) => {
+      const baseColor = el.dataset.statusColor || '#A8B57A';
       const isHovered = id === hoveredCompId;
       if (isHovered) {
-        el.style.boxShadow = '0 0 0 5px #60a5fa55, 0 6px 18px rgba(0,0,0,.7)';
-        el.style.borderColor = '#60a5fa';
-        el.style.color = '#60a5fa';
+        el.style.boxShadow = '0 0 0 4px rgba(168,181,122,0.40), 0 8px 22px rgba(0,0,0,.55)';
+        el.style.borderColor = '#C4CE96';
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '10';
       } else {
-        el.style.boxShadow = '0 2px 8px rgba(0,0,0,.5)';
-        el.style.borderColor = '#34d399';
-        el.style.color = '#34d399';
+        el.style.boxShadow = '0 2px 10px rgba(0,0,0,.4)';
+        el.style.borderColor = baseColor;
+        el.style.color = '#F5F1E8';
         el.style.zIndex = '1';
       }
     });
