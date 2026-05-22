@@ -183,6 +183,11 @@ export default function MapPage() {
   // Per-comp "saving / just saved" indicator for the Save-listing button.
   const [savingListingFor, setSavingListingFor] = useState<Set<string>>(new Set());
   const [savedListingFor, setSavedListingFor] = useState<Set<string>>(new Set());
+  // Manual URL paste — broker types/pastes a URL they already know
+  // (Zillow, MLS, brokerage site, etc.) without running the AI find.
+  // Per-comp draft strings — never persisted directly; flushed via the
+  // saveManualListingUrl flow which writes to comps.source_url.
+  const [manualListingDraft, setManualListingDraft] = useState<Record<string, string>>({});
   // Per-comp expand-description toggle (CMA workspace expanded view)
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
 
@@ -1047,6 +1052,92 @@ export default function MapPage() {
       });
     }
   }, [liveListings, comps, supabase]);
+
+  // Manual paste path — broker has a URL in hand (Zillow tab, listing
+  // email, brokerage site) and just wants to attach it. Mirrors
+  // saveListingForComp but reads from manualListingDraft instead of
+  // liveListings. Lightly validates the URL so the broker doesn't save
+  // typos that break the report's link rendering.
+  const saveManualListingForComp = useCallback(async (compId: string) => {
+    const rawDraft = manualListingDraft[compId] || '';
+    const trimmed = rawDraft.trim();
+    if (!trimmed) {
+      toast.error('Enter a URL first');
+      return;
+    }
+    // Normalize: prepend https:// when scheme is missing (typical paste
+    // behavior — broker copies "zillow.com/..." not the full URL).
+    const normalized = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    try {
+      new URL(normalized);
+    } catch {
+      toast.error('That doesn\'t look like a valid URL');
+      return;
+    }
+    setSavingListingFor(prev => new Set(prev).add(compId));
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: normalized })
+        .eq('id', compId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setComps(prev =>
+        prev.map(c => (c.id === compId ? ({ ...c, source_url: normalized } as any) : c))
+      );
+      // Clear the draft so the input goes back to placeholder state,
+      // signaling "saved" by virtue of the URL now appearing in the
+      // saved-link row above.
+      setManualListingDraft(prev => {
+        const next = { ...prev };
+        delete next[compId];
+        return next;
+      });
+      setSavedListingFor(prev => new Set(prev).add(compId));
+      toast.success('Saved — appears on share report');
+      setTimeout(() => {
+        setSavedListingFor(prev => {
+          const next = new Set(prev);
+          next.delete(compId);
+          return next;
+        });
+      }, 2500);
+    } finally {
+      setSavingListingFor(prev => {
+        const next = new Set(prev);
+        next.delete(compId);
+        return next;
+      });
+    }
+  }, [manualListingDraft, supabase]);
+
+  // Remove a saved listing URL from a comp. Used when the broker added
+  // the wrong URL or wants to start over with Find Online.
+  const clearListingForComp = useCallback(async (compId: string) => {
+    setSavingListingFor(prev => new Set(prev).add(compId));
+    try {
+      const { error } = await supabase
+        .from('comps')
+        .update({ source_url: null })
+        .eq('id', compId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setComps(prev =>
+        prev.map(c => (c.id === compId ? ({ ...c, source_url: null } as any) : c))
+      );
+      toast.success('Listing removed');
+    } finally {
+      setSavingListingFor(prev => {
+        const next = new Set(prev);
+        next.delete(compId);
+        return next;
+      });
+    }
+  }, [supabase]);
 
   const startEditBoundary = useCallback((comp: Comp) => {
     if (!drawRef.current || !map.current) return;
@@ -4918,7 +5009,28 @@ export default function MapPage() {
 
               {/* Comps list */}
               <div className="space-y-2">
-                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Comparable Sales</p>
+                {(() => {
+                  // Listings completeness — surfaces "X of Y comps have
+                  // listings" so the broker sees what's missing at a
+                  // glance before sharing. The number of comps without
+                  // a saved source_url is the explicit count of work
+                  // remaining; flagging it here turns "client opens the
+                  // share link and there are no links" into "broker
+                  // sees the gap and fixes it pre-share."
+                  const withListing = cmaComps.filter((c) => (c as any).source_url).length;
+                  const total = cmaComps.length;
+                  const allDone = withListing === total;
+                  return (
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Comparable Sales</p>
+                      {total > 0 && (
+                        <p className={`text-[9px] font-mono ${allDone ? 'text-olive-2' : 'text-amber-800'}`} title={allDone ? 'All comps have listing links' : 'Add listings on the missing comps before sharing'}>
+                          {allDone ? '✓ Listings: ' : '⚠ Listings: '}{withListing} of {total}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
                 {cmaComps.map((c) => {
                   const expanded = expandedCompIds.has(c.id);
                   const adj = compAdjustmentsDraft[c.id] || {};
@@ -4967,6 +5079,27 @@ export default function MapPage() {
                             {isBrokerEstimated && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-bold flex-shrink-0">
                                 Broker-estimated
+                              </span>
+                            )}
+                            {/* Listing-state indicator. Olive pill when a
+                                URL is saved (will appear on the client
+                                report); amber pill when missing. Clicking
+                                expands the card so the broker can paste
+                                or run Find inline. */}
+                            {(c as any).source_url ? (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0 inline-flex items-center gap-0.5"
+                                title="Listing link saved — visible on client share report"
+                              >
+                                <ExternalLink size={8} />
+                                Listing
+                              </span>
+                            ) : (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded flex-shrink-0"
+                                title="No listing link saved — click to expand and add one"
+                              >
+                                + Link
                               </span>
                             )}
                           </p>
@@ -5211,20 +5344,87 @@ export default function MapPage() {
                             )}
                           </div>
 
-                          {/* Live listing search — not persisted, just shown */}
+                          {/* Listing URL editor — drives what shows on
+                              the client share report. Three paths:
+                                1. Saved URL is shown read-only at top
+                                   with a Remove affordance.
+                                2. Paste-and-save row for the common case
+                                   (broker has the URL in hand).
+                                3. AI Find as a fallback when the broker
+                                   doesn't have a URL handy.
+                              Each comp's status is also surfaced on the
+                              COLLAPSED card header so the broker can scan
+                              the batch and see what's missing. */}
                           <div className="pt-2 border-t border-beige/60 space-y-1.5">
-                            <p className="text-[10px] font-bold text-olive uppercase tracking-wider">Online Listing</p>
+                            <p className="text-[10px] font-bold text-olive uppercase tracking-wider">Listing on Client Report</p>
+                            {/* Currently-saved URL → show + Remove */}
+                            {(c as any).source_url && (
+                              <div className="flex items-center gap-1.5 px-2 py-1.5 bg-olive-tint border border-olive-border rounded">
+                                <ExternalLink size={11} className="text-olive-2 flex-shrink-0" />
+                                <a
+                                  href={(c as any).source_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-[11px] text-olive-2 hover:text-olive truncate flex-1 min-w-0"
+                                  title={(c as any).source_url}
+                                >
+                                  {String((c as any).source_url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 50)}
+                                </a>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); clearListingForComp(c.id); }}
+                                  disabled={savingListingFor.has(c.id)}
+                                  className="text-[10px] text-ink-3 hover:text-red-500 font-semibold disabled:opacity-50 flex-shrink-0"
+                                  title="Remove listing — won't appear on share report"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Manual paste row — broker has the URL,
+                                just wants it on the report. Common path. */}
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="url"
+                                placeholder={(c as any).source_url ? 'Paste a different URL to replace…' : 'Paste listing URL (Zillow, MLS, brokerage…)'}
+                                value={manualListingDraft[c.id] || ''}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  const v = e.target.value;
+                                  setManualListingDraft(prev => ({ ...prev, [c.id]: v }));
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    saveManualListingForComp(c.id);
+                                  }
+                                }}
+                                className="flex-1 min-w-0 bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1 text-ink outline-none transition-all"
+                              />
+                              <button
+                                onClick={(e) => { e.stopPropagation(); saveManualListingForComp(c.id); }}
+                                disabled={savingListingFor.has(c.id) || !(manualListingDraft[c.id] || '').trim()}
+                                className="text-[10px] px-2 py-1 bg-olive hover:bg-olive-2 text-white rounded font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                              >
+                                {savingListingFor.has(c.id) ? '…' : 'Save'}
+                              </button>
+                            </div>
+
+                            {/* AI Find — secondary path when broker doesn't have a URL */}
                             <button
                               onClick={(e) => { e.stopPropagation(); findListingForComp(c.id); }}
                               disabled={findingListingFor.has(c.id)}
-                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive rounded text-ink-2 font-bold transition-colors disabled:opacity-50"
+                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-cream hover:bg-cream-2 border border-beige hover:border-olive-border rounded text-ink-2 font-bold transition-colors disabled:opacity-50"
                             >
                               <Globe size={10} />
                               {findingListingFor.has(c.id)
                                 ? 'Searching live…'
                                 : liveListings[c.id]
-                                ? 'Re-search'
-                                : 'Find listing online'}
+                                ? 'Re-search online'
+                                : 'Or find online'}
                             </button>
                             {liveListings[c.id]?.url && (() => {
                               const isSaved = savedListingFor.has(c.id);
