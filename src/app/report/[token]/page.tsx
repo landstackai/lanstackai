@@ -48,6 +48,11 @@ export default function ClientReport({ params }: ClientReportProps) {
   const [showMethodology, setShowMethodology] = useState(false);
   const [expandedCompIds, setExpandedCompIds] = useState<Set<string>>(new Set());
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
+  // Per-acre detail panel — collapsed by default. Clients see the
+  // Suggested List Price + Expected Sale first; the comp $/Ac averages
+  // sit one click away for anyone who wants to verify the math. Reduces
+  // first-glance noise from ~20 dollar amounts on the panel to ~5.
+  const [perAcreDetailOpen, setPerAcreDetailOpen] = useState(false);
 
   const toggleExpanded = (id: string) => {
     setExpandedCompIds((prev) => {
@@ -640,91 +645,14 @@ export default function ClientReport({ params }: ClientReportProps) {
                   </div>
                 </div>
 
-                {/* ============ SECTION 2 — THREE FLAVORS OF $/ACRE ============
-                    Same three-card display as the broker workspace, in the
-                    same order: Total → Land-Only → Adjusted. Each card
-                    shows Low/Mid/High alongside the subject-property total
-                    at that PPA. Cards omit when their sample size is 0
-                    (e.g., no comps have improvements → no Land-Only card). */}
-                {sharedAverages.total.n > 0 && (
-                  <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
-                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.total.n} of {comps.length} comps</p>
-                      </div>
-                      <table className="w-full text-xs">
-                        <tbody className="font-mono">
-                          <tr>
-                            <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.low != null ? formatPPA(sharedAverages.total.low) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.low != null ? formatCurrency(sharedSubjectTotals.total.low) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-2 text-olive-2 font-semibold">Mid</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedAverages.total.mid != null ? formatPPA(sharedAverages.total.mid) : '—'}</td>
-                            <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedSubjectTotals.total.mid != null ? formatCurrency(sharedSubjectTotals.total.mid) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.high != null ? formatPPA(sharedAverages.total.high) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.high != null ? formatCurrency(sharedSubjectTotals.total.high) : '—'}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
-                      Average sale price per acre across the comparable sales below.
-                    </p>
-                  </div>
-                )}
-
-                {sharedAverages.landOnly.n > 0 && (
-                  <div className="px-4 pb-4 space-y-2">
-                    <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                      <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                          Average Land-Only Price Per Acre
-                        </p>
-                        <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.landOnly.n} of {comps.length} comps</p>
-                      </div>
-                      <table className="w-full text-xs">
-                        <tbody className="font-mono">
-                          <tr>
-                            <td className="px-3 py-1.5 text-ink-2">Low</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.low != null ? formatPPA(sharedAverages.landOnly.low) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.low != null ? formatCurrency(sharedSubjectTotals.landOnly.low) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-2 text-slate-blue-2 font-semibold">Mid</td>
-                            <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedAverages.landOnly.mid != null ? formatPPA(sharedAverages.landOnly.mid) : '—'}</td>
-                            <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedSubjectTotals.landOnly.mid != null ? formatCurrency(sharedSubjectTotals.landOnly.mid) : '—'}</td>
-                          </tr>
-                          <tr className="border-t border-beige/60">
-                            <td className="px-3 py-1.5 text-ink-2">High</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.high != null ? formatPPA(sharedAverages.landOnly.high) : '—'}</td>
-                            <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.high != null ? formatCurrency(sharedSubjectTotals.landOnly.high) : '—'}</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className="text-[10px] text-ink-3 leading-relaxed px-1">
-                      $/acre with improvements (houses, barns) backed out — what raw dirt is trading for.
-                    </p>
-                  </div>
-                )}
-
-                {/* Adjusted card intentionally NOT rendered on the
-                    shareable report. It conveys the same idea as
-                    Land-Only (subtract improvements) and the two
-                    landed within a few hundred $/ac of each other in
-                    practice — confusing for clients reading three
-                    near-identical "dirt-only" numbers. The broker's
-                    per-comp overrides are still factored into each
-                    comp card's "Adjusted $/Ac" column below, and the
-                    workspace keeps all three cards for diagnostic
-                    use. Revisit this if there's broker demand for
-                    surfacing the override-aggregate to clients. */}
+                {/* Per-acre average cards moved BELOW the Suggested List
+                    Price + Expected Sale (Section 4) and now sit inside
+                    a collapsible "Per-acre detail" panel. Rationale: the
+                    client's first scroll should land on THE ANSWER
+                    ($X.XM list, $Y.YM expected), not on three rows of
+                    Low/Mid/High that mean nothing in isolation. The
+                    averages don't disappear — they're one click below.
+                    See SECTION 2b further down for the new placement. */}
 
                 {/* ============ SECTION 4 — SUGGESTED LIST PRICE + BOV ============
                     Headline of the report — leads with the broker's
@@ -893,6 +821,100 @@ export default function ClientReport({ params }: ClientReportProps) {
                     </>
                   );
                 })()}
+
+                {/* ============ SECTION 4b — PER-ACRE DETAIL (collapsed) ============
+                    The two $/Ac averages used to sit above the Suggested
+                    List Price hero — that created sticker shock on first
+                    glance because clients saw 18+ dollar amounts before
+                    the actual answer. Now collapsed by default; clients
+                    expand if they want to verify the math. The broker
+                    workspace still shows all three average cards (incl.
+                    Adjusted) open by default for diagnostic use. */}
+                {(sharedAverages.total.n > 0 || sharedAverages.landOnly.n > 0) && (
+                  <div className="px-4 pb-4">
+                    <button
+                      onClick={() => setPerAcreDetailOpen((v) => !v)}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-cream hover:bg-cream-2 border border-beige hover:border-beige-2 rounded-xl transition-colors text-left"
+                      aria-expanded={perAcreDetailOpen}
+                    >
+                      <div>
+                        <p className="text-[11px] font-semibold text-ink">Per-acre comp detail</p>
+                        <p className="text-[10px] text-ink-3">
+                          Low / Mid / High $/Ac across the comparable sales
+                        </p>
+                      </div>
+                      <ChevronDown
+                        size={14}
+                        className={`text-ink-3 transition-transform flex-shrink-0 ${perAcreDetailOpen ? 'rotate-180' : ''}`}
+                      />
+                    </button>
+
+                    {perAcreDetailOpen && (
+                      <div className="mt-2 space-y-2">
+                        {sharedAverages.total.n > 0 && (
+                          <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                            <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                              <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
+                              <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.total.n} of {comps.length} comps</p>
+                            </div>
+                            <table className="w-full text-xs">
+                              <tbody className="font-mono">
+                                <tr>
+                                  <td className="px-3 py-1.5 text-ink-2">Low</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.low != null ? formatPPA(sharedAverages.total.low) : '—'}</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.low != null ? formatCurrency(sharedSubjectTotals.total.low) : '—'}</td>
+                                </tr>
+                                <tr className="border-t border-beige/60">
+                                  <td className="px-3 py-2 text-olive-2 font-semibold">Mid</td>
+                                  <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedAverages.total.mid != null ? formatPPA(sharedAverages.total.mid) : '—'}</td>
+                                  <td className="text-right px-3 py-2 text-olive-2 font-semibold tabular-nums">{sharedSubjectTotals.total.mid != null ? formatCurrency(sharedSubjectTotals.total.mid) : '—'}</td>
+                                </tr>
+                                <tr className="border-t border-beige/60">
+                                  <td className="px-3 py-1.5 text-ink-2">High</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.total.high != null ? formatPPA(sharedAverages.total.high) : '—'}</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.total.high != null ? formatCurrency(sharedSubjectTotals.total.high) : '—'}</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {sharedAverages.landOnly.n > 0 && (
+                          <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                            <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                              <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                                Average Land-Only Price Per Acre
+                              </p>
+                              <p className="text-[9px] text-ink-3 font-mono">{sharedAverages.landOnly.n} of {comps.length} comps</p>
+                            </div>
+                            <table className="w-full text-xs">
+                              <tbody className="font-mono">
+                                <tr>
+                                  <td className="px-3 py-1.5 text-ink-2">Low</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.low != null ? formatPPA(sharedAverages.landOnly.low) : '—'}</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.low != null ? formatCurrency(sharedSubjectTotals.landOnly.low) : '—'}</td>
+                                </tr>
+                                <tr className="border-t border-beige/60">
+                                  <td className="px-3 py-2 text-slate-blue-2 font-semibold">Mid</td>
+                                  <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedAverages.landOnly.mid != null ? formatPPA(sharedAverages.landOnly.mid) : '—'}</td>
+                                  <td className="text-right px-3 py-2 text-slate-blue-2 font-semibold tabular-nums">{sharedSubjectTotals.landOnly.mid != null ? formatCurrency(sharedSubjectTotals.landOnly.mid) : '—'}</td>
+                                </tr>
+                                <tr className="border-t border-beige/60">
+                                  <td className="px-3 py-1.5 text-ink-2">High</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedAverages.landOnly.high != null ? formatPPA(sharedAverages.landOnly.high) : '—'}</td>
+                                  <td className="text-right px-3 py-1.5 text-ink tabular-nums">{sharedSubjectTotals.landOnly.high != null ? formatCurrency(sharedSubjectTotals.landOnly.high) : '—'}</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                            <p className="text-[10px] text-ink-3 leading-relaxed px-3 py-2 border-t border-beige/60">
+                              $/acre with improvements (houses, barns) backed out — what raw dirt is trading for.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* ============ SECTION 5 — COMPARABLE SALES (mirrors broker comp list) ============ */}
                 <div className="flex-1 px-4 pb-4">
