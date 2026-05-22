@@ -80,6 +80,13 @@ export default function MapPage() {
   const [comps, setComps] = useState<Comp[]>([]);
   const [selectedComp, setSelectedComp] = useState<Comp | null>(null);
   const [editingComp, setEditingComp] = useState<Comp | null>(null);
+  // Pending inline edits on the comp detail panel — broker tweaks
+  // improvements_value or improvements_notes in place and clicks Save
+  // changes at the bottom of the panel without opening the full Edit
+  // modal. Keyed by comp id; values are field-name → new-value maps.
+  // Cleared on successful save OR when broker closes the panel.
+  const [pendingCompEdits, setPendingCompEdits] = useState<Record<string, Record<string, any>>>({});
+  const [savingCompEdits, setSavingCompEdits] = useState(false);
 
   // ─── Listing URL state for Comp Detail panel ───────────────────────
   // Same find/paste/save flow as the review page Source block, scoped
@@ -963,6 +970,81 @@ export default function MapPage() {
   }, [supabase]);
 
   useEffect(() => { fetchComps(); }, [fetchComps]);
+
+  // Inline-edit helpers for the comp detail panel.
+  // setPendingField stages a single field change in pendingCompEdits
+  // without writing to the DB; the Save changes button at the bottom
+  // of the panel flushes the pending map for that comp via saveCompEdits.
+  // The displayed value on the panel reads from pending FIRST so the
+  // input stays controlled and the broker sees their typed value.
+  const setPendingField = useCallback((compId: string, field: string, value: any) => {
+    setPendingCompEdits(prev => ({
+      ...prev,
+      [compId]: { ...(prev[compId] || {}), [field]: value },
+    }));
+  }, []);
+
+  const getEffectiveCompField = useCallback((comp: Comp, field: keyof Comp): any => {
+    const pending = pendingCompEdits[comp.id]?.[field as string];
+    return pending !== undefined ? pending : (comp as any)[field];
+  }, [pendingCompEdits]);
+
+  const hasPendingEdits = useCallback((compId: string): boolean => {
+    const edits = pendingCompEdits[compId];
+    return !!edits && Object.keys(edits).length > 0;
+  }, [pendingCompEdits]);
+
+  const discardPendingEdits = useCallback((compId: string) => {
+    setPendingCompEdits(prev => {
+      if (!prev[compId]) return prev;
+      const next = { ...prev };
+      delete next[compId];
+      return next;
+    });
+  }, []);
+
+  const saveCompEdits = useCallback(async (compId: string) => {
+    const edits = pendingCompEdits[compId];
+    if (!edits || Object.keys(edits).length === 0) return;
+    setSavingCompEdits(true);
+    try {
+      // Normalize: empty strings become null; numeric fields are parsed
+      // (the inline input is type=number and returns a string).
+      const normalized: Record<string, any> = {};
+      for (const [k, v] of Object.entries(edits)) {
+        if (v === '' || v === null || v === undefined) {
+          normalized[k] = null;
+        } else if (k === 'improvements_value' || k === 'improvement_value') {
+          const n = Number(v);
+          normalized[k] = Number.isFinite(n) && n >= 0 ? n : null;
+        } else {
+          normalized[k] = v;
+        }
+      }
+      // has_improvements derived consistency: if improvements_value is
+      // being set to a positive number, ensure has_improvements is true.
+      // Mirrors the import flow's saveComp backfill (PR #26).
+      if (normalized.improvements_value != null && Number(normalized.improvements_value) > 0) {
+        normalized.has_improvements = true;
+      }
+      const { error } = await supabase
+        .from('comps')
+        .update(normalized)
+        .eq('id', compId);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+        return;
+      }
+      // Optimistic local update: patch the comp in `comps` and on
+      // selectedComp so the panel reflects the saved values immediately.
+      setComps(prev => prev.map(c => c.id === compId ? ({ ...c, ...normalized } as Comp) : c));
+      setSelectedComp(prev => prev && prev.id === compId ? ({ ...prev, ...normalized } as Comp) : prev);
+      discardPendingEdits(compId);
+      toast.success('Saved');
+    } finally {
+      setSavingCompEdits(false);
+    }
+  }, [pendingCompEdits, supabase, discardPendingEdits]);
 
   const findListingForComp = useCallback(async (compId: string) => {
     setFindingListingFor(prev => new Set(prev).add(compId));
@@ -5753,17 +5835,52 @@ export default function MapPage() {
                   <span className="text-ink-2 text-right truncate">{selectedComp.address}</span>
                 </div>
               )}
-              {selectedComp.has_improvements && selectedComp.improvements_value != null && (
-                <div className="flex justify-between">
-                  <span className="text-ink-3">Improvements</span>
-                  <span className="text-slate-blue-2 font-mono">{formatCurrency(selectedComp.improvements_value)} ECV</span>
+              {/* Improvements — inline editable when broker owns the comp.
+                  Static display for everyone else (collaborators, shared
+                  CMAs). Saving the typed value happens via the "Save
+                  changes" button at the bottom of the panel — keystrokes
+                  here only update local pendingCompEdits state. */}
+              {selectedComp.created_by === currentUserId ? (
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-ink-3">Improvements (ECV)</span>
+                    <div className="relative w-32">
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-3 text-[11px]">$</span>
+                      <input
+                        type="number"
+                        placeholder="0"
+                        value={getEffectiveCompField(selectedComp, 'improvements_value' as keyof Comp) ?? ''}
+                        onChange={(e) => setPendingField(selectedComp.id, 'improvements_value', e.target.value)}
+                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] pl-5 pr-2 py-1 text-ink font-mono tabular-nums text-right outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <p className="text-ink-3 text-[10px]">Improvements notes</p>
+                    <textarea
+                      placeholder="House, barns, fencing, wells…"
+                      value={getEffectiveCompField(selectedComp, 'improvements_notes' as keyof Comp) ?? ''}
+                      onChange={(e) => setPendingField(selectedComp.id, 'improvements_notes', e.target.value)}
+                      rows={2}
+                      className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1 text-ink-2 outline-none transition-all resize-none leading-relaxed"
+                    />
+                  </div>
                 </div>
-              )}
-              {selectedComp.improvements_notes && (
-                <div className="pt-1">
-                  <p className="text-ink-3 mb-0.5">Improvements notes</p>
-                  <p className="text-ink-2 leading-relaxed">{selectedComp.improvements_notes}</p>
-                </div>
+              ) : (
+                <>
+                  {selectedComp.has_improvements && selectedComp.improvements_value != null && (
+                    <div className="flex justify-between">
+                      <span className="text-ink-3">Improvements</span>
+                      <span className="text-slate-blue-2 font-mono">{formatCurrency(selectedComp.improvements_value)} ECV</span>
+                    </div>
+                  )}
+                  {selectedComp.improvements_notes && (
+                    <div className="pt-1">
+                      <p className="text-ink-3 mb-0.5">Improvements notes</p>
+                      <p className="text-ink-2 leading-relaxed">{selectedComp.improvements_notes}</p>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
@@ -6071,10 +6188,37 @@ export default function MapPage() {
               </div>
             )}
 
+            {/* Inline-edit save row — appears when broker has unsaved
+                changes from the Improvements input above (or any other
+                inline-editable field added later). When clean, the row
+                hides and only the "Edit Comp" button (full modal)
+                shows. When dirty, the Save button is primary olive and
+                a Discard link gives a no-op escape hatch. */}
+            {selectedComp.created_by === currentUserId && hasPendingEdits(selectedComp.id) && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => saveCompEdits(selectedComp.id)}
+                  disabled={savingCompEdits}
+                  className="flex-1 py-2.5 bg-olive hover:bg-olive-2 text-white text-sm font-bold rounded-xl transition-colors flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm"
+                >
+                  <Check size={14} />
+                  {savingCompEdits ? 'Saving…' : 'Save changes'}
+                </button>
+                <button
+                  onClick={() => discardPendingEdits(selectedComp.id)}
+                  disabled={savingCompEdits}
+                  className="px-3 py-2.5 text-xs font-semibold text-ink-2 hover:text-ink transition-colors disabled:opacity-60"
+                  title="Discard unsaved changes"
+                >
+                  Discard
+                </button>
+              </div>
+            )}
+
             {selectedComp.created_by === currentUserId && (
               <button onClick={() => setEditingComp(selectedComp)}
                 className="w-full py-2.5 bg-cream border border-beige hover:border-olive text-sm font-bold text-ink-2 hover:text-ink rounded-xl transition-colors flex items-center justify-center gap-2">
-                <Edit size={14} /> Edit Comp
+                <Edit size={14} /> Edit all fields
               </button>
             )}
           </div>
