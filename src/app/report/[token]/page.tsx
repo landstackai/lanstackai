@@ -668,45 +668,43 @@ export default function ClientReport({ params }: ClientReportProps) {
                     expected sale lands as "with negotiation room baked
                     in" rather than "this is what it's worth, sorry." */}
                 {suggestedValue > 0 && (() => {
-                  // List price resolution: broker override > BOV × 1.10.
-                  // When suggestedValue is the COMPUTED (no broker
-                  // opinion entered) average from comps, we still
-                  // surface a list price — it just defaults to the
-                  // computed value × 1.10.
-                  const savedListPrice = (cma as any).suggested_list_price;
-                  const savedListNum = savedListPrice != null ? Number(savedListPrice) : NaN;
-                  const listPrice = Number.isFinite(savedListNum) && savedListNum > 0
-                    ? savedListNum
-                    : Math.round(suggestedValue * 1.10);
-                  const showHero = listPrice > 0 && listPrice > suggestedValue;
-                  // Build the supporting-line copy — "Most deals close
-                  // around $6.75M. Comparable sales support a $3.29M–$8.22M range."
-                  // Falls back to a shorter version when range data is missing.
+                  // suggested_list_price column is still in the DB and
+                  // the broker workspace still exposes the input — it's
+                  // just no longer surfaced as the report's headline.
+                  // Future "Listing Strategy" section may re-surface it
+                  // as separate broker guidance below the Opinion of
+                  // Value, distinct from the valuation itself.
+
+                  // Indicator math: when the broker's Opinion of Value
+                  // sits OUTSIDE the comp range, surface that fact
+                  // explicitly with a percentage delta. Honest framing
+                  // — the broker is calling the subject above or below
+                  // what the comp set supports, and the client deserves
+                  // to see that explicit positioning instead of math
+                  // that looks artificially aligned.
+                  const rangeLowDollar = rngLow * subjAcres;
+                  const rangeHighDollar = rngHigh * subjAcres;
+                  const aboveRange = rangeHighDollar > 0 && suggestedValue > rangeHighDollar;
+                  const belowRange = rangeLowDollar > 0 && suggestedValue < rangeLowDollar;
+                  const deltaPct = aboveRange
+                    ? Math.round(((suggestedValue - rangeHighDollar) / rangeHighDollar) * 100)
+                    : belowRange
+                      ? Math.round(((rangeLowDollar - suggestedValue) / rangeLowDollar) * 100)
+                      : 0;
                   return (
                     <>
-                    {showHero && (
-                      <div className="mx-4 mb-3 p-5 rounded-2xl bg-white border border-beige shadow-sm">
-                        <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
-                          Suggested List Price
-                        </p>
-                        <p className="text-4xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
-                          {formatCurrency(listPrice)}
-                        </p>
-                        <p className="text-[11px] text-ink-2 leading-relaxed mt-3">
-                          Negotiation cushion built in. Most deals close around{' '}
-                          <span className="font-semibold text-ink">{formatCurrency(suggestedValue)}</span>
-                          {rngHigh > rngLow && (
-                            <>
-                              {' '}— comparable sales support a{' '}
-                              <span className="font-mono">{formatCurrency(rngLow * subjAcres)}–{formatCurrency(rngHigh * subjAcres)}</span>{' '}range.
-                            </>
-                          )}
-                        </p>
-                      </div>
-                    )}
+                  {/* OPINION OF VALUE — the headline of the report.
+                      Industry-standard term for commercial/land BOVs.
+                      The "Suggested List Price" hero is deprecated; the
+                      suggested_list_price DB column stays put for a
+                      possible future "Listing Strategy" section that
+                      sits separately, but it's no longer the
+                      attention-grabbing top-of-fold number. Brokers
+                      lead with their professional opinion of value;
+                      list-price strategy is a separate conversation. */}
                   <div className="mx-4 mb-4 p-5 rounded-2xl bg-white border border-beige shadow-sm">
                     <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
-                      {showHero ? 'Expected Sale' : (usingBrokerOpinion ? "Broker's Opinion of Value" : 'Recommended Value')}
+                      Opinion of Value
                     </p>
 
                     {isBreakdown ? (
@@ -780,6 +778,54 @@ export default function ClientReport({ params }: ClientReportProps) {
                           {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
                         </p>
                       </>
+                    )}
+
+                    {/* Compact supporting line — the two numbers that
+                        defend the Opinion of Value most directly.
+                        Visible on first glance (no expansion required)
+                        per broker feedback that these are critical
+                        signals, not buried-in-detail metrics. Falls
+                        back gracefully when either avg has no data. */}
+                    {(sharedAverages.total.n > 0 || sharedAverages.landOnly.n > 0) && (
+                      <p className="text-[11px] text-ink-2 mt-3 leading-relaxed">
+                        Based on <span className="font-semibold text-ink">{comps.length} comparable {comps.length === 1 ? 'sale' : 'sales'}</span>
+                        {sharedAverages.total.mid != null && (
+                          <>
+                            {' '}· avg sale{' '}
+                            <span className="font-mono font-semibold text-olive-2">{formatPPA(sharedAverages.total.mid)}</span>
+                          </>
+                        )}
+                        {sharedAverages.landOnly.mid != null && (
+                          <>
+                            {' '}· avg land-only{' '}
+                            <span className="font-mono font-semibold text-slate-blue-2">{formatPPA(sharedAverages.landOnly.mid)}</span>
+                          </>
+                        )}
+                      </p>
+                    )}
+
+                    {/* Above/below range indicator — fires only when the
+                        Opinion of Value sits OUTSIDE the comp range
+                        (high or low). Surfaces the broker's positioning
+                        explicitly rather than letting the math look
+                        artificially aligned. If broker has a Valuation
+                        Notes field set (future PR), it'll appear right
+                        below this — clients see the WHY. */}
+                    {(aboveRange || belowRange) && deltaPct > 0 && (
+                      <div className={`mt-2 px-3 py-2 rounded-lg border text-[11px] leading-relaxed ${
+                        aboveRange
+                          ? 'bg-amber-50/60 border-amber-200 text-amber-800'
+                          : 'bg-slate-blue/5 border-slate-blue/20 text-slate-blue-2'
+                      }`}>
+                        <span className="font-semibold">
+                          {aboveRange ? '↑' : '↓'} {deltaPct}% {aboveRange ? 'above' : 'below'} {aboveRange ? 'highest' : 'lowest'} comp
+                        </span>
+                        <span className="text-ink-2">
+                          {' '}— {aboveRange
+                            ? 'subject carries features the comp set lacks (improvements, water, frontage).'
+                            : 'subject has limitations the comp set doesn\'t share (access, encumbrances, condition).'}
+                        </span>
+                      </div>
                     )}
 
                     {/* Range bar — always shown for context (Low / High range from comps) */}
@@ -1043,6 +1089,37 @@ export default function ClientReport({ params }: ClientReportProps) {
                                     )}
                                   </p>
                                   <div className="flex items-center gap-2 flex-shrink-0">
+                                    {/* Sale date — most-asked client question
+                                        ("when did that one sell?"). Surfaced on
+                                        the collapsed card so they don't have to
+                                        expand each comp to find it. Compact
+                                        "Sold Mon YYYY" format. Sales >24 months
+                                        old get a small amber pill so the client
+                                        sees the recency context without doing
+                                        math — TX land moved hard in 2022, a
+                                        $5K/ac comp from 2021 vs $10K/ac in
+                                        2024 is market shift, not noise. */}
+                                    {(comp as any).sale_date && (() => {
+                                      const d = new Date((comp as any).sale_date);
+                                      if (Number.isNaN(d.getTime())) return null;
+                                      const label = `Sold ${d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`;
+                                      const monthsAgo =
+                                        (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+                                      const isOld = monthsAgo >= 24;
+                                      return (
+                                        <span className="flex items-center gap-1.5 flex-shrink-0">
+                                          <span className="text-[10px] text-ink-2 font-mono">{label}</span>
+                                          {isOld && (
+                                            <span
+                                              className="text-[8px] uppercase tracking-wide px-1 py-px rounded bg-amber-50 border border-amber-300 text-amber-700"
+                                              title="More than two years old — market may have shifted since this sale"
+                                            >
+                                              2+ yr
+                                            </span>
+                                          )}
+                                        </span>
+                                      );
+                                    })()}
                                     {dist != null && (
                                       <p className="text-[10px] text-ink-3 font-mono">{dist.toFixed(1)} mi</p>
                                     )}
