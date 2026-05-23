@@ -691,6 +691,17 @@ export default function ClientReport({ params }: ClientReportProps) {
                     : belowRange
                       ? Math.round(((rangeLowDollar - suggestedValue) / rangeLowDollar) * 100)
                       : 0;
+
+                  // Presentation mode — broker chose how the BOV lands
+                  // on this report. NULL or 'confirmed' = current (hard
+                  // number) behavior. 'range' = comp range only, no
+                  // point estimate. 'discuss' = "Let's discuss" soft
+                  // invitation, no number. See migration 031.
+                  const presentation = ((cma as any).opinion_presentation as 'confirmed' | 'range' | 'discuss' | null) || 'confirmed';
+                  const valuationNotes: string = (typeof (cma as any).valuation_notes === 'string' ? (cma as any).valuation_notes : '').trim();
+                  const isDiscussMode = presentation === 'discuss';
+                  const isRangeMode = presentation === 'range';
+
                   return (
                     <>
                   {/* OPINION OF VALUE — the headline of the report.
@@ -707,7 +718,45 @@ export default function ClientReport({ params }: ClientReportProps) {
                       Opinion of Value
                     </p>
 
-                    {isBreakdown ? (
+                    {isDiscussMode ? (
+                      // "Let's Discuss" mode — no point estimate, no
+                      // breakdown. Client sees a soft invitation +
+                      // broker's contact handoff. Comp data still
+                      // visible below (averages + comp list). The
+                      // seller arrives at the meeting with comp
+                      // evidence but no anchor to react to.
+                      <>
+                        <p className="text-2xl font-semibold text-ink italic font-mono leading-none">
+                          Let&apos;s discuss
+                        </p>
+                        <p className="text-[11px] text-ink-2 leading-relaxed mt-3">
+                          Final value depends on factors worth talking through together — listing strategy, market timing, and how this property compares feature-for-feature against the comp set.
+                          {broker?.full_name && (
+                            <> Reach out to <span className="font-semibold text-ink">{broker.full_name}</span> to discuss.</>
+                          )}
+                        </p>
+                      </>
+                    ) : isRangeMode ? (
+                      // Range mode — shows the comp-derived range as a
+                      // band rather than a point estimate. Useful when
+                      // the broker has confidence in a band but the
+                      // final number depends on listing strategy or
+                      // market conditions.
+                      <>
+                        {rngHigh > rngLow ? (
+                          <p className="text-2xl font-semibold text-olive-2 font-mono tabular-nums leading-tight">
+                            {formatCurrency(rangeLowDollar)} – {formatCurrency(rangeHighDollar)}
+                          </p>
+                        ) : (
+                          <p className="text-2xl font-semibold text-ink italic font-mono leading-none">
+                            Range pending
+                          </p>
+                        )}
+                        <p className="text-[11px] text-ink-2 font-mono tabular-nums mt-1.5">
+                          {formatPPA(rngLow)} – {formatPPA(rngHigh)} × {formatAcres(subjAcres)}
+                        </p>
+                      </>
+                    ) : isBreakdown ? (
                       // Itemized: Land Value + Improvement Value = Total.
                       // When house itemization is present (SQFT × $/SQFT and/or
                       // additional vertical), show the breakdown nested under
@@ -806,12 +855,13 @@ export default function ClientReport({ params }: ClientReportProps) {
 
                     {/* Above/below range indicator — fires only when the
                         Opinion of Value sits OUTSIDE the comp range
-                        (high or low). Surfaces the broker's positioning
-                        explicitly rather than letting the math look
-                        artificially aligned. If broker has a Valuation
-                        Notes field set (future PR), it'll appear right
-                        below this — clients see the WHY. */}
-                    {(aboveRange || belowRange) && deltaPct > 0 && (
+                        (high or low). Skipped in 'discuss' and 'range'
+                        presentation modes because there's no point
+                        estimate to position relative to the range.
+                        When notes are also set, the chain becomes
+                        [indicator → notes] for a complete "above range
+                        + here's why" narrative. */}
+                    {!isDiscussMode && !isRangeMode && (aboveRange || belowRange) && deltaPct > 0 && (
                       <div className={`mt-2 px-3 py-2 rounded-lg border text-[11px] leading-relaxed ${
                         aboveRange
                           ? 'bg-amber-50/60 border-amber-200 text-amber-800'
@@ -828,8 +878,28 @@ export default function ClientReport({ params }: ClientReportProps) {
                       </div>
                     )}
 
-                    {/* Range bar — always shown for context (Low / High range from comps) */}
-                    {rngHigh > rngLow && (
+                    {/* Valuation Notes — broker's WHY paragraph. Renders
+                        below the headline + indicators, above the
+                        slider. Critical in 'discuss' mode (where it's
+                        often the broker's only verbal commitment) and
+                        useful in any mode to add context. */}
+                    {valuationNotes && (
+                      <div className="mt-4 px-4 py-3 rounded-xl bg-cream-2/40 border-l-4 border-olive-border/60">
+                        <p className="text-[10px] uppercase tracking-wider text-olive-2 font-bold mb-1">
+                          {broker?.full_name ? `${broker.full_name.split(' ')[0]}'s Read` : "Broker's Read"}
+                        </p>
+                        <p className="text-[12px] text-ink leading-relaxed whitespace-pre-wrap">
+                          {valuationNotes}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Range bar — point estimate marker only makes
+                        sense in 'confirmed' mode. In 'range' mode the
+                        Low/High band is already the headline; in
+                        'discuss' mode there's no point estimate to
+                        place on the slider. Skipped for both. */}
+                    {!isDiscussMode && !isRangeMode && rngHigh > rngLow && (
                       <div className="mt-4">
                         <div className="relative mb-2">
                           <div className="h-1.5 rounded-full bg-cream border border-beige overflow-hidden">
@@ -855,7 +925,11 @@ export default function ClientReport({ params }: ClientReportProps) {
                     )}
 
                     <p className="text-[11px] text-ink-2 leading-relaxed mt-4">
-                      {isBreakdown
+                      {isDiscussMode
+                        ? `Comp data below supports the conversation. ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} included.`
+                        : isRangeMode
+                        ? `Range derived from ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} — final value depends on listing strategy and market timing.`
+                        : isBreakdown
                         ? `Land valued at ${formatPPA(opinionLand / Math.max(subjAcres, 1))} based on the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below${opinionImprovement > 0 ? `; improvements valued separately at ${formatCurrency(opinionImprovement)}` : ''}.`
                         : isLumpSum
                         ? `Broker's professional opinion of value, supported by the ${comps.length} comparable ${comps.length === 1 ? 'sale' : 'sales'} below.`
