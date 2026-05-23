@@ -238,6 +238,18 @@ export default function MapPage() {
   // cmas.suggested_list_price; falls back to compute on display.
   // See docs/DESIGN_DECISIONS.md (sticker-shock framing).
   const [bovListPriceInput, setBovListPriceInput] = useState<string>('');
+  // Opinion of Value presentation mode — controls how the BOV is
+  // displayed on the client report. Independent of breakdown style
+  // (lump_sum vs breakdown). 'confirmed' shows a hard number,
+  // 'range' shows the comp range only, 'discuss' shows a soft
+  // "Let's discuss" invitation. See migration 031.
+  type OpinionPresentation = 'confirmed' | 'range' | 'discuss';
+  const [opinionPresentation, setOpinionPresentation] = useState<OpinionPresentation>('confirmed');
+  // Broker-written WHY paragraph that appears below the Opinion of
+  // Value on the client report. Especially useful when BOV is in
+  // 'discuss' or 'range' mode, or when the hard BOV sits outside the
+  // comp range (above/below indicator was shipped in PR #43).
+  const [valuationNotes, setValuationNotes] = useState<string>('');
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -2177,6 +2189,18 @@ export default function MapPage() {
         setBovListPriceInput('');
       }
     }
+
+    // Opinion presentation mode + valuation notes — both nullable on
+    // the DB row. Presentation defaults to 'confirmed' for backwards
+    // compat with CMAs created before migration 031.
+    const savedPresentation = cma?.opinion_presentation;
+    if (savedPresentation === 'range' || savedPresentation === 'discuss' || savedPresentation === 'confirmed') {
+      setOpinionPresentation(savedPresentation);
+    } else {
+      setOpinionPresentation('confirmed');
+    }
+    const savedNotes = cma?.valuation_notes;
+    setValuationNotes(typeof savedNotes === 'string' ? savedNotes : '');
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Immediate save — used by Save button and effect cleanup so pending edits
@@ -4533,6 +4557,15 @@ export default function MapPage() {
                   // keys preserve the existing DB value (vs null which
                   // would clear it). Same pattern as houseSqft etc.
                   suggestedListPrice?: number | null;
+                  // opinionPresentation: report-display mode for the
+                  // BOV — 'confirmed' / 'range' / 'discuss'. Omitting
+                  // preserves existing DB value; passing null clears
+                  // back to confirmed default on render.
+                  opinionPresentation?: OpinionPresentation | null;
+                  // valuationNotes: broker's WHY paragraph. Omitting
+                  // preserves; empty string clears. Render path treats
+                  // both as "no notes set."
+                  valuationNotes?: string | null;
                 }) => {
                   const fields: any = {
                     broker_opinion_mode: patch.mode,
@@ -4547,6 +4580,8 @@ export default function MapPage() {
                   if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
                   if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
                   if ('suggestedListPrice' in patch) fields.suggested_list_price = patch.suggestedListPrice;
+                  if ('opinionPresentation' in patch) fields.opinion_presentation = patch.opinionPresentation;
+                  if ('valuationNotes' in patch) fields.valuation_notes = patch.valuationNotes;
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
 
@@ -4826,6 +4861,54 @@ export default function MapPage() {
                       <p className="text-[9px] text-ink-3">optional</p>
                     </div>
 
+                    {/* Presentation mode — Confirmed / Range / Discuss.
+                        Drives how the BOV is displayed on the client
+                        report. Independent of breakdown style (lump_sum
+                        vs breakdown) — broker can enter values as a
+                        breakdown and still ship in 'discuss' mode. */}
+                    <div className="space-y-1.5">
+                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Show on client report as</p>
+                      <div className="grid grid-cols-3 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
+                        {(['confirmed', 'range', 'discuss'] as const).map((mode) => {
+                          const label = mode === 'confirmed' ? 'Confirmed' : mode === 'range' ? 'Range' : "Let's Discuss";
+                          const isActive = opinionPresentation === mode;
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => {
+                                setOpinionPresentation(mode);
+                                saveBov({
+                                  mode: bovMode,
+                                  total: Number(bovTotalInput) || null,
+                                  landValue: Number(bovLandTotalInput) || null,
+                                  improvementValue: Number(bovImprovementInput) || null,
+                                  opinionPresentation: mode,
+                                });
+                              }}
+                              className={`py-1.5 rounded-md text-[10px] font-semibold transition-colors ${
+                                isActive
+                                  ? 'bg-white text-ink shadow-sm border border-beige-2'
+                                  : 'text-ink-2 hover:text-ink'
+                              }`}
+                              title={
+                                mode === 'confirmed' ? 'Show the hard number ($X.XM)'
+                                  : mode === 'range' ? 'Show comp range only — no point estimate'
+                                  : 'Hide the number — invite a conversation'
+                              }
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[9px] text-ink-3 leading-relaxed">
+                        {opinionPresentation === 'confirmed' && 'Client sees the hard number.'}
+                        {opinionPresentation === 'range' && 'Client sees the comp range only — no point estimate. Useful when listing strategy depends on market timing.'}
+                        {opinionPresentation === 'discuss' && "Client sees 'Let's discuss' instead of a number. Comp data still visible. Lets you anchor the conversation in a call, not the report."}
+                      </p>
+                    </div>
+
                     {/* Mode toggle — Lump Sum vs Land + Improvements */}
                     <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
                       <button
@@ -4999,6 +5082,43 @@ export default function MapPage() {
                         </div>
                       </>
                     )}
+
+                    {/* Valuation Notes — broker's WHY paragraph. Appears
+                        on the client report below the Opinion of Value.
+                        Especially useful in 'discuss' or 'range' mode
+                        (where the broker isn't committing to a hard
+                        number) or when the BOV sits outside the comp
+                        range (the above/below indicator from PR #43
+                        invites a one-sentence explanation). Saves on
+                        blur to avoid spamming saves on every keystroke. */}
+                    <div className="border-t border-beige pt-2 space-y-1.5">
+                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                        Valuation Notes
+                        <span className="text-ink-3 normal-case tracking-normal"> · appears on client report</span>
+                      </p>
+                      <textarea
+                        placeholder={
+                          opinionPresentation === 'discuss'
+                            ? 'e.g. "Comps support a range — let\'s talk through the right number for your situation."'
+                            : opinionPresentation === 'range'
+                            ? 'e.g. "Final value depends on listing strategy + market timing — happy to discuss."'
+                            : 'e.g. "Above the comp range because of the hacienda + dual creek frontage."'
+                        }
+                        value={valuationNotes}
+                        onChange={(e) => setValuationNotes(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            valuationNotes: valuationNotes.trim() === '' ? null : valuationNotes,
+                          });
+                        }}
+                        rows={3}
+                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed"
+                      />
+                    </div>
                   </div>
 
                   {/* ─── Suggested List Price ──────────────────────────
