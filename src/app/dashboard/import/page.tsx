@@ -1937,9 +1937,97 @@ export default function ImportPage() {
     }
   };
 
+  // URL detection — broker pastes a single listing URL (LERA/ConnectMLS,
+  // LandWatch, brokerage sites, etc.). Different flow than text paste:
+  // server-side fetch + structured HTML parse + AI extraction via the
+  // /api/import-url endpoint. Returns a single comp, not a batch.
+  const isLikelyUrl = (text: string): boolean => {
+    const trimmed = text.trim();
+    // Single line with no surrounding prose
+    if (trimmed.includes('\n') || trimmed.includes(' ')) return false;
+    return /^https?:\/\/[^\s]+\.[^\s]+/i.test(trimmed);
+  };
+
+  // Single-URL listing import flow. Mirrors sendMessage's UX (user
+  // message + assistant message with comps) but pulls from
+  // /api/import-url and processes the single returned comp through the
+  // auto-save + verification card pipeline. Errors surface as toasts +
+  // an assistant message guiding the broker to download as PDF.
+  const importFromUrl = async (url: string) => {
+    const userMessage: Message = {
+      role: 'user',
+      content: url,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setLoading(true);
+    setLoadingStatus(`Fetching listing from ${(() => { try { return new URL(url).hostname; } catch { return 'site'; } })()}…`);
+    try {
+      const res = await fetch('/api/import-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok || !data?.comp) {
+        const hint = data?.hint || 'Try downloading the listing as a PDF and uploading that instead — some listing sites block automated fetches or render content with JavaScript.';
+        const errMsg: Message = {
+          role: 'assistant',
+          content: `Couldn't read that link.\n\nReason: ${data?.error || 'unknown'}\n\n${hint}`,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, errMsg]);
+        toast.error('Listing fetch failed');
+        return;
+      }
+
+      // Comp arrives partially-filled (listings rarely have sale_date,
+      // grantor, grantee, recording number). Run dedupe + auto-save
+      // through the same pipeline as PDF extraction so the verification
+      // card behavior stays consistent.
+      const comp = data.comp;
+      const comps = [comp];
+
+      await runDuplicateCheck(comps, supabase);
+      await autoSaveExtracted(comps);
+
+      const summary = comp?.needs_completion
+        ? `Pulled a listing from ${comp.source_url ? new URL(comp.source_url).hostname : 'the link'}. Saved to your vault under Needs Review. Some fields the listing didn't include — finish them on the verification card.`
+        : `Pulled a listing from ${comp.source_url ? new URL(comp.source_url).hostname : 'the link'}. Saved to your vault under Needs Review.`;
+      const assistantMessage: Message = {
+        role: 'assistant',
+        content: summary,
+        comps,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+      setPendingComps((prev) => [...prev, ...comps]);
+      toast.success('Listing saved to your vault');
+    } catch (e: any) {
+      const errMsg: Message = {
+        role: 'assistant',
+        content: `URL ingestion failed: ${e?.message || 'unknown error'}. Try downloading the page as a PDF and uploading that.`,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, errMsg]);
+      toast.error(e?.message || 'URL ingestion failed');
+    } finally {
+      setLoading(false);
+      setLoadingStatus(null);
+    }
+  };
+
   const handleSubmit = async () => {
-    if (!input.trim() || loading) return;
-    await sendMessage(input.trim());
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+    if (isLikelyUrl(trimmed)) {
+      // URL path clears the input itself (mirrors sendMessage); the
+      // chat box empties as soon as the user message is pushed.
+      setInput('');
+      await importFromUrl(trimmed);
+    } else {
+      await sendMessage(trimmed);
+    }
   };
 
   // saveComp persists a comp to the vault. Caller controls intent via opts:
