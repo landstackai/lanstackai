@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { ExtractedComp } from '@/types';
 import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangle, Clock, Check } from 'lucide-react';
+import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
@@ -890,6 +891,44 @@ function attachAerialsToComps(
   return { attached, missed };
 }
 
+// ─── Duplicate detection (shared between single-shot + chunked paths) ─
+//
+// Past failure mode: dedupe lived inline in sendMessage only. PDFs
+// >5 pages went through extractFromChunkedPdf and never ran the
+// check — re-importing the same Wilson County 6-pager would silently
+// create copies in the vault without surfacing the "Possible
+// duplicate of:" banner that exists for short uploads. Same drift
+// pattern that hit aerial extraction before PR #29.
+//
+// This helper queries Supabase for each extracted comp's possible
+// duplicates (matching sale_date + sale_price within $1), runs the
+// fuzzy grantor/grantee matcher (findDuplicateCandidates), and tags
+// the comp with `_duplicates` for the verification card to render.
+// Silent failures — dedupe is a nicety, not blocking; one comp's
+// failed query never breaks the rest of the batch.
+async function runDuplicateCheck(comps: any[], supabaseClient: any): Promise<void> {
+  if (!Array.isArray(comps)) return;
+  for (let i = 0; i < comps.length; i++) {
+    const c = comps[i];
+    if (!c?.sale_date || !(Number(c?.sale_price) > 0)) continue;
+    try {
+      const { data: candidates, error } = await supabaseClient
+        .from('comps')
+        .select('id, property_name, county, grantor, grantee, sale_date, sale_price, created_at')
+        .eq('sale_date', c.sale_date)
+        .gte('sale_price', Number(c.sale_price) - 1)
+        .lte('sale_price', Number(c.sale_price) + 1);
+      if (error || !Array.isArray(candidates)) continue;
+      const matches = findDuplicateCandidates(c, candidates as any);
+      if (matches.length > 0) {
+        (comps[i] as any)._duplicates = matches;
+      }
+    } catch (e) {
+      console.warn('[import] dedup check failed for', c?.property_name, e);
+    }
+  }
+}
+
 interface Message {
   role: 'user' | 'assistant';
   content: string;
@@ -1117,25 +1156,12 @@ export default function ImportPage() {
         setLoadingStatus('Checking your vault for duplicates…');
       }
       if (Array.isArray(data.comps)) {
-        for (let i = 0; i < data.comps.length; i++) {
-          const c = data.comps[i];
-          if (!c.sale_date || !(Number(c.sale_price) > 0)) continue;
-          try {
-            const { data: candidates, error } = await supabase
-              .from('comps')
-              .select('id, property_name, county, grantor, grantee, sale_date, sale_price, created_at')
-              .eq('sale_date', c.sale_date)
-              .gte('sale_price', Number(c.sale_price) - 1)
-              .lte('sale_price', Number(c.sale_price) + 1);
-            if (error || !Array.isArray(candidates)) continue;
-            const matches = findDuplicateCandidates(c, candidates as any);
-            if (matches.length > 0) {
-              (data.comps[i] as any)._duplicates = matches;
-            }
-          } catch (e) {
-            // Silently skip — dedup detection is a nicety, not blocking
-            console.warn('[import] dedup check failed for', c.property_name, e);
-          }
+        await runDuplicateCheck(data.comps, supabase);
+        // Auto-save on extraction (PR #45) — every extracted comp
+        // saves immediately to the vault as needs_location_review=true.
+        // See autoSaveExtracted for the silent-bulk-save loop.
+        if (data.comps.length > 0) {
+          await autoSaveExtracted(data.comps);
         }
       }
 
@@ -1794,11 +1820,28 @@ export default function ImportPage() {
         }).join(' · ')}`
       : '';
 
+    // Dedupe vs existing vault comps — same helper the single-shot
+    // path uses (PR #45). Previously absent from this path, so
+    // re-imports of long PDFs silently created copies without the
+    // "Possible duplicate of:" banner. Tags each match-found comp
+    // with _duplicates so the verification card renders the banner.
+    await runDuplicateCheck(dedupedComps, supabase);
+
+    // Auto-save on extraction (PR #45) — every extracted comp lands
+    // in the vault immediately with needs_location_review=true so
+    // the broker can never lose work by closing the tab or skipping
+    // the verification step. The verification cards become a
+    // refinement surface, not a save surface. Discard / Delete
+    // buttons on each card handle the cleanup paths.
+    if (dedupedComps.length > 0) {
+      await autoSaveExtracted(dedupedComps);
+    }
+
     const summary = dedupedComps.length === 0
       ? errorCount > 0
         ? `Extraction failed for ${errorCount} of ${chunks.length} chunks. No comps recovered.${chunkBreakdown}`
         : `No comps extracted from ${chunks.length} chunks across ${images.length} pages. AI didn't recognize comp structure.${chunkBreakdown}`
-      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}.${chunkBreakdown}`;
+      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}. Each was saved to your vault under Needs Review.${chunkBreakdown}`;
 
     const assistantMessage: Message = {
       role: 'assistant',
@@ -1810,7 +1853,7 @@ export default function ImportPage() {
 
     if (dedupedComps.length > 0) {
       setPendingComps(prev => [...prev, ...dedupedComps]);
-      toast.success(`Found ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'}`, { duration: 4000 });
+      toast.success(`Saved ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} to your vault`, { duration: 4000 });
     } else {
       toast.error('No comps extracted from this document');
     }
@@ -1910,6 +1953,34 @@ export default function ImportPage() {
   //                FALSE → show the normal success toast (with optional
   //                        "View on map" link for verified-with-pin comps).
   // When called without opts, defaults to verified + with-toast.
+
+  // Auto-save every extracted comp to the vault immediately as
+  // needs_location_review=true. PR #45 architectural shift: upload =
+  // save. The verification cards become a refinement surface (verify,
+  // open in review, discard, delete), not a save surface. Broker can
+  // close the tab mid-import and find every comp under the vault's
+  // "Needs Review" section.
+  //
+  // Each saved comp gets stamped with `_savedId` so subsequent actions
+  // (verify / discard / delete) operate on the DB row instead of
+  // creating duplicates. Mutates the input array in place.
+  const autoSaveExtracted = async (comps: ExtractedComp[]): Promise<void> => {
+    if (!Array.isArray(comps) || comps.length === 0) return;
+    const results = await Promise.all(
+      comps.map((c) => {
+        // Skip comps already saved (e.g., from a prior auto-save in
+        // the same session — extractFromChunkedPdf can run multiple
+        // times if broker uploads more PDFs back to back).
+        if ((c as any)._savedId) return Promise.resolve({ id: (c as any)._savedId });
+        return saveComp(c, { needsReview: true, silent: true });
+      })
+    );
+    comps.forEach((c, i) => {
+      const id = results[i]?.id;
+      if (id) (c as any)._savedId = id;
+    });
+  };
+
   const saveComp = async (
     comp: ExtractedComp,
     opts?: { needsReview?: boolean; silent?: boolean }
@@ -2422,12 +2493,70 @@ export default function ImportPage() {
                               )}
                             </div>
                           </div>
-                          <div className="flex items-center gap-1">
-                            <div className={`w-2 h-2 rounded-full ${
-                              comp.confidence.overall >= 80 ? 'bg-olive' :
-                              comp.confidence.overall >= 50 ? 'bg-amber-600' : 'bg-red-500'
-                            }`} />
-                            <span className="text-xs text-ink-3">{comp.confidence.overall}%</span>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <div className="flex items-center gap-1">
+                              <div className={`w-2 h-2 rounded-full ${
+                                comp.confidence.overall >= 80 ? 'bg-olive' :
+                                comp.confidence.overall >= 50 ? 'bg-amber-600' : 'bg-red-500'
+                              }`} />
+                              <span className="text-xs text-ink-3">{comp.confidence.overall}%</span>
+                            </div>
+
+                            {/* Discard (X) — removes the card from this
+                                import view only. The comp stays in the
+                                vault under "Needs Review" because it
+                                was auto-saved on extraction (PR #45).
+                                Cosmetic action — no DB call. */}
+                            <button
+                              onClick={() => {
+                                // Drop from the AI message's comps array
+                                // so the card disappears. Pending state
+                                // mirrors for any downstream consumers.
+                                setMessages((prev) => prev.map((mm) => {
+                                  if (!mm.comps) return mm;
+                                  return { ...mm, comps: mm.comps.filter((cc) => cc !== comp) };
+                                }));
+                                setPendingComps((prev) => prev.filter((cc) => cc !== comp));
+                                toast.success('Hidden from import — still in vault under Needs Review', { duration: 2500 });
+                              }}
+                              title="Hide from this import view. Comp stays in your vault under Needs Review."
+                              className="p-1 rounded text-ink-3 hover:text-ink hover:bg-cream transition-colors"
+                            >
+                              <X size={13} />
+                            </button>
+
+                            {/* Delete — 2-step confirm. Removes the comp
+                                from BOTH the import view AND the vault
+                                permanently. For known duplicates or bad
+                                AI extractions the broker doesn't want
+                                anywhere. Reuses the DeleteConfirmButton
+                                pattern from PR #23. Only fires when the
+                                comp is actually saved (_savedId set) —
+                                in the rare auto-save-failed state, the
+                                discard X is enough. */}
+                            {(comp as any)._savedId && (
+                              <DeleteConfirmButton
+                                variant="icon"
+                                title="Delete from vault entirely (2-step)"
+                                onConfirm={async () => {
+                                  const savedId = (comp as any)._savedId;
+                                  const { error } = await supabase
+                                    .from('comps')
+                                    .delete()
+                                    .eq('id', savedId);
+                                  if (error) {
+                                    toast.error(`Delete failed: ${error.message}`);
+                                    throw error;
+                                  }
+                                  toast.success('Deleted from vault');
+                                  setMessages((prev) => prev.map((mm) => {
+                                    if (!mm.comps) return mm;
+                                    return { ...mm, comps: mm.comps.filter((cc) => cc !== comp) };
+                                  }));
+                                  setPendingComps((prev) => prev.filter((cc) => cc !== comp));
+                                }}
+                              />
+                            )}
                           </div>
                         </div>
 
@@ -2508,127 +2637,81 @@ export default function ImportPage() {
                           </div>
                         </div>
 
-                        {/* Verification action row.
-                            UNSAVED state: two buttons — "Looks right"
-                              (verifies + saves) or "Needs review" (saves
-                              all + opens this one in review workspace).
-                            SAVED state: single "Open in review" link.
-                              Comp is already in the vault from the prior
-                              "Needs review" click — re-saving would
-                              duplicate. The broker either opens it to
-                              keep refining, or moves on to the next card. */}
+                        {/* Verification action row — POST PR #45 every
+                            extracted comp is already in the vault as
+                            needs_location_review=true (auto-save on
+                            extraction). The buttons here REFINE the
+                            saved state rather than performing the save.
+
+                            - "Looks right" → update the existing comp
+                              to clear needs_location_review (verified).
+                            - "Needs review" → navigate to the review
+                              workspace for this comp. No save needed.
+
+                            Discard (X) + Delete (trash) buttons live
+                            in the card HEADER above. */}
                         {(comp as any)._savedId ? (
-                          <div className="mt-3">
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <button
+                              onClick={async () => {
+                                const savedId = (comp as any)._savedId;
+                                if (!savedId) return;
+                                if (sysLat == null || sysLng == null) {
+                                  toast.error('No pin to confirm — use Needs review and fix manually');
+                                  return;
+                                }
+                                const { error } = await supabase
+                                  .from('comps')
+                                  .update({ needs_location_review: false })
+                                  .eq('id', savedId);
+                                if (error) {
+                                  toast.error(`Verify failed: ${error.message}`);
+                                  return;
+                                }
+                                toast.success('Verified');
+                                // Mark locally so the card chip updates;
+                                // we keep the card visible for context.
+                                (comp as any)._verified = true;
+                                setMessages((prev) => [...prev]);
+                              }}
+                              disabled={sysLat == null || sysLng == null}
+                              title={sysLat == null ? 'No pin to confirm — use Needs review and fix manually' : 'Mark this comp as verified — clears the Needs Review flag'}
+                              className="py-2 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border text-olive-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <Check size={12} />
+                              Looks right
+                            </button>
                             <button
                               onClick={() => router.push(`/dashboard/review/${(comp as any)._savedId}?return=import`)}
-                              className="w-full py-2 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border text-olive-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                              title="Open this comp in the review workspace to fix boundary, adjust improvements, or pin location"
+                              className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
                             >
                               <Clock size={12} />
-                              Open in review →
+                              Needs review
                             </button>
                           </div>
                         ) : (
-                        <div className="mt-3 grid grid-cols-2 gap-2">
-                          <button
-                            onClick={() => saveComp(comp, { needsReview: false })}
-                            disabled={sysLat == null || sysLng == null}
-                            title={sysLat == null ? 'No pin to confirm — use Needs review and fix manually' : 'Mark this comp as verified and save to vault'}
-                            className="py-2 bg-olive-tint hover:bg-olive-tint/80 border border-olive-border text-olive-2 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Check size={12} />
-                            Looks right
-                          </button>
-                          <button
-                            onClick={async () => {
-                              // Option B (per docs/DESIGN_DECISIONS.md §4):
-                              // Save THIS comp + all OTHER pending comps as
-                              // needs_location_review=true in parallel, then
-                              // same-tab navigate to the review workspace
-                              // for the current comp. Other comps land in
-                              // the vault with gray clock badges so nothing
-                              // is silently lost on multi-comp imports.
-                              //
-                              // Same-tab nav avoids Safari popup blocker
-                              // entirely. The bulk-save preserves work.
-                              //
-                              // ⚠️ Skip already-saved comps. If the broker
-                              // came back from /dashboard/review and is now
-                              // clicking a DIFFERENT card's Needs review,
-                              // the others were saved on the FIRST click —
-                              // re-saving would create duplicates. Each
-                              // comp gets _savedId stamped after save; if
-                              // present, we skip the insert and just open
-                              // the existing row in review.
-                              const compIsSaved = Boolean((comp as any)._savedId);
-                              const others = pendingComps.filter((c) => c !== comp && !((c as any)._savedId));
-                              let currentId: string | null = (comp as any)._savedId ?? null;
-                              try {
-                                if (compIsSaved) {
-                                  // Comp already in DB — just open it for
-                                  // review. Save the OTHER unsaved comps
-                                  // silently as a safety net.
-                                  if (others.length > 0) {
-                                    const otherResults = await Promise.all(
-                                      others.map((c) => saveComp(c, { needsReview: true, silent: true }))
-                                    );
-                                    others.forEach((c, idx) => {
-                                      const id = otherResults[idx]?.id;
-                                      if (id) (c as any)._savedId = id;
-                                    });
-                                    setMessages((prev) => [...prev]); // force re-render so chips update
-                                  }
-                                } else {
-                                  const [currentResult, ...otherResults] = await Promise.all([
-                                    saveComp(comp, { needsReview: true, silent: false }),
-                                    ...others.map((c) =>
-                                      saveComp(c, { needsReview: true, silent: true })
-                                    ),
-                                  ]);
-                                  currentId = currentResult?.id ?? null;
-                                  // Stamp _savedId on every saved comp so a
-                                  // second visit doesn't re-insert them.
-                                  if (currentId) (comp as any)._savedId = currentId;
-                                  others.forEach((c, idx) => {
-                                    const id = otherResults[idx]?.id;
-                                    if (id) (c as any)._savedId = id;
-                                  });
-                                  setMessages((prev) => [...prev]); // persist the _savedId tags
-                                  if (others.length > 0) {
-                                    toast.success(
-                                      `Also saved ${others.length} other comp${others.length === 1 ? '' : 's'} for review`,
-                                      { duration: 2500 }
-                                    );
-                                  }
+                          // Defensive fallback — should only fire if the
+                          // auto-save itself failed (network error, RLS,
+                          // etc.). Lets the broker recover by clicking
+                          // Save manually. With auto-save working, this
+                          // branch is unreachable in the happy path.
+                          <div className="mt-3">
+                            <button
+                              onClick={async () => {
+                                const result = await saveComp(comp, { needsReview: true, silent: false });
+                                if (result?.id) {
+                                  (comp as any)._savedId = result.id;
+                                  setMessages((prev) => [...prev]);
                                 }
-                              } catch (e) {
-                                console.error('[needs-review] parallel save failed:', e);
-                                toast.error('Some comps may not have saved — check the vault');
-                              }
-                              // Navigate to the dedicated review workspace
-                              // when the save succeeded; fall back to the
-                              // vault when the save failed (so broker can
-                              // still see what landed).
-                              //
-                              // `?return=import` tells the review page to
-                              // navigate back to /dashboard/import after the
-                              // broker hits Mark verified / Save reselect /
-                              // Save draw — instead of stranding them on the
-                              // vault. The import page restores its cards
-                              // from sessionStorage so the remaining
-                              // unreviewed comps are right there.
-                              if (currentId) {
-                                router.push(`/dashboard/review/${currentId}?return=import`);
-                              } else {
-                                router.push('/dashboard/vault');
-                              }
-                            }}
-                            title="Save this and any other pending comps for review, then open the review workspace"
-                            className="py-2 bg-cream-2 hover:bg-cream-2 border border-beige text-ink-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
-                          >
-                            <Clock size={12} />
-                            Needs review
-                          </button>
-                        </div>
+                              }}
+                              className="w-full py-2 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-800 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                              title="Auto-save didn't complete — click to save manually"
+                            >
+                              <Clock size={12} />
+                              Save to vault
+                            </button>
+                          </div>
                         )}
                       </div>
                       );
