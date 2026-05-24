@@ -76,41 +76,90 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'private/internal urls not allowed' }, { status: 400 });
   }
 
-  // ── Step 1: fetch + structured HTML parse ────────────────────────────
-  let html: string;
-  try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
-      signal: AbortSignal.timeout(15000),
-      redirect: 'follow',
-    });
-    if (!res.ok) {
+  // ── Step 1: HTML source resolution ───────────────────────────────────
+  //
+  // Two intake modes:
+  //   1. Server-fetch (default) — broker pasted a URL, we fetch it
+  //      server-side. Works for static-rendered sites (LERA, county
+  //      records, brokerage sites). Fails on JS-rendered SPAs and
+  //      anti-bot sites (returns empty body or 403).
+  //   2. Pre-fetched (bookmarklet) — the browser bookmarklet already
+  //      ran inside the broker's authenticated tab and pulled the
+  //      RENDERED DOM directly. The script POSTs the page_text +
+  //      structured signals here in `body.bookmarklet_payload`. We
+  //      SKIP the server fetch and go straight to AI normalization.
+  //
+  // Mode 2 is the only way to handle Lands of America / Land.com /
+  // LandWatch / Zillow because their content is JS-rendered. The
+  // broker's browser already has the page loaded; we just consume
+  // what they're already seeing.
+  let html: string = '';
+  let structured: Record<string, any> = {};
+  const bookmarkletPayload = body?.bookmarklet_payload;
+
+  if (bookmarkletPayload && typeof bookmarkletPayload === 'object') {
+    // Pre-fetched path: rely on what the bookmarklet captured.
+    // page_text is the cleaned innerText; _next_data / _json_ld /
+    // _opengraph hold structured signals; probe_* are quick-look
+    // values from common CSS selectors. Pass all of it to the AI
+    // as the "structured" hint, plus page_text as the body.
+    structured = {
+      source_domain: parsedUrl.hostname,
+      page_title: bookmarkletPayload.page_title,
+      meta_description: bookmarkletPayload.meta_description,
+      og: bookmarkletPayload._opengraph,
+      json_ld: bookmarkletPayload._json_ld,
+      next_data: bookmarkletPayload._next_data,
+      probe_price: bookmarkletPayload.probe_price,
+      probe_address: bookmarkletPayload.probe_address,
+      probe_acres: bookmarkletPayload.probe_acres,
+      bookmarklet_source: bookmarkletPayload._source || 'unknown',
+    };
+    // For mode 2 we don't have raw HTML — feed page_text directly
+    // to the AI step (cleanedText below would just re-derive this).
+    html = '';
+  } else {
+    // Server-fetch path
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(15000),
+        redirect: 'follow',
+      });
+      if (!res.ok) {
+        return NextResponse.json(
+          {
+            error: `listing site returned ${res.status}`,
+            hint: res.status === 403 || res.status === 429
+              ? 'this site is blocking automated fetches — install the Landstack bookmarklet (Settings → Bookmarklet) to import while logged in.'
+              : 'try a different URL, install the bookmarklet, or paste the listing text manually',
+          },
+          { status: 502 }
+        );
+      }
+      html = await res.text();
+    } catch (e: any) {
       return NextResponse.json(
-        {
-          error: `listing site returned ${res.status}`,
-          hint: res.status === 403 || res.status === 429
-            ? 'this site is blocking automated fetches — paste the listing text manually instead'
-            : 'try a different URL or paste the listing text manually',
-        },
+        { error: 'fetch failed', detail: e?.message || 'unknown' },
         { status: 502 }
       );
     }
-    html = await res.text();
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: 'fetch failed', detail: e?.message || 'unknown' },
-      { status: 502 }
-    );
+    structured = extractStructuredData(html, parsedUrl);
   }
-
-  const structured = extractStructuredData(html, parsedUrl);
 
   // ── Step 2: AI cleanup + normalization ───────────────────────────────
   // Send the structured signals + a clean text dump to the AI and ask
   // for a normalized ExtractedComp. AI fills in fields the structured
   // parse missed and standardizes formatting (acres as number, price
   // as integer, county string normalized, etc.).
-  const cleanedText = cleanPageText(html);
+  //
+  // page_text comes from the bookmarklet (browser-side innerText after
+  // JS render) when in mode 2; from cleanPageText(html) when in mode 1.
+  // The bookmarklet payload is the better signal for JS-heavy sites
+  // because it captures what the broker actually saw in their browser.
+  const cleanedText: string = bookmarkletPayload && typeof bookmarkletPayload.page_text === 'string'
+    ? String(bookmarkletPayload.page_text)
+    : cleanPageText(html);
 
   let comp: any = null;
   try {
