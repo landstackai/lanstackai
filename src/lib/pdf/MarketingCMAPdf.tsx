@@ -8,8 +8,10 @@
 // Page order:
 //   1. Cover                  — hero aerial + property title + broker block
 //   2. Subject Overview       — broker's polished prose + fast facts
-//   3. Comparable Sales Table — every comp the broker selected
-//   4. Comparable Sales Map   — annotated Mapbox static image
+//   3. Comparable Sales Map   — annotated Mapbox static image
+//                                (lands first so the reader sees WHERE
+//                                 the comps are before reading the table)
+//   4. Comparable Sales Table — every comp the broker selected
 //   5. Opinion of Value       — the headline reveal (mode-aware)
 //   6. Methodology            — how the analysis was built + disclaimers
 //
@@ -44,8 +46,8 @@ export function MarketingCMAPdf({ data }: { data: CmaPdfData }) {
     >
       <CoverPage data={data} />
       <SubjectOverviewPage data={data} />
-      <CompTablePage data={data} />
       <CompMapPage data={data} />
+      <CompTablePage data={data} />
       <OpinionPage data={data} />
       <MethodologyPage data={data} />
     </Document>

@@ -1,8 +1,8 @@
-// Marketing CMA PDF — Page 4 (Comparable Sales Map).
+// Marketing CMA PDF — Page 3 (Comparable Sales Map).
 //
 // Single-page annotated map showing:
 //   - Subject property pin (warm brick red, matches the workspace)
-//   - One numbered pin per comp (matches the row numbers on Page 3,
+//   - One numbered pin per comp (matches the row numbers on Page 4,
 //     so the client can cross-reference)
 //   - Compact legend on the side
 //
@@ -31,7 +31,7 @@ export function CompMapPage({ data }: { data: CmaPdfData }) {
       <View style={styles.goldRule} />
       <Text style={[styles.h1, { marginBottom: 4 }]}>Sales Location Map</Text>
       <Text style={[styles.bodyMuted, { marginBottom: 16 }]}>
-        Subject property shown in red; comparable sales numbered to match the table on the previous page.
+        Subject property shown in red; comparable sales numbered to match the table on the following page.
       </Text>
 
       {/* Map image fills most of the page. */}
@@ -73,7 +73,7 @@ export function CompMapPage({ data }: { data: CmaPdfData }) {
         <LegendItem color={COLORS.gold} label={`${data.comps.length} comparable ${data.comps.length === 1 ? 'sale' : 'sales'}`} />
       </View>
 
-      <PageFooter data={data} pageNum={4} />
+      <PageFooter data={data} pageNum={3} />
     </Page>
   );
 }

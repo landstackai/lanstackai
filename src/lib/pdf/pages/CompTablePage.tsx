@@ -1,4 +1,4 @@
-// Marketing CMA PDF — Page 3 (Comparable Sales).
+// Marketing CMA PDF — Page 4 (Comparable Sales).
 //
 // A clean, scannable table of every comp the broker included in the
 // CMA. Models the Borgelt sales table but tuned for land-only sold
@@ -110,7 +110,7 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
         </View>
       </View>
 
-      <PageFooter data={data} pageNum={3} />
+      <PageFooter data={data} pageNum={4} />
     </Page>
   );
 }

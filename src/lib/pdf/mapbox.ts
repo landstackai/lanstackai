@@ -76,7 +76,7 @@ export function buildCoverAerial(subject: Subject): string | null {
 
 /**
  * Annotated comp map — subject + numbered comps, auto-framed to fit
- * every pin. Used on Page 4.
+ * every pin. Used on Page 3.
  *
  * Pin colors (hex without #, as Mapbox Static API expects):
  *   Subject: C8503F (warm brick — matches the workspace pin)

@@ -120,7 +120,7 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
       ) : null}
 
       {/* Compact analysis tables — Total + Adjusted, matching the
-          two $/Ac columns on the Comparable Sales table (Page 3).
+          two $/Ac columns on the Comparable Sales table (Page 4).
           Same math (computeCmaAverages from cmaMath.ts) used by the
           workspace + share report. Positioned BELOW the hero so the
           number lands first; the analysis supports the headline. */}
