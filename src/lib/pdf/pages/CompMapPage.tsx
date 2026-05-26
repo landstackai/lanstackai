@@ -70,7 +70,7 @@ export function CompMapPage({ data }: { data: CmaPdfData }) {
       {/* Legend — subject + comp pin descriptions */}
       <View style={[styles.row, { gap: 24, flexWrap: 'wrap' }]}>
         <LegendItem color={COLORS.brick} label={`Subject — ${data.subject.name || 'Property'}`} />
-        <LegendItem color={COLORS.olive} label={`${data.comps.length} comparable ${data.comps.length === 1 ? 'sale' : 'sales'}`} />
+        <LegendItem color={COLORS.gold} label={`${data.comps.length} comparable ${data.comps.length === 1 ? 'sale' : 'sales'}`} />
       </View>
 
       <PageFooter data={data} pageNum={4} />

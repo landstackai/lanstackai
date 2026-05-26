@@ -109,6 +109,16 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
         </Text>
       </View>
 
+      {/* Dynamic range indicator — where the broker's number lands
+          relative to the comp range. Gives the seller honest context
+          without scolding: "above the typical range" / "within the
+          range" / "below the range". Brokers get cover to flag
+          aggressive pricing in writing without having to say
+          "your seller is unrealistic" out loud. */}
+      {presentation !== 'discuss' ? (
+        <RangeIndicator brokerTotal={brokerTotal} stats={stats} />
+      ) : null}
+
       {/* Compact analysis tables — Total + Adjusted, matching the
           two $/Ac columns on the Comparable Sales table (Page 3).
           Same math (computeCmaAverages from cmaMath.ts) used by the
@@ -135,7 +145,10 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
         ) : null}
       </View>
 
-      {/* Breakdown box — only shown in breakdown mode */}
+      {/* Breakdown box — only shown in breakdown mode. New stacked
+          layout shows the path (Land Value → Improvements →
+          Broker Opinion of Value) with itemized improvement math
+          when the broker entered it that way. */}
       {opinion.mode === 'breakdown' && presentation !== 'discuss' ? (
         <ValueBreakdown data={data} />
       ) : null}
@@ -151,6 +164,12 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
           </Text>
         </View>
       ) : null}
+
+      {/* Pricing philosophy callout — the Landstack thesis in 35
+          words. Sets up the longer methodology paragraph on Page 6
+          and frames the data + broker judgment as a single resource
+          serving the seller's outcome. */}
+      <PricingPhilosophyCallout />
 
       <PageFooter data={data} pageNum={5} />
     </Page>
@@ -358,66 +377,349 @@ function ConfirmedHero({
   );
 }
 
+/**
+ * Stacked vertical breakdown — the valuation walkthrough.
+ *
+ *   ┌──────────────────────────────────────────────────────────┐
+ *   │ LAND VALUE                              $4,119,440        │
+ *   │ Implied $13,003/ac across 317± ac                         │
+ *   ├──────────────────────────────────────────────────────────┤
+ *   │ IMPROVEMENTS                            $2,397,875        │
+ *   │   House  4,500 sqft × $400/sqft         $1,800,000        │
+ *   │   Additional vertical structures           $597,875        │
+ *   ├══════════════════════════════════════════════════════════┤
+ *   │ BROKER OPINION OF VALUE                 $6,517,315        │  ← gold
+ *   └──────────────────────────────────────────────────────────┘
+ *
+ * Itemized improvements expand inline when the broker entered
+ * house_sqft × house_ppsf or additional_vertical; otherwise the
+ * Improvements line collapses to just the lump amount. Land Value
+ * always shows the implied $/Ac when subject_acres is set —
+ * lets the seller tie the land number back to the comp data.
+ */
 function ValueBreakdown({ data }: { data: CmaPdfData }) {
   const opinion = data.opinion;
+  const subjectAcres = data.subject.acres ?? 0;
 
-  // Compute total improvement value (house + additional vertical)
+  // Improvements math
+  const houseSqft = opinion.house_sqft;
+  const housePpsf = opinion.house_ppsf;
   const houseValue =
-    opinion.house_sqft != null && opinion.house_ppsf != null
-      ? opinion.house_sqft * opinion.house_ppsf
+    houseSqft != null && housePpsf != null && houseSqft > 0 && housePpsf > 0
+      ? houseSqft * housePpsf
       : null;
+  const additionalVertical = opinion.additional_vertical ?? null;
+  const isItemized =
+    houseValue != null || (additionalVertical != null && additionalVertical > 0);
   const totalImprovements =
-    (houseValue ?? 0) + (opinion.additional_vertical ?? 0) || opinion.improvement_value || null;
+    isItemized
+      ? (houseValue ?? 0) + (additionalVertical ?? 0)
+      : opinion.improvement_value;
+
+  // Land math
+  const landValue = opinion.land_value;
+  const impliedLandPpa =
+    landValue != null && subjectAcres > 0 ? landValue / subjectAcres : null;
+
+  // Total (Broker Opinion of Value)
+  const total =
+    opinion.total ??
+    (((landValue ?? 0) + (totalImprovements ?? 0)) || null);
 
   return (
     <View
       style={{
         marginTop: 6,
-        marginBottom: 12,
-        flexDirection: 'row',
-        gap: 12,
+        marginBottom: 16,
+        backgroundColor: '#fff',
+        borderWidth: 1,
+        borderColor: COLORS.beige2,
+        borderRadius: 4,
+        overflow: 'hidden',
       }}
     >
-      <BreakdownCard label="Land Value" amount={opinion.land_value} />
-      <BreakdownCard label="Improvements" amount={totalImprovements} />
-      <BreakdownCard
-        label="Total"
-        amount={opinion.total ?? (((opinion.land_value ?? 0) + (totalImprovements ?? 0)) || null)}
+      {/* LAND VALUE row */}
+      <BreakdownRow
+        label="Land Value"
+        amount={landValue}
+        supportLine={
+          impliedLandPpa != null
+            ? `Implied ${fmtPpa(impliedLandPpa)} across ${fmtAcres(subjectAcres)}`
+            : undefined
+        }
+      />
+
+      {/* IMPROVEMENTS row — itemized or lump */}
+      {totalImprovements != null && totalImprovements > 0 ? (
+        <BreakdownRow
+          label="Improvements"
+          amount={totalImprovements}
+          itemized={isItemized}
+          subItems={
+            isItemized
+              ? [
+                  ...(houseValue != null && houseSqft != null && housePpsf != null
+                    ? [
+                        {
+                          label: 'House',
+                          detail: `${formatNumber(houseSqft)} sqft × ${fmtMoney(housePpsf)}/sqft`,
+                          amount: houseValue,
+                        },
+                      ]
+                    : []),
+                  ...(additionalVertical != null && additionalVertical > 0
+                    ? [
+                        {
+                          label: 'Additional vertical structures',
+                          detail: '',
+                          amount: additionalVertical,
+                        },
+                      ]
+                    : []),
+                ]
+              : undefined
+          }
+        />
+      ) : null}
+
+      {/* BROKER OPINION OF VALUE row — gold accent */}
+      <BreakdownRow
+        label="Broker Opinion of Value"
+        amount={total}
         highlight
       />
     </View>
   );
 }
 
-function BreakdownCard({
+/**
+ * A single row inside the stacked breakdown. Two layout modes:
+ *
+ *   • Simple — one label, one $ amount, optional support text below.
+ *   • Itemized — same header, then nested sub-items showing the
+ *     math (e.g., "House  4,500 sqft × $400/sqft   $1,800,000").
+ *
+ * `highlight` toggles the gold-accent treatment used on the final
+ * Broker Opinion of Value row.
+ */
+function BreakdownRow({
   label,
   amount,
+  supportLine,
+  subItems,
+  itemized,
   highlight = false,
 }: {
   label: string;
   amount: number | null;
+  supportLine?: string;
+  subItems?: { label: string; detail: string; amount: number }[];
+  itemized?: boolean;
   highlight?: boolean;
 }) {
   return (
     <View
       style={{
-        flex: 1,
-        backgroundColor: highlight ? COLORS.goldTint : COLORS.cream2,
-        borderWidth: 1,
-        borderColor: highlight ? COLORS.gold : COLORS.beige2,
-        paddingVertical: 10,
-        paddingHorizontal: 12,
+        paddingVertical: 12,
+        paddingHorizontal: 16,
+        backgroundColor: highlight ? COLORS.goldTint : '#fff',
+        borderTopWidth: highlight ? 2 : 0.5,
+        borderTopColor: highlight ? COLORS.gold : COLORS.beige,
       }}
     >
-      <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 4 }}>{label}</Text>
-      <Text
+      <View
         style={{
-          fontSize: TYPE.h3,
-          color: highlight ? COLORS.goldDark : COLORS.ink,
-          fontFamily: 'Helvetica-Bold',
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
         }}
       >
-        {amount != null ? fmtMoney(amount) : '—'}
+        <Text
+          style={{
+            fontSize: highlight ? TYPE.tiny : TYPE.micro,
+            color: highlight ? COLORS.goldDark : COLORS.ink3,
+            letterSpacing: 1.2,
+            textTransform: 'uppercase',
+            fontFamily: 'Helvetica-Bold',
+          }}
+        >
+          {label}
+        </Text>
+        <Text
+          style={{
+            fontSize: highlight ? TYPE.h2 : TYPE.h3,
+            color: highlight ? COLORS.goldDark : COLORS.ink,
+            fontFamily: 'Helvetica-Bold',
+          }}
+        >
+          {amount != null ? fmtMoney(amount) : '—'}
+        </Text>
+      </View>
+
+      {/* Support line — e.g., "Implied $13,003/ac across 317± ac" */}
+      {supportLine ? (
+        <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 4 }}>
+          {supportLine}
+        </Text>
+      ) : null}
+
+      {/* Itemized sub-items — improvements walkthrough */}
+      {itemized && subItems && subItems.length > 0 ? (
+        <View style={{ marginTop: 8, paddingLeft: 14 }}>
+          {subItems.map((item, i) => (
+            <View
+              key={i}
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'baseline',
+                paddingVertical: 3,
+              }}
+            >
+              <View style={{ flexDirection: 'row', flex: 1, alignItems: 'baseline' }}>
+                <Text style={{ fontSize: TYPE.small, color: COLORS.ink2, marginRight: 8 }}>
+                  {item.label}
+                </Text>
+                {item.detail ? (
+                  <Text style={{ fontSize: TYPE.small, color: COLORS.ink3 }}>
+                    {item.detail}
+                  </Text>
+                ) : null}
+              </View>
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink, fontFamily: 'Helvetica-Bold' }}>
+                {fmtMoney(item.amount)}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** Format integer numbers with thousands separators — for sqft, etc. */
+function formatNumber(n: number): string {
+  return new Intl.NumberFormat('en-US').format(Math.round(n));
+}
+
+/**
+ * Dynamic range indicator — calm one-liner that places the broker's
+ * Opinion of Value relative to the adjusted comp range. Gives the
+ * broker honest framing for aggressive (or conservative) pricing
+ * without scolding the seller.
+ *
+ * Five states based on (brokerTotal - rangeHigh) / rangeHigh:
+ *   < 0 and within range  → calm gold tint  "Aligned with the comparable range"
+ *   ≤ 10% above           → calm gold tint  "Modestly above the typical sale range"
+ *   ≤ 20% above           → amber tint      "Above the typical sale range"
+ *   > 20% above           → amber tint      "Significantly above the comparable range"
+ *   below range           → slate-blue tint "Below the comparable range"
+ */
+function RangeIndicator({
+  brokerTotal,
+  stats,
+}: {
+  brokerTotal: number | null;
+  stats: CmaPdfData['stats'];
+}) {
+  if (brokerTotal == null || brokerTotal <= 0) return null;
+
+  // Use adjusted band when available (broker-considered view); fall
+  // back to total. If neither has data, skip the indicator.
+  const useAdj = (stats.adjusted.n ?? 0) > 0;
+  const lowBand = useAdj ? stats.totals_adjusted.low : stats.totals_total.low;
+  const highBand = useAdj ? stats.totals_adjusted.high : stats.totals_total.high;
+  if (lowBand == null || highBand == null) return null;
+
+  let message = '';
+  // Widen to string so we can reassign across the indicator's
+  // five states — the COLORS constants are typed as literal hexes.
+  let bgColor: string = COLORS.goldTint;
+  let borderColor: string = COLORS.gold;
+  let textColor: string = COLORS.goldDark;
+
+  if (brokerTotal < lowBand) {
+    const pct = Math.round(((lowBand - brokerTotal) / lowBand) * 100);
+    message = `${pct}% below the comparable sale range — competitively positioned for a strong outcome.`;
+    bgColor = '#EEF2F8';
+    borderColor = COLORS.slateBlue;
+    textColor = '#2C4A75';
+  } else if (brokerTotal <= highBand) {
+    message = 'Positioned within the comparable sale range — well-supported by the data.';
+    bgColor = COLORS.oliveTint;
+    borderColor = COLORS.olive;
+    textColor = '#475428';
+  } else {
+    const overshoot = (brokerTotal - highBand) / highBand;
+    const pct = Math.round(overshoot * 100);
+    if (overshoot <= 0.10) {
+      message = `${pct}% above the comparable sale range — the broker's premium read.`;
+    } else if (overshoot <= 0.20) {
+      message = `${pct}% above the typical sale range — premium positioning. A longer marketing period is typical at this level.`;
+      bgColor = '#FCF1E0';
+      borderColor = '#E8B872';
+      textColor = '#8A5A1A';
+    } else {
+      message = `${pct}% above the comparable sale range — aggressive positioning. Expect an extended marketing period.`;
+      bgColor = '#FCF1E0';
+      borderColor = '#E8B872';
+      textColor = '#8A5A1A';
+    }
+  }
+
+  return (
+    <View
+      style={{
+        backgroundColor: bgColor,
+        borderLeftWidth: 3,
+        borderLeftColor: borderColor,
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        marginBottom: 16,
+      }}
+    >
+      <Text style={{ fontSize: TYPE.small, color: textColor, lineHeight: 1.4 }}>
+        {message}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Landstack's pricing-philosophy callout. The data-grounded /
+ * broker-informed thesis in 35 words. Sits at the bottom of Page 5
+ * as a calm gold-tint box. Methodology page elaborates further.
+ */
+function PricingPhilosophyCallout() {
+  return (
+    <View
+      style={{
+        marginTop: 16,
+        backgroundColor: COLORS.goldTint,
+        borderLeftWidth: 2,
+        borderLeftColor: COLORS.gold,
+        paddingVertical: 12,
+        paddingHorizontal: 14,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: TYPE.micro,
+          color: COLORS.goldDark,
+          letterSpacing: 1.4,
+          textTransform: 'uppercase',
+          fontFamily: 'Helvetica-Bold',
+          marginBottom: 6,
+        }}
+      >
+        Our Pricing Approach
+      </Text>
+      <Text style={{ fontSize: TYPE.small, color: COLORS.ink, lineHeight: 1.55 }}>
+        Every property has unique qualities; every market has gravity. The comparable sales
+        define what buyers have actually paid — the data-defensible range. The broker's
+        opinion of value reflects where this property best fits within that pull, considering
+        condition, timing, and character not captured in the data alone. The goal is the
+        right price — not just a price.
       </Text>
     </View>
   );

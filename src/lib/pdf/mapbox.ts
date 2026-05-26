@@ -80,7 +80,13 @@ export function buildCoverAerial(subject: Subject): string | null {
  *
  * Pin colors (hex without #, as Mapbox Static API expects):
  *   Subject: C8503F (warm brick — matches the workspace pin)
- *   Comps:   6B7B3F (olive — matches Sold status)
+ *   Comps:   B68A35 (gold — brand accent, pops on satellite imagery)
+ *
+ * Why gold for comps: olive (#6B7B3F) was camouflaged against
+ * satellite vegetation. Gold provides high contrast against both
+ * green vegetation and brown bare ground, and ties into the
+ * report's gold accent system so the map feels visually cohesive
+ * with the rest of the document.
  *
  * Pin label: comps get their row number (1..9). Mapbox marker labels
  * only support a-z 0-9, so we use the row index. For comp counts
@@ -102,7 +108,7 @@ export function buildCompMapUrl(subject: Subject, comps: CompCoord[]): string | 
       // For comp 10+, use a plain pin (still visible, just unlabeled).
       const rowNum = i + 1;
       const label = rowNum <= 9 ? `-${rowNum}` : '';
-      overlays.push(`pin-l${label}+6B7B3F(${comp.longitude},${comp.latitude})`);
+      overlays.push(`pin-l${label}+B68A35(${comp.longitude},${comp.latitude})`);
       compCount++;
     }
   });
