@@ -54,6 +54,12 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
         {comps.map((comp, i) => (
           <CompTableRow key={comp.id} comp={comp} index={i + 1} striped={i % 2 === 1} />
         ))}
+        {/* Inline AVERAGES row — caps the table off with a final
+            summary line that aligns column-for-column with the rows
+            above. Conventional CMA-table layout. The standalone
+            footer summary below kept for the Range + Low/High that
+            don't fit cleanly into a single row. */}
+        <CompTableAveragesRow comps={comps} stats={data.stats} />
       </View>
 
       {/* Summary footer — comp count + the Total + Land-Only mid
@@ -253,6 +259,120 @@ function CompTableRow({
         }}
       >
         {adjustedPpa != null ? fmtPpa(adjustedPpa) : '—'}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Final row of the comp table — column-aligned averages line.
+ *
+ *   Acres column   → average acreage across comps
+ *   Sold Price col → average sale_price across comps
+ *   Sale Date col  → blank (no meaningful average)
+ *   $/Ac Total     → stats.total.mid (from computeCmaAverages)
+ *   $/Ac Adjusted  → stats.adjusted.mid (from computeCmaAverages)
+ *
+ * Styled with the goldTint background + a slightly heavier
+ * top border so it visually caps off the comp rows.
+ */
+function CompTableAveragesRow({
+  comps,
+  stats,
+}: {
+  comps: CmaPdfComp[];
+  stats: CmaPdfData['stats'];
+}) {
+  const acreVals = comps.map((c) => c.acres).filter((v): v is number => v != null && v > 0);
+  const priceVals = comps.map((c) => c.sale_price).filter((v): v is number => v != null && v > 0);
+  const avgAcres = acreVals.length ? acreVals.reduce((s, v) => s + v, 0) / acreVals.length : null;
+  const avgPrice = priceVals.length ? priceVals.reduce((s, v) => s + v, 0) / priceVals.length : null;
+
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        paddingVertical: 9,
+        paddingHorizontal: 6,
+        backgroundColor: COLORS.goldTint,
+        borderTopWidth: 2,
+        borderTopColor: COLORS.gold,
+        borderBottomWidth: 0.5,
+        borderBottomColor: COLORS.beige2,
+      }}
+    >
+      <Text
+        style={{
+          flex: COLS.num,
+          fontSize: TYPE.small,
+          color: COLORS.goldDark,
+          fontFamily: 'Helvetica-Bold',
+        }}
+      >
+        ⌀
+      </Text>
+      <Text
+        style={{
+          flex: COLS.address,
+          fontSize: TYPE.small,
+          color: COLORS.goldDark,
+          fontFamily: 'Helvetica-Bold',
+          paddingRight: 6,
+          textTransform: 'uppercase',
+          letterSpacing: 0.4,
+        }}
+      >
+        Average
+      </Text>
+      <Text style={{ flex: COLS.county, fontSize: TYPE.small, color: COLORS.ink3 }}>
+        —
+      </Text>
+      <Text
+        style={{
+          flex: COLS.acres,
+          fontSize: TYPE.small,
+          color: COLORS.ink,
+          textAlign: 'right',
+          fontFamily: 'Helvetica-Bold',
+        }}
+      >
+        {avgAcres != null ? fmtAcres(avgAcres) : '—'}
+      </Text>
+      <Text
+        style={{
+          flex: COLS.sold,
+          fontSize: TYPE.small,
+          color: COLORS.ink,
+          textAlign: 'right',
+          fontFamily: 'Helvetica-Bold',
+        }}
+      >
+        {avgPrice != null ? fmtMoney(avgPrice) : '—'}
+      </Text>
+      <Text style={{ flex: COLS.date, fontSize: TYPE.small, color: COLORS.ink3, textAlign: 'right' }}>
+        —
+      </Text>
+      <Text
+        style={{
+          flex: COLS.ppaTotal,
+          fontSize: TYPE.small,
+          color: COLORS.ink,
+          textAlign: 'right',
+          fontFamily: 'Helvetica-Bold',
+        }}
+      >
+        {stats.total.mid != null ? fmtPpa(stats.total.mid) : '—'}
+      </Text>
+      <Text
+        style={{
+          flex: COLS.ppaAdj,
+          fontSize: TYPE.small,
+          color: COLORS.goldDark,
+          textAlign: 'right',
+          fontFamily: 'Helvetica-Bold',
+        }}
+      >
+        {stats.adjusted.mid != null ? fmtPpa(stats.adjusted.mid) : '—'}
       </Text>
     </View>
   );
