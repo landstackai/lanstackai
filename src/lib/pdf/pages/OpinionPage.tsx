@@ -24,22 +24,93 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
   const stats = data.stats;
   const compCount = stats.count;
 
+  // Compute the canonical broker total (BOV) — mirrors the share
+  // report's `suggestedValue` resolution: explicit lump_sum > sum of
+  // breakdown components > comp-derived stats.value_mid.
+  const houseValue =
+    opinion.house_sqft != null && opinion.house_ppsf != null
+      ? opinion.house_sqft * opinion.house_ppsf
+      : null;
+  const breakdownImprovements =
+    (houseValue ?? 0) + (opinion.additional_vertical ?? 0) || opinion.improvement_value || 0;
+  const breakdownTotal =
+    opinion.mode === 'breakdown'
+      ? (opinion.land_value ?? 0) + breakdownImprovements
+      : 0;
+  const brokerTotal =
+    opinion.total ??
+    (breakdownTotal > 0 ? breakdownTotal : null) ??
+    data.stats.value_mid ??
+    null;
+
+  // Suggested List Price — explicit broker override, else BOV × 1.10
+  // (the default the share report uses). Only meaningful in
+  // 'confirmed' or 'range' modes — 'discuss' mode shows no number.
+  const suggestedListPrice =
+    presentation === 'discuss'
+      ? null
+      : opinion.suggested_list_price ??
+        (brokerTotal != null ? Math.round(brokerTotal * 1.10) : null);
+
   return (
     <Page size="LETTER" style={styles.page}>
-      <Text style={styles.sectionLabel}>Market Analysis & Opinion of Value</Text>
+      <Text style={styles.sectionLabel}>Suggested List Price & Opinion of Value</Text>
       <View style={styles.goldRule} />
-      <Text style={[styles.h1, { marginBottom: 4 }]}>Opinion of Value</Text>
+      <Text style={[styles.h1, { marginBottom: 4 }]}>Pricing Recommendation</Text>
       <Text style={[styles.bodyMuted, { marginBottom: 16 }]}>
         Derived from comparable sales analysis and the broker's professional judgment.
       </Text>
 
+      {/* THE HERO — Suggested List Price is the headline, with the
+          broker's Opinion of Value (BOV) carried as the supporting
+          "Expected Sale" line. Mirrors the hierarchy on the client
+          share report: the seller anchors on the aspirational list
+          price first, the BOV lands as "with negotiation room baked
+          in" rather than "this is what it's worth, sorry."
+
+          In 'discuss' mode the SLP isn't shown — the hero falls
+          back to the share report's soft-invitation copy. */}
+      <View
+        style={{
+          backgroundColor: COLORS.ink,
+          paddingHorizontal: 28,
+          paddingVertical: 32,
+          borderRadius: 4,
+          marginBottom: 16,
+        }}
+      >
+        {presentation === 'discuss' ? (
+          <DiscussHero />
+        ) : (
+          <ConfirmedHero
+            suggestedListPrice={suggestedListPrice}
+            brokerTotal={brokerTotal}
+            presentation={presentation}
+            data={data}
+          />
+        )}
+
+        {/* Subject context line under the hero */}
+        <Text
+          style={{
+            fontSize: TYPE.small,
+            color: COLORS.beige2,
+            marginTop: 14,
+          }}
+        >
+          {data.subject.name || 'Subject Property'}
+          {data.subject.acres != null ? ` · ${fmtAcres(data.subject.acres)}` : ''}
+          {data.subject.county && data.subject.state
+            ? ` · ${data.subject.county}, ${data.subject.state}`
+            : ''}
+        </Text>
+      </View>
+
       {/* Compact analysis tables — Total + Adjusted, matching the
           two $/Ac columns on the Comparable Sales table (Page 3).
-          Adjusted incorporates the broker's per-comp improvement
-          adjustments, so it's the broker's most defensible read on
-          the comp set. Total is shown alongside so the client can
-          see the raw market signal too. Same math (computeCmaAverages
-          from cmaMath.ts) used by the workspace + share report. */}
+          Same math (computeCmaAverages from cmaMath.ts) used by the
+          workspace + share report. Positioned BELOW the hero so the
+          number lands first; the analysis supports the headline. */}
       <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
         {(stats.total.n ?? 0) > 0 ? (
           <PpaBand
@@ -60,81 +131,6 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
           />
         ) : null}
       </View>
-
-      {/* The hero reveal — varies by presentation mode. */}
-      <View
-        style={{
-          backgroundColor: COLORS.ink,
-          paddingHorizontal: 28,
-          paddingVertical: 36,
-          borderRadius: 4,
-          marginBottom: 18,
-        }}
-      >
-        <Text
-          style={{
-            fontSize: TYPE.micro,
-            color: COLORS.gold,
-            letterSpacing: 2,
-            textTransform: 'uppercase',
-            fontFamily: 'Helvetica-Bold',
-            marginBottom: 12,
-          }}
-        >
-          Opinion of Value
-        </Text>
-
-        <OpinionHero data={data} />
-
-        {/* Subject context line under the hero */}
-        <Text
-          style={{
-            fontSize: TYPE.small,
-            color: COLORS.beige2,
-            marginTop: 14,
-          }}
-        >
-          {data.subject.name || 'Subject Property'}
-          {data.subject.acres != null ? ` · ${fmtAcres(data.subject.acres)}` : ''}
-          {data.subject.county && data.subject.state
-            ? ` · ${data.subject.county}, ${data.subject.state}`
-            : ''}
-        </Text>
-      </View>
-
-      {/* Suggested list price (if broker entered one), otherwise the
-          calculated default (= total × 1.10). */}
-      {opinion.suggested_list_price != null && presentation !== 'discuss' ? (
-        <View
-          style={{
-            backgroundColor: COLORS.goldTint,
-            borderLeftWidth: 2,
-            borderLeftColor: COLORS.gold,
-            paddingVertical: 12,
-            paddingHorizontal: 14,
-            marginBottom: 18,
-          }}
-        >
-          <Text
-            style={{
-              fontSize: TYPE.micro,
-              color: COLORS.goldDark,
-              letterSpacing: 1.4,
-              textTransform: 'uppercase',
-              fontFamily: 'Helvetica-Bold',
-              marginBottom: 4,
-            }}
-          >
-            Suggested List Price
-          </Text>
-          <Text style={{ fontSize: TYPE.h2, color: COLORS.ink }}>
-            {fmtMoney(opinion.suggested_list_price)}
-          </Text>
-          <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 4 }}>
-            Leaves negotiating room above the opinion of value while staying defensible vs. comps.
-          </Text>
-        </View>
-      ) : null}
 
       {/* Breakdown box — only shown in breakdown mode */}
       {opinion.mode === 'breakdown' && presentation !== 'discuss' ? (
@@ -158,96 +154,82 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
   );
 }
 
-function OpinionHero({ data }: { data: CmaPdfData }) {
-  const opinion = data.opinion;
-  const presentation = opinion.presentation || 'confirmed';
-
-  // ── DISCUSS mode ──────────────────────────────────────────────────
-  // Broker doesn't want to commit a number in writing — they want the
-  // conversation to happen at the kitchen table. Show a placeholder
-  // line and lean on valuation_notes (rendered below the hero).
-  if (presentation === 'discuss') {
-    return (
-      <View>
-        <Text
-          style={{
-            fontFamily: DISPLAY_FONT,
-            fontSize: 28,
-            color: COLORS.cream,
-            lineHeight: 1.1,
-          }}
-        >
-          Let's Discuss
-        </Text>
-        <Text style={{ fontSize: TYPE.body, color: COLORS.cream2, marginTop: 8, lineHeight: 1.5 }}>
-          A formal opinion of value is best delivered in person, where we can walk through
-          the comp set together and frame the numbers against your timing and goals.
-        </Text>
-      </View>
-    );
-  }
-
-  // Compute the canonical "broker total" — the dollar amount the
-  // broker stands behind. Resolution order:
-  //   1. broker_opinion_value (explicit lump-sum total) — if set
-  //   2. Breakdown sum (land_value + improvement_value family) — when
-  //      mode === 'breakdown' and the broker entered land+improvement
-  //      separately, this is the AUTHORITATIVE total. We were
-  //      previously falling through to stats.value_mid and showing the
-  //      comp median, which contradicted the breakdown cards below.
-  //   3. Comp-derived stats.value_mid as last-resort fallback
-  const houseValue =
-    opinion.house_sqft != null && opinion.house_ppsf != null
-      ? opinion.house_sqft * opinion.house_ppsf
-      : null;
-  const breakdownImprovements =
-    (houseValue ?? 0) + (opinion.additional_vertical ?? 0) || opinion.improvement_value || 0;
-  const breakdownTotal =
-    opinion.mode === 'breakdown'
-      ? (opinion.land_value ?? 0) + breakdownImprovements
-      : 0;
-
-  const brokerTotal =
-    opinion.total ??
-    (breakdownTotal > 0 ? breakdownTotal : null) ??
-    data.stats.value_mid ??
-    null;
-
-  // ── RANGE mode ────────────────────────────────────────────────────
-  // Broker wants to show a band. Prefer explicit range_low/range_high
-  // if the broker entered them; fall back to ±5% around the broker
-  // total for confirmed-with-comp-range scenarios.
-  if (presentation === 'range') {
-    const total = brokerTotal;
-    const low = opinion.range_low ?? (total != null ? total * 0.95 : data.stats.value_low);
-    const high = opinion.range_high ?? (total != null ? total * 1.05 : data.stats.value_high);
-
-    return (
-      <View>
-        <Text
-          style={{
-            fontFamily: DISPLAY_FONT,
-            fontSize: 30,
-            color: COLORS.cream,
-            lineHeight: 1.1,
-          }}
-        >
-          {fmtMoney(low)} <Text style={{ color: COLORS.gold }}>—</Text> {fmtMoney(high)}
-        </Text>
-        <Text style={{ fontSize: TYPE.small, color: COLORS.cream2, marginTop: 8 }}>
-          Range reflects the spread observed across the comp set.
-        </Text>
-      </View>
-    );
-  }
-
-  // ── CONFIRMED mode (default) ──────────────────────────────────────
-  // One headline number. Uses brokerTotal from above — which prefers
-  // the broker's explicit opinion (lump-sum OR breakdown sum) over
-  // any comp-derived fallback. Ensures the headline always agrees
-  // with the breakdown cards below.
+/**
+ * Discuss mode — broker doesn't want to commit a number in writing.
+ * Soft invitation copy lands in the hero; valuation_notes (the
+ * broker's free-text rationale) renders below.
+ */
+function DiscussHero() {
   return (
     <View>
+      <Text
+        style={{
+          fontFamily: DISPLAY_FONT,
+          fontSize: 28,
+          color: COLORS.cream,
+          lineHeight: 1.1,
+        }}
+      >
+        Let's Discuss
+      </Text>
+      <Text style={{ fontSize: TYPE.body, color: COLORS.cream2, marginTop: 8, lineHeight: 1.5 }}>
+        A formal opinion of value is best delivered in person, where we can walk through
+        the comp set together and frame the numbers against your timing and goals.
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Confirmed (default) + Range mode — the Suggested List Price is the
+ * headline; the broker's Opinion of Value (BOV) carries underneath as
+ * "Expected Sale." Mirrors the share report's pricing hierarchy: the
+ * aspirational number anchors first, the realistic number follows.
+ */
+function ConfirmedHero({
+  suggestedListPrice,
+  brokerTotal,
+  presentation,
+  data,
+}: {
+  suggestedListPrice: number | null;
+  brokerTotal: number | null;
+  presentation: 'confirmed' | 'range' | 'discuss';
+  data: CmaPdfData;
+}) {
+  const opinion = data.opinion;
+
+  // Range mode treatment for the supporting BOV line — show
+  // "Expected Sale: $low — $high" instead of a single number.
+  let expectedSaleLine: React.ReactNode = null;
+  if (presentation === 'range' && brokerTotal != null) {
+    const low = opinion.range_low ?? brokerTotal * 0.95;
+    const high = opinion.range_high ?? brokerTotal * 1.05;
+    expectedSaleLine = (
+      <Text>
+        {fmtMoney(low)} <Text style={{ color: COLORS.gold }}>—</Text> {fmtMoney(high)}
+      </Text>
+    );
+  } else if (brokerTotal != null) {
+    expectedSaleLine = <Text>{fmtMoney(brokerTotal)}</Text>;
+  } else {
+    expectedSaleLine = <Text>—</Text>;
+  }
+
+  return (
+    <View>
+      <Text
+        style={{
+          fontSize: TYPE.micro,
+          color: COLORS.gold,
+          letterSpacing: 2,
+          textTransform: 'uppercase',
+          fontFamily: 'Helvetica-Bold',
+          marginBottom: 10,
+        }}
+      >
+        Suggested List Price
+      </Text>
       <Text
         style={{
           fontFamily: DISPLAY_FONT,
@@ -256,7 +238,47 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
           lineHeight: 1.1,
         }}
       >
-        {brokerTotal != null ? fmtMoney(brokerTotal) : '—'}
+        {suggestedListPrice != null ? fmtMoney(suggestedListPrice) : '—'}
+      </Text>
+
+      {/* Divider rule */}
+      <View
+        style={{
+          height: 1,
+          backgroundColor: COLORS.gold,
+          opacity: 0.4,
+          marginVertical: 14,
+          width: 80,
+        }}
+      />
+
+      {/* Expected Sale (the BOV / OOV) — supporting detail */}
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 10 }}>
+        <Text
+          style={{
+            fontSize: TYPE.micro,
+            color: COLORS.beige2,
+            letterSpacing: 1.4,
+            textTransform: 'uppercase',
+            fontFamily: 'Helvetica-Bold',
+          }}
+        >
+          Expected Sale
+        </Text>
+        <Text
+          style={{
+            fontSize: TYPE.h2,
+            color: COLORS.cream,
+            fontFamily: DISPLAY_FONT,
+          }}
+        >
+          {expectedSaleLine}
+        </Text>
+      </View>
+
+      <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 6, lineHeight: 1.5 }}>
+        List price leaves negotiating room above the broker's opinion of value while
+        staying defensible against the comp range.
       </Text>
     </View>
   );
