@@ -251,6 +251,16 @@ export default function MapPage() {
   // comp range (above/below indicator was shipped in PR #43).
   const [valuationNotes, setValuationNotes] = useState<string>('');
 
+  // Subject Overview — the broker's narrative description of the
+  // property for the marketing PDF (Page 2 — "Subject Property").
+  // Two-field design: broker types bullets/shorthand in `notes` (kept
+  // private), clicks Generate → AI returns polished prose into
+  // `prose` (broker can edit before save). Both persist to cmas via
+  // saveBov. See migration 032 + /api/cma/[id]/generate-overview.
+  const [subjectOverviewNotes, setSubjectOverviewNotes] = useState<string>('');
+  const [subjectOverviewProse, setSubjectOverviewProse] = useState<string>('');
+  const [subjectOverviewGenerating, setSubjectOverviewGenerating] = useState(false);
+
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
   const [collabOpen, setCollabOpen] = useState(false);
@@ -2201,6 +2211,15 @@ export default function MapPage() {
     }
     const savedNotes = cma?.valuation_notes;
     setValuationNotes(typeof savedNotes === 'string' ? savedNotes : '');
+
+    // Subject Overview — restore the broker's private notes + the
+    // polished prose. Both may be NULL for CMAs created before
+    // migration 032; empty-string fallback so the textareas stay
+    // controlled inputs.
+    const savedSubjectNotes = cma?.subject_overview_notes;
+    const savedSubjectProse = cma?.subject_overview_prose;
+    setSubjectOverviewNotes(typeof savedSubjectNotes === 'string' ? savedSubjectNotes : '');
+    setSubjectOverviewProse(typeof savedSubjectProse === 'string' ? savedSubjectProse : '');
   }, [viewingCMA?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Immediate save — used by Save button and effect cleanup so pending edits
@@ -4566,6 +4585,12 @@ export default function MapPage() {
                   // preserves; empty string clears. Render path treats
                   // both as "no notes set."
                   valuationNotes?: string | null;
+                  // Subject Overview for the marketing PDF. Notes are
+                  // the broker's private scratchpad; prose is the
+                  // polished version (AI-drafted or hand-written) that
+                  // appears in the PDF + (optionally) share report.
+                  subjectOverviewNotes?: string | null;
+                  subjectOverviewProse?: string | null;
                 }) => {
                   const fields: any = {
                     broker_opinion_mode: patch.mode,
@@ -4582,6 +4607,8 @@ export default function MapPage() {
                   if ('suggestedListPrice' in patch) fields.suggested_list_price = patch.suggestedListPrice;
                   if ('opinionPresentation' in patch) fields.opinion_presentation = patch.opinionPresentation;
                   if ('valuationNotes' in patch) fields.valuation_notes = patch.valuationNotes;
+                  if ('subjectOverviewNotes' in patch) fields.subject_overview_notes = patch.subjectOverviewNotes;
+                  if ('subjectOverviewProse' in patch) fields.subject_overview_prose = patch.subjectOverviewProse;
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
 
@@ -4855,6 +4882,133 @@ export default function MapPage() {
 
                 return (
                   <>
+
+                  {/* ─── Subject Overview ───────────────────────────────
+                      Two-textarea section that feeds the marketing PDF's
+                      Subject Property page (Page 2). Broker types
+                      bullets/shorthand in "Your Notes" (private, never
+                      appears in the report), clicks Generate to get a
+                      polished prose draft from GPT-4o-mini via
+                      /api/cma/[id]/generate-overview, then edits +
+                      saves. Both fields persist via saveBov. See
+                      migration 032 + design discussion (May 26 2026). */}
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Subject Overview</p>
+                      <p className="text-[9px] text-ink-3">for marketing PDF</p>
+                    </div>
+
+                    {/* PRIVATE NOTES — never appears in any client-
+                        facing surface. Just feeds the AI generator. */}
+                    <div className="space-y-1">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Your notes <span className="normal-case tracking-normal text-ink-3">· private, just for the AI</span>
+                      </p>
+                      <textarea
+                        placeholder={"551ac, Willow City\nNative Hill Country, ag valuation\nModest improvements: 570sf cabin built 2009, garage/shop, HVAC\nValue is the land — terrain, water, location"}
+                        value={subjectOverviewNotes}
+                        onChange={(e) => setSubjectOverviewNotes(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewNotes: subjectOverviewNotes.trim() === '' ? null : subjectOverviewNotes,
+                          });
+                        }}
+                        rows={4}
+                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed font-mono"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={subjectOverviewGenerating || !subjectOverviewNotes.trim() || !viewingCMA?.id}
+                          onClick={async () => {
+                            const cmaId = viewingCMA?.id;
+                            if (!cmaId) return;
+                            const notes = subjectOverviewNotes.trim();
+                            if (!notes) {
+                              toast.error('Add some notes first');
+                              return;
+                            }
+                            setSubjectOverviewGenerating(true);
+                            try {
+                              const res = await fetch(`/api/cma/${cmaId}/generate-overview`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ notes }),
+                              });
+                              const data = await res.json();
+                              if (!res.ok || !data?.ok || typeof data?.prose !== 'string') {
+                                toast.error(data?.error || 'Generation failed');
+                                return;
+                              }
+                              // Confirm before clobbering existing prose
+                              // — if the broker hand-edited the polished
+                              // version, regenerating wipes that work.
+                              // Small UX safety net via window.confirm;
+                              // the textarea also supports Cmd+Z undo
+                              // for inline recovery.
+                              if (subjectOverviewProse.trim().length > 0) {
+                                const ok = window.confirm(
+                                  'Replace your current draft with a new AI version? Your current text will be overwritten (you can Cmd+Z to undo).'
+                                );
+                                if (!ok) return;
+                              }
+                              setSubjectOverviewProse(data.prose);
+                              // Persist the new draft immediately so a
+                              // reload picks it up — saveBov is the
+                              // existing schema-cache-retry path.
+                              saveBov({
+                                mode: bovMode,
+                                total: Number(bovTotalInput) || null,
+                                landValue: Number(bovLandTotalInput) || null,
+                                improvementValue: Number(bovImprovementInput) || null,
+                                subjectOverviewNotes: notes,
+                                subjectOverviewProse: data.prose,
+                              });
+                              toast.success('Draft generated — review + edit below');
+                            } catch (e: any) {
+                              toast.error(e?.message || 'Generation failed');
+                            } finally {
+                              setSubjectOverviewGenerating(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-blue hover:bg-slate-blue-2 text-white text-[11px] font-semibold rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Sparkles size={11} />
+                          {subjectOverviewGenerating ? 'Generating…' : 'Generate'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* POLISHED PROSE — appears in PDF + share report.
+                        Broker can edit after AI generation or type it
+                        themselves from scratch. */}
+                    <div className="space-y-1 border-t border-beige pt-2">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Polished overview <span className="normal-case tracking-normal text-ink-3">· appears in PDF</span>
+                      </p>
+                      <textarea
+                        placeholder="Click Generate above to draft, or type your own 2-3 paragraph overview here."
+                        value={subjectOverviewProse}
+                        onChange={(e) => setSubjectOverviewProse(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewProse: subjectOverviewProse.trim() === '' ? null : subjectOverviewProse,
+                          });
+                        }}
+                        rows={8}
+                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink outline-none transition-all resize-none leading-relaxed"
+                      />
+                    </div>
+                  </div>
+
                   <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
