@@ -521,7 +521,7 @@ function BreakdownRow({
   return (
     <View
       style={{
-        paddingVertical: 12,
+        paddingVertical: 9,
         paddingHorizontal: 16,
         backgroundColor: highlight ? COLORS.goldTint : '#fff',
         borderTopWidth: highlight ? 2 : 0.5,
@@ -559,14 +559,18 @@ function BreakdownRow({
 
       {/* Support line — e.g., "Implied $13,003/ac across 317± ac" */}
       {supportLine ? (
-        <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 4 }}>
+        <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 2 }}>
           {supportLine}
         </Text>
       ) : null}
 
-      {/* Itemized sub-items — improvements walkthrough */}
+      {/* Itemized sub-items — improvements walkthrough. Each row
+          mirrors the parent's label/amount layout so the right edge
+          aligns column-for-column with the parent dollar amount.
+          Label + detail combine into a single text run with the
+          detail in muted ink, kept on one line per item. */}
       {itemized && subItems && subItems.length > 0 ? (
-        <View style={{ marginTop: 8, paddingLeft: 14 }}>
+        <View style={{ marginTop: 4 }}>
           {subItems.map((item, i) => (
             <View
               key={i}
@@ -574,20 +578,17 @@ function BreakdownRow({
                 flexDirection: 'row',
                 justifyContent: 'space-between',
                 alignItems: 'baseline',
-                paddingVertical: 3,
+                paddingVertical: 2,
+                paddingLeft: 14,
               }}
             >
-              <View style={{ flexDirection: 'row', flex: 1, alignItems: 'baseline' }}>
-                <Text style={{ fontSize: TYPE.small, color: COLORS.ink2, marginRight: 8 }}>
-                  {item.label}
-                </Text>
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink2, flex: 1, paddingRight: 8 }}>
+                {item.label}
                 {item.detail ? (
-                  <Text style={{ fontSize: TYPE.small, color: COLORS.ink3 }}>
-                    {item.detail}
-                  </Text>
+                  <Text style={{ color: COLORS.ink3 }}>  {item.detail}</Text>
                 ) : null}
-              </View>
-              <Text style={{ fontSize: TYPE.small, color: COLORS.ink, fontFamily: 'Helvetica-Bold' }}>
+              </Text>
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink2 }}>
                 {fmtMoney(item.amount)}
               </Text>
             </View>
@@ -639,14 +640,17 @@ function RangeIndicator({
   let borderColor: string = COLORS.gold;
   let textColor: string = COLORS.goldDark;
 
+  // Subject is always the Broker Opinion of Value (Expected Sale).
+  // Spell it out so the reader doesn't have to guess which of the
+  // dollar figures on this page the percentage is comparing.
   if (brokerTotal < lowBand) {
     const pct = Math.round(((lowBand - brokerTotal) / lowBand) * 100);
-    message = `${pct}% below the comparable sale range — competitively positioned for a strong outcome.`;
+    message = `The broker's Opinion of Value lands ${pct}% below the comparable sale range — competitively positioned for a strong outcome.`;
     bgColor = '#EEF2F8';
     borderColor = COLORS.slateBlue;
     textColor = '#2C4A75';
   } else if (brokerTotal <= highBand) {
-    message = 'Positioned within the comparable sale range — well-supported by the data.';
+    message = "The broker's Opinion of Value lands within the comparable sale range — well-supported by the data.";
     bgColor = COLORS.oliveTint;
     borderColor = COLORS.olive;
     textColor = '#475428';
@@ -654,14 +658,14 @@ function RangeIndicator({
     const overshoot = (brokerTotal - highBand) / highBand;
     const pct = Math.round(overshoot * 100);
     if (overshoot <= 0.10) {
-      message = `${pct}% above the comparable sale range — the broker's premium read.`;
+      message = `The broker's Opinion of Value lands ${pct}% above the comparable sale range — the broker's premium read.`;
     } else if (overshoot <= 0.20) {
-      message = `${pct}% above the typical sale range — premium positioning. A longer marketing period is typical at this level.`;
+      message = `The broker's Opinion of Value lands ${pct}% above the typical sale range — premium positioning. A longer marketing period is typical at this level.`;
       bgColor = '#FCF1E0';
       borderColor = '#E8B872';
       textColor = '#8A5A1A';
     } else {
-      message = `${pct}% above the comparable sale range — aggressive positioning. Expect an extended marketing period.`;
+      message = `The broker's Opinion of Value lands ${pct}% above the comparable sale range — aggressive positioning. Expect an extended marketing period.`;
       bgColor = '#FCF1E0';
       borderColor = '#E8B872';
       textColor = '#8A5A1A';
