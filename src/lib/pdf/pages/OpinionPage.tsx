@@ -43,14 +43,17 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
     data.stats.value_mid ??
     null;
 
-  // Suggested List Price — explicit broker override, else BOV × 1.10
-  // (the default the share report uses). Only meaningful in
-  // 'confirmed' or 'range' modes — 'discuss' mode shows no number.
+  // Suggested List Price — explicit broker override wins; otherwise
+  // defaults to the BOV itself (no markup). Brokers who want a
+  // listing premium set it explicitly in the workspace; brokers who
+  // leave it blank are saying "list at the opinion of value." In
+  // 'discuss' mode no number is shown — the hero falls back to the
+  // "Let's Discuss" soft-invitation copy for both SLP and Expected
+  // Sale.
   const suggestedListPrice =
     presentation === 'discuss'
       ? null
-      : opinion.suggested_list_price ??
-        (brokerTotal != null ? Math.round(brokerTotal * 1.10) : null);
+      : opinion.suggested_list_price ?? brokerTotal;
 
   return (
     <Page size="LETTER" style={styles.page}>
@@ -156,23 +159,72 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
 
 /**
  * Discuss mode — broker doesn't want to commit a number in writing.
- * Soft invitation copy lands in the hero; valuation_notes (the
- * broker's free-text rationale) renders below.
+ * Both the Suggested List Price and Expected Sale slots show
+ * "Let's Discuss" so the client sees the framing without seeing a
+ * placeholder dollar amount anywhere. valuation_notes (the broker's
+ * free-text rationale) renders below the hero.
  */
 function DiscussHero() {
   return (
     <View>
       <Text
         style={{
+          fontSize: TYPE.micro,
+          color: COLORS.gold,
+          letterSpacing: 2,
+          textTransform: 'uppercase',
+          fontFamily: 'Helvetica-Bold',
+          marginBottom: 10,
+        }}
+      >
+        Suggested List Price
+      </Text>
+      <Text
+        style={{
           fontFamily: DISPLAY_FONT,
-          fontSize: 28,
+          fontSize: 32,
           color: COLORS.cream,
           lineHeight: 1.1,
         }}
       >
         Let's Discuss
       </Text>
-      <Text style={{ fontSize: TYPE.body, color: COLORS.cream2, marginTop: 8, lineHeight: 1.5 }}>
+
+      {/* Divider rule */}
+      <View
+        style={{
+          height: 1,
+          backgroundColor: COLORS.gold,
+          opacity: 0.4,
+          marginVertical: 14,
+          width: 80,
+        }}
+      />
+
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 10 }}>
+        <Text
+          style={{
+            fontSize: TYPE.micro,
+            color: COLORS.beige2,
+            letterSpacing: 1.4,
+            textTransform: 'uppercase',
+            fontFamily: 'Helvetica-Bold',
+          }}
+        >
+          Expected Sale
+        </Text>
+        <Text
+          style={{
+            fontSize: TYPE.h2,
+            color: COLORS.cream,
+            fontFamily: DISPLAY_FONT,
+          }}
+        >
+          Let's Discuss
+        </Text>
+      </View>
+
+      <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 8, lineHeight: 1.5 }}>
         A formal opinion of value is best delivered in person, where we can walk through
         the comp set together and frame the numbers against your timing and goals.
       </Text>
@@ -198,6 +250,16 @@ function ConfirmedHero({
   data: CmaPdfData;
 }) {
   const opinion = data.opinion;
+
+  // When the broker hasn't entered an explicit Suggested List Price,
+  // the SLP defaults to the BOV — meaning both numbers are equal.
+  // Showing "Expected Sale: $X" right under "Suggested List Price: $X"
+  // would be the same number twice, so we suppress the Expected Sale
+  // line in that case. Also handles range mode (where Expected Sale
+  // is a low–high band and clearly distinct from the single SLP).
+  const slpExplicit = opinion.suggested_list_price != null;
+  const showExpectedSale =
+    presentation === 'range' || (slpExplicit && suggestedListPrice !== brokerTotal);
 
   // Range mode treatment for the supporting BOV line — show
   // "Expected Sale: $low — $high" instead of a single number.
@@ -241,45 +303,57 @@ function ConfirmedHero({
         {suggestedListPrice != null ? fmtMoney(suggestedListPrice) : '—'}
       </Text>
 
-      {/* Divider rule */}
-      <View
-        style={{
-          height: 1,
-          backgroundColor: COLORS.gold,
-          opacity: 0.4,
-          marginVertical: 14,
-          width: 80,
-        }}
-      />
+      {showExpectedSale ? (
+        <>
+          {/* Divider rule */}
+          <View
+            style={{
+              height: 1,
+              backgroundColor: COLORS.gold,
+              opacity: 0.4,
+              marginVertical: 14,
+              width: 80,
+            }}
+          />
 
-      {/* Expected Sale (the BOV / OOV) — supporting detail */}
-      <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 10 }}>
-        <Text
-          style={{
-            fontSize: TYPE.micro,
-            color: COLORS.beige2,
-            letterSpacing: 1.4,
-            textTransform: 'uppercase',
-            fontFamily: 'Helvetica-Bold',
-          }}
-        >
-          Expected Sale
-        </Text>
-        <Text
-          style={{
-            fontSize: TYPE.h2,
-            color: COLORS.cream,
-            fontFamily: DISPLAY_FONT,
-          }}
-        >
-          {expectedSaleLine}
-        </Text>
-      </View>
+          {/* Expected Sale (the BOV / OOV) — supporting detail */}
+          <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 10 }}>
+            <Text
+              style={{
+                fontSize: TYPE.micro,
+                color: COLORS.beige2,
+                letterSpacing: 1.4,
+                textTransform: 'uppercase',
+                fontFamily: 'Helvetica-Bold',
+              }}
+            >
+              Expected Sale
+            </Text>
+            <Text
+              style={{
+                fontSize: TYPE.h2,
+                color: COLORS.cream,
+                fontFamily: DISPLAY_FONT,
+              }}
+            >
+              {expectedSaleLine}
+            </Text>
+          </View>
 
-      <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 6, lineHeight: 1.5 }}>
-        List price leaves negotiating room above the broker's opinion of value while
-        staying defensible against the comp range.
-      </Text>
+          <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 6, lineHeight: 1.5 }}>
+            List price leaves negotiating room above the broker's opinion of value while
+            staying defensible against the comp range.
+          </Text>
+        </>
+      ) : (
+        // SLP equals BOV (broker chose to list at the opinion of
+        // value). Replace the "Expected Sale" block with a single
+        // helper line so the hero card doesn't feel half-empty.
+        <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 14, lineHeight: 1.5 }}>
+          The list price reflects the broker's opinion of value — supported by the
+          comparable sales analysis below.
+        </Text>
+      )}
     </View>
   );
 }
