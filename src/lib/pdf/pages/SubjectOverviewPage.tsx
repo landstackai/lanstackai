@@ -23,7 +23,7 @@
 
 import React from 'react';
 import { Page, View, Text } from '@react-pdf/renderer';
-import { styles, COLORS, TYPE, PAGE, fmtAcres } from '../theme';
+import { styles, COLORS, TYPE, PAGE, DISPLAY_ITALIC, fmtAcres } from '../theme';
 import type { CmaPdfData } from '../types';
 import { PageFooter } from './_chrome';
 
@@ -66,7 +66,7 @@ export function SubjectOverviewPage({ data }: { data: CmaPdfData }) {
               </Text>
             ))
           ) : (
-            <Text style={[styles.bodyMuted, { fontStyle: 'italic' }]}>
+            <Text style={[styles.bodyMuted, { fontFamily: DISPLAY_ITALIC }]}>
               No narrative overview provided. Please refer to the comparable
               sales analysis and broker contact info on the following pages.
             </Text>

@@ -2044,13 +2044,18 @@ export default function MapPage() {
     try {
       const res = await fetch(`/api/cma/${cmaId}/pdf`);
       if (!res.ok) {
-        // PDF route returns JSON on error
+        // PDF route returns JSON on error. Surface the actual detail
+        // (server-side error message) in the toast so we can see what
+        // failed — generic "PDF render failed" is useless for debugging.
         let detail = '';
         try {
           const err = await res.json();
-          detail = err?.error || err?.detail || '';
+          detail = err?.detail || err?.error || '';
+          // Log the full JSON to console for deeper inspection.
+          // eslint-disable-next-line no-console
+          console.error('[pdf] download failed', err);
         } catch {}
-        toast.error(detail || 'PDF render failed');
+        toast.error(detail ? `PDF: ${detail}` : 'PDF render failed', { duration: 8000 });
         return;
       }
       const blob = await res.blob();

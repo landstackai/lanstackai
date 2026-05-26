@@ -226,9 +226,22 @@ export async function GET(
       },
     });
   } catch (e: any) {
-    console.error('[pdf] render failed', e);
+    // Surface the full error in the Vercel function logs AND include
+    // the stack in the JSON response so the workspace toast can show
+    // the actual cause (not just "PDF render failed"). The detail is
+    // safe to expose — this endpoint is auth-gated by RLS.
+    console.error('[pdf] render failed', {
+      message: e?.message,
+      name: e?.name,
+      stack: e?.stack,
+      cma_id: id,
+    });
     return NextResponse.json(
-      { error: 'PDF render failed', detail: e?.message || 'unknown error' },
+      {
+        error: 'PDF render failed',
+        detail: e?.message || 'unknown error',
+        name: e?.name || null,
+      },
       { status: 500 }
     );
   }

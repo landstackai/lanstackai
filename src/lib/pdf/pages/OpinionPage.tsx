@@ -14,7 +14,7 @@
 
 import React from 'react';
 import { Page, View, Text } from '@react-pdf/renderer';
-import { styles, COLORS, TYPE, fmtMoney, fmtAcres } from '../theme';
+import { styles, COLORS, TYPE, DISPLAY_FONT, fmtMoney, fmtAcres } from '../theme';
 import type { CmaPdfData } from '../types';
 import { PageFooter } from './_chrome';
 
@@ -141,7 +141,7 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
       <View>
         <Text
           style={{
-            fontFamily: 'Instrument Serif',
+            fontFamily: DISPLAY_FONT,
             fontSize: 28,
             color: COLORS.cream,
             lineHeight: 1.1,
@@ -170,7 +170,7 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
       <View>
         <Text
           style={{
-            fontFamily: 'Instrument Serif',
+            fontFamily: DISPLAY_FONT,
             fontSize: 30,
             color: COLORS.cream,
             lineHeight: 1.1,
@@ -194,7 +194,7 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
     <View>
       <Text
         style={{
-          fontFamily: 'Instrument Serif',
+          fontFamily: DISPLAY_FONT,
           fontSize: 44,
           color: COLORS.cream,
           lineHeight: 1.1,

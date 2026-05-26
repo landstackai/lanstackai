@@ -15,7 +15,7 @@
 // on the built-in Helvetica family for body copy (no font fetch on
 // cold start, no risk of "font not found" failures in serverless).
 
-import { Font, StyleSheet } from '@react-pdf/renderer';
+import { StyleSheet } from '@react-pdf/renderer';
 
 // Palette — drawn from /tailwind.config.js. Hex values inlined so
 // the PDF render path doesn't depend on the Tailwind config import.
@@ -67,49 +67,33 @@ export const PAGE = {
   innerWidth: 612 - 86, // width minus L+R margin
 } as const;
 
-// Has Font.register been called yet? react-pdf will silently use
-// Helvetica if a font isn't registered, but we want intentional fonts
-// where we ask for them. Registration is idempotent but expensive on
-// cold start — track it to avoid re-fetching.
-let fontsRegistered = false;
-
 /**
- * Register the display font for headings. Body copy uses the built-in
- * Helvetica so PDFs render even if the Google Fonts CDN is unreachable
- * during a serverless cold start.
+ * Font registration is a no-op in V1. We rely exclusively on the
+ * PDFKit built-in standard fonts — Helvetica, Helvetica-Bold,
+ * Times-Roman, Times-Bold, Times-Italic — which ship inside react-pdf
+ * itself. No network fetch on cold start, no risk of Google Fonts CDN
+ * timeouts in serverless, no font-file licensing concerns.
  *
- * Call this once at the top of the PDF render route, BEFORE building
- * the Document tree. Safe to call multiple times.
+ * Times-Roman / Times-Bold do double-duty as the "display serif" for
+ * cover headlines and section titles (DISPLAY_FONT below). They're
+ * not as distinctive as Instrument Serif, but they're respectable and
+ * — critically — always available. Custom display fonts ship in V2
+ * via bundled .ttf files so we don't take a network dependency.
+ *
+ * Kept as an exported no-op so callers don't break when we restore
+ * custom font registration later.
  */
 export function registerPdfFonts() {
-  if (fontsRegistered) return;
-  try {
-    // Instrument Serif — the Landstack web display font. Use the
-    // direct Google Fonts file URLs (react-pdf can't follow CSS @font-face).
-    Font.register({
-      family: 'Instrument Serif',
-      fonts: [
-        {
-          // Regular 400
-          src: 'https://fonts.gstatic.com/s/instrumentserif/v12/jizDREVItHgc8qDIbSTKq4XKVUMYHA.ttf',
-          fontWeight: 400,
-        },
-        {
-          // Italic 400
-          src: 'https://fonts.gstatic.com/s/instrumentserif/v12/jizBREVItHgc8qDIbSTKq4XkRiUa6zUTiw.ttf',
-          fontWeight: 400,
-          fontStyle: 'italic',
-        },
-      ],
-    });
-    fontsRegistered = true;
-  } catch (e) {
-    // If font registration fails, the doc still renders (react-pdf
-    // falls back to Helvetica). Log and move on — a broken cover font
-    // is better than a 500 on the download.
-    console.warn('[pdf] font registration failed; falling back to Helvetica', e);
-  }
+  // no-op in V1
 }
+
+// Built-in PDFKit fonts. All five are guaranteed available without
+// any network or file registration.
+export const SANS_FONT = 'Helvetica';
+export const SANS_BOLD = 'Helvetica-Bold';
+export const DISPLAY_FONT = 'Times-Roman';
+export const DISPLAY_BOLD = 'Times-Bold';
+export const DISPLAY_ITALIC = 'Times-Italic';
 
 // Shared StyleSheet — every page component imports `styles` from here
 // for layout primitives (page chrome, dividers, two-column rows, etc.)
@@ -126,15 +110,15 @@ export const styles = StyleSheet.create({
     lineHeight: 1.5,
   },
 
-  // Headings
+  // Headings — Times-Roman as the display serif (built-in, no fetch).
   hero: {
-    fontFamily: 'Instrument Serif',
+    fontFamily: DISPLAY_FONT,
     fontSize: TYPE.hero,
     color: COLORS.ink,
     lineHeight: 1.1,
   },
   h1: {
-    fontFamily: 'Instrument Serif',
+    fontFamily: DISPLAY_FONT,
     fontSize: TYPE.h1,
     color: COLORS.ink,
     lineHeight: 1.2,
