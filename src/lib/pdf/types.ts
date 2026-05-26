@@ -61,6 +61,16 @@ export type CmaPdfComp = {
   ppa_land_only: number | null;
   improvements_value: number | null;
 
+  // Resolved per-comp PPAs — computed in the route using the same
+  // helpers (totalPpa / adjustedPpa from cmaMath.ts) that drive the
+  // workspace's three average cards. Surfacing both on each row
+  // lets the PDF show TOTAL $/Ac alongside ADJUSTED $/Ac (the
+  // broker-overridden land-only view) without per-row math
+  // duplication in the page components.
+  computed_total_ppa: number | null;
+  computed_adjusted_ppa: number | null;
+  effective_improvement: number | null;
+
   latitude: number | null;
   longitude: number | null;
   aerial_image: string | null;       // base64 data URL

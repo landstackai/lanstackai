@@ -164,35 +164,72 @@ export async function GET(
   const subject_aerial_url = buildCoverAerial(subject);
   const comp_map_url = buildCompMapUrl(subject, compCoords);
 
-  // 8. Convert comps to PDF shape
-  const pdfComps: CmaPdfComp[] = comps.map((c) => ({
-    id: c.id,
-    property_name: c.property_name ?? null,
-    address: c.address ?? null,
-    city: c.city ?? null,
-    county: c.county ?? null,
-    state: c.state ?? null,
-    acres: c.acres != null ? Number(c.acres) : null,
-    sale_price: c.sale_price != null ? Number(c.sale_price) : null,
-    sale_date: c.sale_date ?? null,
-    price_per_acre: c.price_per_acre != null ? Number(c.price_per_acre) : null,
-    ppa_land_only: c.ppa_land_only != null ? Number(c.ppa_land_only) : null,
-    improvements_value: c.improvements_value != null ? Number(c.improvements_value) : null,
-    latitude: c.latitude != null ? Number(c.latitude) : null,
-    longitude: c.longitude != null ? Number(c.longitude) : null,
-    aerial_image: c.aerial_image ?? null,
-    listing_thumbnail: c.listing_thumbnail ?? null,
-    source_url: c.source_url ?? null,
-    status: c.status ?? null,
-    water: c.water ?? null,
-    road_frontage: c.road_frontage ?? null,
-    dev_potential: c.dev_potential ?? null,
-    best_use: Array.isArray(c.best_use) ? c.best_use : null,
-    topography: c.topography ?? null,
-    has_improvements: c.has_improvements ?? null,
-    use_land_only_for_cma: c.use_land_only_for_cma ?? null,
-    notes: c.improvements_notes ?? null,
-  }));
+  // 8. Convert comps to PDF shape — including the resolved per-row
+  // Total + Adjusted $/Ac using the same precedence as
+  // adjustedPpa() in cmaMath.ts. Surfacing them on each row lets
+  // CompTablePage render TOTAL alongside ADJUSTED without
+  // duplicating the resolution logic in the React tree.
+  const pdfComps: CmaPdfComp[] = comps.map((c) => {
+    const acresN = c.acres != null ? Number(c.acres) : null;
+    const saleN = c.sale_price != null ? Number(c.sale_price) : null;
+
+    // Effective improvement value:
+    //   cma.comp_adjustments[id].improvement_value (broker override) >
+    //   comp.improvement_value (broker-tagged singular field) >
+    //   comp.improvements_value (appraiser-tagged plural field) > null
+    const adj = compAdjustments?.[c.id] || {};
+    const effImp =
+      adj.improvement_value != null ? Number(adj.improvement_value) :
+      c.improvement_value != null ? Number(c.improvement_value) :
+      c.improvements_value != null ? Number(c.improvements_value) :
+      null;
+
+    const total_ppa =
+      acresN != null && saleN != null && acresN > 0 && saleN > 0
+        ? saleN / acresN
+        : null;
+
+    const adjusted_ppa =
+      acresN != null && saleN != null && acresN > 0 && saleN > 0
+        ? (() => {
+            const eff = effImp ?? 0;
+            const land = saleN - eff;
+            return land > 0 ? land / acresN : null;
+          })()
+        : null;
+
+    return {
+      id: c.id,
+      property_name: c.property_name ?? null,
+      address: c.address ?? null,
+      city: c.city ?? null,
+      county: c.county ?? null,
+      state: c.state ?? null,
+      acres: acresN,
+      sale_price: saleN,
+      sale_date: c.sale_date ?? null,
+      price_per_acre: c.price_per_acre != null ? Number(c.price_per_acre) : null,
+      ppa_land_only: c.ppa_land_only != null ? Number(c.ppa_land_only) : null,
+      improvements_value: c.improvements_value != null ? Number(c.improvements_value) : null,
+      computed_total_ppa: total_ppa,
+      computed_adjusted_ppa: adjusted_ppa,
+      effective_improvement: effImp,
+      latitude: c.latitude != null ? Number(c.latitude) : null,
+      longitude: c.longitude != null ? Number(c.longitude) : null,
+      aerial_image: c.aerial_image ?? null,
+      listing_thumbnail: c.listing_thumbnail ?? null,
+      source_url: c.source_url ?? null,
+      status: c.status ?? null,
+      water: c.water ?? null,
+      road_frontage: c.road_frontage ?? null,
+      dev_potential: c.dev_potential ?? null,
+      best_use: Array.isArray(c.best_use) ? c.best_use : null,
+      topography: c.topography ?? null,
+      has_improvements: c.has_improvements ?? null,
+      use_land_only_for_cma: c.use_land_only_for_cma ?? null,
+      notes: c.improvements_notes ?? null,
+    };
+  });
 
   // 9. Final PDF data
   const pdfData: CmaPdfData = {
@@ -280,18 +317,13 @@ function computeStats(
   const acres = subjectAcres ?? 0;
   const totals = subjectTotals(avgs, acres);
 
-  // Active range — matches share report. landOnly when any comp has
-  // an improvement signal, else total.
-  const hasAdjSignal = (comps as any[]).some((c) => {
-    const adj = (compAdjustments || {})[c.id] || {};
-    return (
-      adj.improvement_value != null ||
-      c.improvement_value != null ||
-      (c.improvements_value != null && Number(c.improvements_value) > 0)
-    );
-  });
-  const usingLandOnly = hasAdjSignal && avgs.landOnly.n > 0;
-  const active_mid_ppa = usingLandOnly ? avgs.landOnly.mid : avgs.total.mid;
+  // Active range — the $/Ac the OOV reveal lands on when the broker
+  // hasn't entered an explicit opinion. Prefers adjusted (broker
+  // overrides + appraiser improvements both backed out) over
+  // total, since the PDF leads with adjusted on Pages 3 + 5. Falls
+  // back to total if adjusted has zero comps for some edge case.
+  const usingAdjusted = avgs.adjusted.n > 0;
+  const active_mid_ppa = usingAdjusted ? avgs.adjusted.mid : avgs.total.mid;
   const active_mid_value =
     active_mid_ppa != null && acres > 0 ? active_mid_ppa * acres : null;
 
@@ -306,12 +338,14 @@ function computeStats(
     active_mid_ppa,
     active_mid_value,
     // Legacy aliases — used by the OOV hero fallback chain.
-    value_low: totals.landOnly.low ?? totals.total.low,
+    // Now sourced from adjusted (the broker-considered view) rather
+    // than land-only — same band the PDF displays prominently.
+    value_low: totals.adjusted.low ?? totals.total.low,
     value_mid: active_mid_value,
-    value_high: totals.landOnly.high ?? totals.total.high,
-    ppa_low: avgs.landOnly.low ?? avgs.total.low,
+    value_high: totals.adjusted.high ?? totals.total.high,
+    ppa_low: avgs.adjusted.low ?? avgs.total.low,
     ppa_mid: active_mid_ppa,
-    ppa_high: avgs.landOnly.high ?? avgs.total.high,
+    ppa_high: avgs.adjusted.high ?? avgs.total.high,
   };
 }
 

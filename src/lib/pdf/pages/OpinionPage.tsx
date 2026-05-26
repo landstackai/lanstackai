@@ -33,11 +33,13 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
         Derived from comparable sales analysis and the broker's professional judgment.
       </Text>
 
-      {/* Compact analysis tables — same data the broker + client see
-          on the workspace and digital share report (computeCmaAverages
-          from cmaMath.ts). Total + Land-Only side by side. The
-          "Adjusted" view stays workspace-only — it's a broker
-          diagnostic, not a client-facing surface. */}
+      {/* Compact analysis tables — Total + Adjusted, matching the
+          two $/Ac columns on the Comparable Sales table (Page 3).
+          Adjusted incorporates the broker's per-comp improvement
+          adjustments, so it's the broker's most defensible read on
+          the comp set. Total is shown alongside so the client can
+          see the raw market signal too. Same math (computeCmaAverages
+          from cmaMath.ts) used by the workspace + share report. */}
       <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
         {(stats.total.n ?? 0) > 0 ? (
           <PpaBand
@@ -48,11 +50,11 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
             accent={COLORS.olive}
           />
         ) : null}
-        {(stats.landOnly.n ?? 0) > 0 ? (
+        {(stats.adjusted.n ?? 0) > 0 ? (
           <PpaBand
-            label="Average Land-Only $/Acre"
-            band={stats.landOnly}
-            totals={stats.totals_landOnly}
+            label="Average Adjusted $/Acre"
+            band={stats.adjusted}
+            totals={stats.totals_adjusted}
             compCount={compCount}
             accent={COLORS.slateBlue}
           />

@@ -86,19 +86,19 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
         </View>
         <View>
           <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 2 }}>
-            AVG LAND-ONLY $/ACRE
+            AVG ADJUSTED $/ACRE
           </Text>
           <Text style={{ fontSize: TYPE.h3, color: COLORS.ink }}>
-            {data.stats.landOnly.mid != null ? fmtPpa(data.stats.landOnly.mid) : '—'}
+            {data.stats.adjusted.mid != null ? fmtPpa(data.stats.adjusted.mid) : '—'}
           </Text>
         </View>
         <View>
           <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 2 }}>
-            RANGE (LAND-ONLY)
+            RANGE (ADJUSTED)
           </Text>
           <Text style={{ fontSize: TYPE.h3, color: COLORS.ink }}>
-            {data.stats.landOnly.low != null && data.stats.landOnly.high != null
-              ? `${fmtPpa(data.stats.landOnly.low)} – ${fmtPpa(data.stats.landOnly.high)}`
+            {data.stats.adjusted.low != null && data.stats.adjusted.high != null
+              ? `${fmtPpa(data.stats.adjusted.low)} – ${fmtPpa(data.stats.adjusted.high)}`
               : '—'}
           </Text>
         </View>
@@ -110,15 +110,19 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
 }
 
 // Column widths sum to 100 — react-pdf flex respects relative
-// proportions. Address is the elastic column.
+// proportions. Address is the elastic column. Two $/Acre columns:
+// TOTAL (raw sale_price / acres) and ADJUSTED (improvements
+// backed out per the broker's per-comp adjustment). Matches the
+// workspace's Total + Adjusted views.
 const COLS = {
-  num: 4,
-  address: 26,
-  county: 12,
-  acres: 10,
-  sold: 14,
-  date: 16,
-  ppa: 18,
+  num: 3,
+  address: 22,
+  county: 10,
+  acres: 9,
+  sold: 13,
+  date: 13,
+  ppaTotal: 15,
+  ppaAdj: 15,
 };
 
 function CompTableHeader() {
@@ -140,7 +144,8 @@ function CompTableHeader() {
       <HeaderCell width={COLS.acres} text="Acres" align="right" />
       <HeaderCell width={COLS.sold} text="Sold Price" align="right" />
       <HeaderCell width={COLS.date} text="Sale Date" align="right" />
-      <HeaderCell width={COLS.ppa} text="$/Acre" align="right" />
+      <HeaderCell width={COLS.ppaTotal} text="$/Ac Total" align="right" />
+      <HeaderCell width={COLS.ppaAdj} text="$/Ac Adjusted" align="right" />
     </View>
   );
 }
@@ -188,9 +193,15 @@ function CompTableRow({
     comp.address?.trim() ||
     '—';
 
-  // $/Ac source: ppa_land_only first (per migration 027 — broker-
-  // verified land-only price), then price_per_acre.
-  const ppa = comp.ppa_land_only ?? comp.price_per_acre ?? null;
+  // Per-comp $/Ac comes from the route's pre-computed values
+  // (computed_total_ppa, computed_adjusted_ppa) — same precedence
+  // as adjustedPpa() in cmaMath.ts, so the PDF row matches the
+  // workspace exactly. Adjusted = (sale_price - effective_imp)/acres
+  // where effective_imp resolves through the broker's per-comp
+  // overrides before falling back to the comp's own improvement
+  // fields.
+  const totalPpa = comp.computed_total_ppa;
+  const adjustedPpa = comp.computed_adjusted_ppa;
   const sold = comp.sale_price ?? null;
 
   return (
@@ -224,14 +235,24 @@ function CompTableRow({
       </Text>
       <Text
         style={{
-          flex: COLS.ppa,
+          flex: COLS.ppaTotal,
+          fontSize: TYPE.small,
+          color: COLORS.ink,
+          textAlign: 'right',
+        }}
+      >
+        {totalPpa != null ? fmtPpa(totalPpa) : '—'}
+      </Text>
+      <Text
+        style={{
+          flex: COLS.ppaAdj,
           fontSize: TYPE.small,
           color: COLORS.ink,
           textAlign: 'right',
           fontFamily: 'Helvetica-Bold',
         }}
       >
-        {ppa != null ? fmtPpa(ppa) : '—'}
+        {adjustedPpa != null ? fmtPpa(adjustedPpa) : '—'}
       </Text>
     </View>
   );
