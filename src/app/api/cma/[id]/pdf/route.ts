@@ -4,6 +4,7 @@ import React from 'react';
 import { createClient as createServerSupabase } from '@/lib/supabase/server';
 import { MarketingCMAPdf } from '@/lib/pdf/MarketingCMAPdf';
 import { buildCoverAerial, buildCompMapUrl } from '@/lib/pdf/mapbox';
+import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import type {
   CmaPdfData,
   CmaPdfComp,
@@ -108,7 +109,11 @@ export async function GET(
   }
 
   // 4. Compute stats from comps
-  const stats = computeStats(comps, Number(cma.subject_acres) || null);
+  // Per-comp adjustments (broker improvement overrides) live on the
+  // cma row. Pass them into the stats computation so the "Adjusted"
+  // view in the PDF matches what the broker sees in the workspace.
+  const compAdjustments = (cma as any).comp_adjustments || {};
+  const stats = computeStats(comps, compAdjustments, Number(cma.subject_acres) || null);
 
   // 5. Build PDF subject
   const subject: CmaPdfSubject = {
@@ -250,57 +255,63 @@ export async function GET(
 // ── Helpers ────────────────────────────────────────────────────────
 
 /**
- * Compute aggregate $/Ac and dollar value stats across the comp set.
- * Prefers ppa_land_only (broker-verified, improvements stripped) over
- * raw price_per_acre — matches the workspace math (cmaMath.ts).
+ * Compute the same three-view aggregate stats the workspace + share
+ * report use (computeCmaAverages from cmaMath.ts):
+ *
+ *   total    — raw sale_price / acres
+ *   landOnly — improvements backed out where available
+ *   adjusted — broker per-comp overrides applied (from comp_adjustments)
+ *
+ * Each view returns Low / Mid / High in $/Ac + sample count, plus the
+ * same multiplied by subject acres for dollar totals.
+ *
+ * The "active mid" mirrors the share report's resolution:
+ *   - if any comp has an adjustment signal → use landOnly.mid
+ *   - else → use total.mid
+ * This is the value the OOV reveal falls back to when broker_opinion
+ * is null.
  */
-function computeStats(comps: any[], subjectAcres: number | null): CmaPdfStats {
-  const ppas: number[] = [];
-  for (const c of comps) {
-    const ppa = (c.ppa_land_only != null ? Number(c.ppa_land_only) : null) ??
-                (c.price_per_acre != null ? Number(c.price_per_acre) : null);
-    if (ppa != null && Number.isFinite(ppa) && ppa > 0) ppas.push(ppa);
-  }
-
-  if (ppas.length === 0) {
-    return {
-      count: comps.length,
-      avg_ppa: null,
-      median_ppa: null,
-      min_ppa: null,
-      max_ppa: null,
-      value_low: null,
-      value_mid: null,
-      value_high: null,
-      ppa_low: null,
-      ppa_mid: null,
-      ppa_high: null,
-    };
-  }
-
-  const sorted = [...ppas].sort((a, b) => a - b);
-  const avg = ppas.reduce((s, n) => s + n, 0) / ppas.length;
-  const median =
-    sorted.length % 2 === 1
-      ? sorted[(sorted.length - 1) / 2]
-      : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
-  const min = sorted[0];
-  const max = sorted[sorted.length - 1];
-
+function computeStats(
+  comps: any[],
+  compAdjustments: any,
+  subjectAcres: number | null
+): CmaPdfStats {
+  const avgs = computeCmaAverages(comps as any, compAdjustments);
   const acres = subjectAcres ?? 0;
+  const totals = subjectTotals(avgs, acres);
+
+  // Active range — matches share report. landOnly when any comp has
+  // an improvement signal, else total.
+  const hasAdjSignal = (comps as any[]).some((c) => {
+    const adj = (compAdjustments || {})[c.id] || {};
+    return (
+      adj.improvement_value != null ||
+      c.improvement_value != null ||
+      (c.improvements_value != null && Number(c.improvements_value) > 0)
+    );
+  });
+  const usingLandOnly = hasAdjSignal && avgs.landOnly.n > 0;
+  const active_mid_ppa = usingLandOnly ? avgs.landOnly.mid : avgs.total.mid;
+  const active_mid_value =
+    active_mid_ppa != null && acres > 0 ? active_mid_ppa * acres : null;
 
   return {
     count: comps.length,
-    avg_ppa: avg,
-    median_ppa: median,
-    min_ppa: min,
-    max_ppa: max,
-    value_low: acres > 0 ? min * acres : null,
-    value_mid: acres > 0 ? median * acres : null,
-    value_high: acres > 0 ? max * acres : null,
-    ppa_low: min,
-    ppa_mid: median,
-    ppa_high: max,
+    total: avgs.total,
+    landOnly: avgs.landOnly,
+    adjusted: avgs.adjusted,
+    totals_total: totals.total,
+    totals_landOnly: totals.landOnly,
+    totals_adjusted: totals.adjusted,
+    active_mid_ppa,
+    active_mid_value,
+    // Legacy aliases — used by the OOV hero fallback chain.
+    value_low: totals.landOnly.low ?? totals.total.low,
+    value_mid: active_mid_value,
+    value_high: totals.landOnly.high ?? totals.total.high,
+    ppa_low: avgs.landOnly.low ?? avgs.total.low,
+    ppa_mid: active_mid_ppa,
+    ppa_high: avgs.landOnly.high ?? avgs.total.high,
   };
 }
 

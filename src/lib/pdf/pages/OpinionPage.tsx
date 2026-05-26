@@ -14,22 +14,50 @@
 
 import React from 'react';
 import { Page, View, Text } from '@react-pdf/renderer';
-import { styles, COLORS, TYPE, DISPLAY_FONT, fmtMoney, fmtAcres } from '../theme';
-import type { CmaPdfData } from '../types';
+import { styles, COLORS, TYPE, DISPLAY_FONT, fmtMoney, fmtAcres, fmtPpa } from '../theme';
+import type { CmaPdfData, CmaPdfBand } from '../types';
 import { PageFooter } from './_chrome';
 
 export function OpinionPage({ data }: { data: CmaPdfData }) {
   const opinion = data.opinion;
   const presentation = opinion.presentation || 'confirmed';
+  const stats = data.stats;
+  const compCount = stats.count;
 
   return (
     <Page size="LETTER" style={styles.page}>
-      <Text style={styles.sectionLabel}>Broker's Opinion of Value</Text>
+      <Text style={styles.sectionLabel}>Market Analysis & Opinion of Value</Text>
       <View style={styles.goldRule} />
       <Text style={[styles.h1, { marginBottom: 4 }]}>Opinion of Value</Text>
-      <Text style={[styles.bodyMuted, { marginBottom: 24 }]}>
+      <Text style={[styles.bodyMuted, { marginBottom: 16 }]}>
         Derived from comparable sales analysis and the broker's professional judgment.
       </Text>
+
+      {/* Compact analysis tables — same data the broker + client see
+          on the workspace and digital share report (computeCmaAverages
+          from cmaMath.ts). Total + Land-Only side by side. The
+          "Adjusted" view stays workspace-only — it's a broker
+          diagnostic, not a client-facing surface. */}
+      <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
+        {(stats.total.n ?? 0) > 0 ? (
+          <PpaBand
+            label="Average Total $/Acre"
+            band={stats.total}
+            totals={stats.totals_total}
+            compCount={compCount}
+            accent={COLORS.olive}
+          />
+        ) : null}
+        {(stats.landOnly.n ?? 0) > 0 ? (
+          <PpaBand
+            label="Average Land-Only $/Acre"
+            band={stats.landOnly}
+            totals={stats.totals_landOnly}
+            compCount={compCount}
+            accent={COLORS.slateBlue}
+          />
+        ) : null}
+      </View>
 
       {/* The hero reveal — varies by presentation mode. */}
       <View
@@ -292,6 +320,110 @@ function BreakdownCard({
         }}
       >
         {amount != null ? fmtMoney(amount) : '—'}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Compact 3-row band of Low / Mid / High $/Acre values + corresponding
+ * subject-property dollar totals. Renders one card per "view" of the
+ * comp data (Total / Land-Only). Mirrors the share report's
+ * "Per-acre comp detail" section, just tighter.
+ */
+function PpaBand({
+  label,
+  band,
+  totals,
+  compCount,
+  accent,
+}: {
+  label: string;
+  band: CmaPdfBand;
+  totals: CmaPdfBand;
+  compCount: number;
+  accent: string;
+}) {
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: '#fff',
+        borderWidth: 1,
+        borderColor: COLORS.beige2,
+        borderRadius: 4,
+        overflow: 'hidden',
+      }}
+    >
+      <View
+        style={{
+          paddingHorizontal: 10,
+          paddingVertical: 6,
+          backgroundColor: COLORS.cream2,
+          borderBottomWidth: 1,
+          borderBottomColor: COLORS.beige2,
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}
+      >
+        <Text
+          style={{
+            fontSize: TYPE.micro,
+            color: COLORS.ink2,
+            letterSpacing: 1,
+            textTransform: 'uppercase',
+            fontFamily: 'Helvetica-Bold',
+          }}
+        >
+          {label}
+        </Text>
+        <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3 }}>
+          {band.n ?? 0} of {compCount}
+        </Text>
+      </View>
+
+      <PpaRow label="Low" ppa={band.low} value={totals.low} accent={accent} bold={false} />
+      <PpaRow label="Mid" ppa={band.mid} value={totals.mid} accent={accent} bold />
+      <PpaRow label="High" ppa={band.high} value={totals.high} accent={accent} bold={false} />
+    </View>
+  );
+}
+
+function PpaRow({
+  label,
+  ppa,
+  value,
+  accent,
+  bold,
+}: {
+  label: string;
+  ppa: number | null;
+  value: number | null;
+  accent: string;
+  bold: boolean;
+}) {
+  const textColor = bold ? accent : COLORS.ink;
+  const fontFamily = bold ? 'Helvetica-Bold' : 'Helvetica';
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderBottomWidth: 0.5,
+        borderBottomColor: COLORS.beige,
+      }}
+    >
+      <Text style={{ flex: 1, fontSize: TYPE.small, color: bold ? accent : COLORS.ink2, fontFamily }}>
+        {label}
+      </Text>
+      <Text style={{ flex: 1.5, fontSize: TYPE.small, color: textColor, textAlign: 'right', fontFamily }}>
+        {ppa != null ? fmtPpa(ppa) : '—'}
+      </Text>
+      <Text style={{ flex: 1.5, fontSize: TYPE.small, color: textColor, textAlign: 'right', fontFamily }}>
+        {value != null ? fmtMoney(value) : '—'}
       </Text>
     </View>
   );

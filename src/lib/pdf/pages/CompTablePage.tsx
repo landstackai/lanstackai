@@ -36,7 +36,6 @@ import { PageFooter } from './_chrome';
 
 export function CompTablePage({ data }: { data: CmaPdfData }) {
   const comps = data.comps;
-  const subjectPpa = data.stats.median_ppa ?? data.stats.avg_ppa ?? null;
 
   return (
     <Page size="LETTER" style={styles.page}>
@@ -57,7 +56,10 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
         ))}
       </View>
 
-      {/* Summary footer — average $/Ac across all comps. */}
+      {/* Summary footer — comp count + the Total + Land-Only mid
+          $/Ac, mirroring the headline numbers on the Opinion of Value
+          page. Keeps this page focused on the rows themselves; the
+          full Low/Mid/High break-down is on Page 5. */}
       <View
         style={{
           marginTop: 18,
@@ -76,27 +78,27 @@ export function CompTablePage({ data }: { data: CmaPdfData }) {
         </View>
         <View>
           <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 2 }}>
-            AVG $/ACRE
+            AVG TOTAL $/ACRE
           </Text>
           <Text style={{ fontSize: TYPE.h3, color: COLORS.ink }}>
-            {data.stats.avg_ppa != null ? fmtPpa(data.stats.avg_ppa) : '—'}
+            {data.stats.total.mid != null ? fmtPpa(data.stats.total.mid) : '—'}
           </Text>
         </View>
         <View>
           <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 2 }}>
-            MEDIAN $/ACRE
+            AVG LAND-ONLY $/ACRE
           </Text>
           <Text style={{ fontSize: TYPE.h3, color: COLORS.ink }}>
-            {subjectPpa != null ? fmtPpa(subjectPpa) : '—'}
+            {data.stats.landOnly.mid != null ? fmtPpa(data.stats.landOnly.mid) : '—'}
           </Text>
         </View>
         <View>
           <Text style={{ fontSize: TYPE.tiny, color: COLORS.ink3, marginBottom: 2 }}>
-            RANGE
+            RANGE (LAND-ONLY)
           </Text>
           <Text style={{ fontSize: TYPE.h3, color: COLORS.ink }}>
-            {data.stats.min_ppa != null && data.stats.max_ppa != null
-              ? `${fmtPpa(data.stats.min_ppa)} – ${fmtPpa(data.stats.max_ppa)}`
+            {data.stats.landOnly.low != null && data.stats.landOnly.high != null
+              ? `${fmtPpa(data.stats.landOnly.low)} – ${fmtPpa(data.stats.landOnly.high)}`
               : '—'}
           </Text>
         </View>

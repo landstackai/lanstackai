@@ -79,21 +79,56 @@ export type CmaPdfComp = {
   notes: string | null;
 };
 
-// The aggregate stats computed across the selected comps — these
-// drive the Opinion of Value reveal on Page 5.
+// Aggregate stats computed across the selected comps — driven by
+// the same computeCmaAverages helper the workspace + share report use,
+// so the PDF NEVER disagrees with what the broker sees on screen.
+//
+// Three "views" of $/acre, matching cmaMath.ts:
+//   total    — raw sale_price / acres
+//   landOnly — improvements backed out where available
+//   adjusted — per-CMA broker improvement overrides applied
+//
+// Each view has Low/Mid/High in $/Ac (`avgs`) and the same band
+// multiplied by subject acres (`totals`) for dollar amounts. `n` is
+// the sample size — sometimes lower than comp_count if a particular
+// view excludes comps (e.g. landOnly excludes improved comps with no
+// improvements_value).
+//
+// The legacy `count` + `value_mid` fields stay on this shape so the
+// OOV fallback chain has somewhere to land when broker_opinion_value
+// is null — we use landOnly.mid (matching the share report's
+// `computedPpa` resolution).
+export type CmaPdfBand = {
+  low: number | null;
+  mid: number | null;
+  high: number | null;
+  // Sample size — only present on the per-acre averages (the
+  // `totals_*` shapes inherit it implicitly from their source).
+  n?: number;
+};
+
 export type CmaPdfStats = {
   count: number;
-  avg_ppa: number | null;
-  median_ppa: number | null;
-  min_ppa: number | null;
-  max_ppa: number | null;
+  // Per-acre bands (one per view)
+  total: CmaPdfBand;
+  landOnly: CmaPdfBand;
+  adjusted: CmaPdfBand;
 
-  // Implied valuations (avg_ppa × subject_acres) for each band.
+  // Same bands multiplied by subject acreage (for $ totals)
+  totals_total: CmaPdfBand;
+  totals_landOnly: CmaPdfBand;
+  totals_adjusted: CmaPdfBand;
+
+  // Convenience: the "active mid" the OOV reveal falls back to when
+  // broker hasn't entered an opinion. Matches share report logic:
+  // land-only mid when adjustments exist, else total mid.
+  active_mid_ppa: number | null;
+  active_mid_value: number | null;
+
+  // Legacy aliases — kept for the existing OOV fallback path.
   value_low: number | null;
   value_mid: number | null;
   value_high: number | null;
-
-  // Per-acre rendering (used when broker chose to express in $/ac).
   ppa_low: number | null;
   ppa_mid: number | null;
   ppa_high: number | null;
