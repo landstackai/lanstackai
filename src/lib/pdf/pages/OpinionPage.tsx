@@ -157,12 +157,38 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
     );
   }
 
+  // Compute the canonical "broker total" — the dollar amount the
+  // broker stands behind. Resolution order:
+  //   1. broker_opinion_value (explicit lump-sum total) — if set
+  //   2. Breakdown sum (land_value + improvement_value family) — when
+  //      mode === 'breakdown' and the broker entered land+improvement
+  //      separately, this is the AUTHORITATIVE total. We were
+  //      previously falling through to stats.value_mid and showing the
+  //      comp median, which contradicted the breakdown cards below.
+  //   3. Comp-derived stats.value_mid as last-resort fallback
+  const houseValue =
+    opinion.house_sqft != null && opinion.house_ppsf != null
+      ? opinion.house_sqft * opinion.house_ppsf
+      : null;
+  const breakdownImprovements =
+    (houseValue ?? 0) + (opinion.additional_vertical ?? 0) || opinion.improvement_value || 0;
+  const breakdownTotal =
+    opinion.mode === 'breakdown'
+      ? (opinion.land_value ?? 0) + breakdownImprovements
+      : 0;
+
+  const brokerTotal =
+    opinion.total ??
+    (breakdownTotal > 0 ? breakdownTotal : null) ??
+    data.stats.value_mid ??
+    null;
+
   // ── RANGE mode ────────────────────────────────────────────────────
   // Broker wants to show a band. Prefer explicit range_low/range_high
-  // if the broker entered them; fall back to ±5% around the total
-  // for confirmed-with-comp-range scenarios.
+  // if the broker entered them; fall back to ±5% around the broker
+  // total for confirmed-with-comp-range scenarios.
   if (presentation === 'range') {
-    const total = opinion.total ?? data.stats.value_mid ?? null;
+    const total = brokerTotal;
     const low = opinion.range_low ?? (total != null ? total * 0.95 : data.stats.value_low);
     const high = opinion.range_high ?? (total != null ? total * 1.05 : data.stats.value_high);
 
@@ -186,10 +212,10 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
   }
 
   // ── CONFIRMED mode (default) ──────────────────────────────────────
-  // One headline number. Use opinion.total if broker provided it,
-  // otherwise the computed mid value from the stats.
-  const total = opinion.total ?? data.stats.value_mid ?? null;
-
+  // One headline number. Uses brokerTotal from above — which prefers
+  // the broker's explicit opinion (lump-sum OR breakdown sum) over
+  // any comp-derived fallback. Ensures the headline always agrees
+  // with the breakdown cards below.
   return (
     <View>
       <Text
@@ -200,7 +226,7 @@ function OpinionHero({ data }: { data: CmaPdfData }) {
           lineHeight: 1.1,
         }}
       >
-        {total != null ? fmtMoney(total) : '—'}
+        {brokerTotal != null ? fmtMoney(brokerTotal) : '—'}
       </Text>
     </View>
   );
