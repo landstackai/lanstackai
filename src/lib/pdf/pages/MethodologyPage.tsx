@@ -46,17 +46,6 @@ export function MethodologyPage({ data }: { data: CmaPdfData }) {
         purposes — those require a licensed appraiser.
       </Section>
 
-      <Section title="Our Pricing Philosophy">
-        Every property has unique qualities; every market has gravity. The comparable sales
-        on the previous pages define what buyers have actually paid for similar land — the
-        gravity. The broker's opinion of value reflects where this specific property best
-        fits within that pull, considering condition, timing, and character not captured in
-        the data. A price too far outside that gravity typically extends time on market
-        without delivering a higher final number. Our approach pairs the discipline of the
-        data with the experience of {brokerName} — designed to maximize the seller's
-        outcome, not just the asking price.
-      </Section>
-
       <Section title="What the Number Means">
         This is the price at which {brokerName} believes the property is most likely to
         sell within a reasonable marketing period, given current conditions and the subject's

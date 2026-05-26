@@ -14,7 +14,7 @@
 
 import React from 'react';
 import { Page, View, Text } from '@react-pdf/renderer';
-import { styles, COLORS, TYPE, DISPLAY_FONT, fmtMoney, fmtAcres, fmtPpa } from '../theme';
+import { styles, COLORS, TYPE, DISPLAY_FONT, DISPLAY_ITALIC, fmtMoney, fmtAcres, fmtPpa } from '../theme';
 import type { CmaPdfData, CmaPdfBand } from '../types';
 import { PageFooter } from './_chrome';
 
@@ -165,11 +165,12 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
         </View>
       ) : null}
 
-      {/* Pricing philosophy callout — the Landstack thesis in 35
-          words. Sets up the longer methodology paragraph on Page 6
-          and frames the data + broker judgment as a single resource
-          serving the seller's outcome. */}
-      <PricingPhilosophyCallout />
+      {/* Pricing-thesis closer — Landstack's data-plus-judgment
+          positioning in a single italic line above the footer. No
+          label, no box — functions as the page's quiet closing
+          signature rather than a marketing callout. Methodology
+          page intentionally doesn't repeat it. */}
+      <PricingPhilosophyLine />
 
       <PageFooter data={data} pageNum={5} />
     </Page>
@@ -686,40 +687,33 @@ function RangeIndicator({
 }
 
 /**
- * Landstack's pricing-philosophy callout. The data-grounded /
- * broker-informed thesis in 35 words. Sits at the bottom of Page 5
- * as a calm gold-tint box. Methodology page elaborates further.
+ * Landstack's pricing-thesis closer. A single italic line above the
+ * page footer — no label, no box, no header. Captures the data +
+ * broker-judgment positioning in 13 words and lets the white space
+ * around it do the work. Methodology page intentionally doesn't
+ * repeat the thesis.
  */
-function PricingPhilosophyCallout() {
+function PricingPhilosophyLine() {
   return (
-    <View
-      style={{
-        marginTop: 16,
-        backgroundColor: COLORS.goldTint,
-        borderLeftWidth: 2,
-        borderLeftColor: COLORS.gold,
-        paddingVertical: 12,
-        paddingHorizontal: 14,
-      }}
-    >
+    <View style={{ marginTop: 20, alignItems: 'center' }}>
+      <View
+        style={{
+          height: 1,
+          backgroundColor: COLORS.gold,
+          width: 48,
+          marginBottom: 10,
+        }}
+      />
       <Text
         style={{
-          fontSize: TYPE.micro,
-          color: COLORS.goldDark,
-          letterSpacing: 1.4,
-          textTransform: 'uppercase',
-          fontFamily: 'Helvetica-Bold',
-          marginBottom: 6,
+          fontFamily: DISPLAY_ITALIC,
+          fontSize: TYPE.body,
+          color: COLORS.ink2,
+          textAlign: 'center',
+          lineHeight: 1.5,
         }}
       >
-        Our Pricing Approach
-      </Text>
-      <Text style={{ fontSize: TYPE.small, color: COLORS.ink, lineHeight: 1.55 }}>
-        Every property has unique qualities; every market has gravity. The comparable sales
-        define what buyers have actually paid — the data-defensible range. The broker's
-        opinion of value reflects where this property best fits within that pull, considering
-        condition, timing, and character not captured in the data alone. The goal is the
-        right price — not just a price.
+        Comparable sales define the range; broker judgment finds the right price within it.
       </Text>
     </View>
   );
