@@ -1441,6 +1441,14 @@ export default function ImportPage() {
 
   // Batch entrypoint. Single file → chat-based path (existing UX with
   // per-comp review). Multiple files → isolated extraction + auto-save.
+  //
+  // The batch path uses the SAME thinking-bubble UX as the single-file
+  // path (loading=true → pulsing AI bubble + tiered status message)
+  // plus a top-right toast for at-a-glance progress. Two reinforcing
+  // surfaces: the broker who's looking at the chat sees the assistant
+  // working in real-time; the broker who tabbed away sees the toast.
+  // Previously the batch path was silent in the chat — only the toast
+  // moved — which made multi-file uploads feel frozen.
   const handleMultipleFiles = async (files: File[]) => {
     if (files.length === 0) return;
     if (files.length === 1) {
@@ -1452,20 +1460,54 @@ export default function ImportPage() {
     let savedCount = 0;
     const outcomes: Array<{ file: string; outcome: ExtractOutcome }> = [];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      toast.loading(
-        `Processing ${i + 1} of ${files.length}: ${file.name}`,
-        { id: toastId }
-      );
-      const outcome = await extractCompsFromFile(file);
-      outcomes.push({ file: file.name, outcome });
-      if (outcome.kind === 'ok') {
-        for (const comp of outcome.comps) {
-          const ok = await saveCompSilent(comp);
-          if (ok) savedCount++;
+    // Flip on the chat thinking bubble for the whole batch. Cleared
+    // in the finally below so a partial-failure mid-batch doesn't
+    // leave the AI bubble pulsing forever.
+    setLoading(true);
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const progressLabel = `Processing ${i + 1} of ${files.length} · ${file.name}`;
+        toast.loading(progressLabel, { id: toastId });
+        setLoadingStatus(`${progressLabel} — extracting comps…`);
+
+        const outcome = await extractCompsFromFile(file);
+        outcomes.push({ file: file.name, outcome });
+
+        if (outcome.kind === 'ok') {
+          setLoadingStatus(
+            `${progressLabel} — saving ${outcome.comps.length} comp${outcome.comps.length === 1 ? '' : 's'}…`
+          );
+          for (const comp of outcome.comps) {
+            const ok = await saveCompSilent(comp);
+            if (ok) savedCount++;
+          }
         }
+
+        // Stream a one-line per-file outcome into the chat as each
+        // file finishes. The broker sees a running log instead of a
+        // single batch summary at the end — much more reassuring on
+        // a 6-file import that takes 2-3 minutes total.
+        const line =
+          outcome.kind === 'ok'
+            ? `✓ ${file.name} — saved ${outcome.comps.length} comp${outcome.comps.length === 1 ? '' : 's'}`
+            : outcome.kind === 'no_comps'
+              ? `⚠ ${file.name} — no comps extracted`
+              : outcome.kind === 'render_failed'
+                ? `✗ ${file.name} — could not render PDF`
+                : outcome.kind === 'http_error'
+                  ? `✗ ${file.name} — server error (HTTP ${outcome.status})`
+                  : `✗ ${file.name} — network error`;
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: line, timestamp: new Date().toISOString() },
+        ]);
       }
+    } finally {
+      // Always clear, even on uncaught error mid-batch
+      setLoading(false);
+      setLoadingStatus(null);
     }
 
     toast.dismiss(toastId);
