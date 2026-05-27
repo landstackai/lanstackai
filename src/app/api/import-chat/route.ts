@@ -585,6 +585,11 @@ export async function POST(request: NextRequest) {
             description: c.description,
             address: c.address,
             aerialImage,
+            // Pass printed-in-doc coords (per the smart-lat/lng prompt
+            // rule, commit 59e09e2) so the new Step -1 can do a
+            // point-in-parcel TxGIO lookup before owner search runs.
+            latitude: c.latitude,
+            longitude: c.longitude,
           });
           if (located) {
             console.log(`[autoLocate] ✓ ${located.match_confidence.toUpperCase()}: ${located.match_reason}`);

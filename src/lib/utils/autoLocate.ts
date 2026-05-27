@@ -99,6 +99,58 @@ function sumAcres(parcels: any[]): number {
   return parcels.reduce((s, p) => s + (Number(p.properties?.gis_area) || 0), 0);
 }
 
+/**
+ * Optional ownership back-check. When called with an `ownerSignals`
+ * array, verifies that the matched parcel's owner_name contains tokens
+ * from at least one of the comp's grantee/grantor/property_name
+ * signals. Used by Step 1 (unique acreage match) and Step 6 (spatial
+ * single-parcel match) where the match was made WITHOUT checking
+ * ownership.
+ *
+ * Behavior:
+ *   - Ownership matches one signal → keep confidence as-is, append
+ *     "+ owner verified" to the reason
+ *   - Ownership doesn't match ANY signal → demote confidence one
+ *     level (high → medium, medium → low) and append a verify note
+ *   - No signals supplied → no-op (back-check skipped)
+ *
+ * Why demote instead of reject: the parcel match itself may still be
+ * correct (recent sale not yet in TxGIO, owner name spelled differently,
+ * trust-vs-individual records, etc). Honest framing for the broker
+ * beats silent rejection.
+ */
+function applyOwnerBackCheck(
+  result: AutoLocateResult | null,
+  feature: any,
+  ownerSignals: string[]
+): AutoLocateResult | null {
+  if (!result || ownerSignals.length === 0) return result;
+  const ownerName = (feature?.properties?.owner_name || '').toString();
+  if (!ownerName) return result;
+
+  const matchedSignal = ownerSignals.find((s) => ownerMatches(ownerName, s));
+  if (matchedSignal) {
+    return {
+      ...result,
+      match_reason: `${result.match_reason} Owner verified: TxGIO "${ownerName}" contains tokens from "${matchedSignal}".`,
+    };
+  }
+
+  // No ownership match — demote confidence one level.
+  const demoted: 'high' | 'medium' | 'low' =
+    result.match_confidence === 'high' ? 'medium' :
+    result.match_confidence === 'medium' ? 'low' :
+    'low';
+  return {
+    ...result,
+    match_confidence: demoted,
+    match_reason:
+      `${result.match_reason} Owner-name back-check FAILED: TxGIO "${ownerName}" ` +
+      `does not contain tokens from comp grantee/grantor (${ownerSignals.slice(0, 2).join(', ')}). ` +
+      `Could be stale TxGIO data, recent sale, or wrong parcel — verify visually.`,
+  };
+}
+
 function featureToResult(
   feature: any,
   confidence: 'high' | 'medium' | 'low',
@@ -193,6 +245,86 @@ async function queryBboxAllParcels(
     return features;
   } catch (e: any) {
     console.warn('TxGIO bbox query threw:', e?.message);
+    return [];
+  }
+}
+
+/**
+ * Find the parcel that CONTAINS the given (lat, lng) point.
+ *
+ * Use case: the AI extracted "Geographic Location: 30.10, -98.59" from a
+ * Stouffer-style appraisal — coords printed verbatim in the doc (per the
+ * smart-lat/lng prompt rule, commit 59e09e2). When we have those coords,
+ * we shouldn't run owner-search and hope to land on the same parcel; we
+ * should query TxGIO directly at the point.
+ *
+ * Implementation: TxGIO's `esriSpatialRelContains` query is the cleanest
+ * way to ask "what parcels intersect this tiny envelope around the point."
+ * Use a 50m square (0.0005° at TX latitudes) — small enough that we don't
+ * pick up neighbors, large enough to tolerate ~10m coordinate precision
+ * variation between the doc and TxGIO.
+ *
+ * After we get candidates back, filter with turf.booleanPointInPolygon
+ * so we only keep parcels whose polygon ACTUALLY contains the point —
+ * the spatial query is permissive (envelope intersect) and could return
+ * an adjacent parcel whose bbox grazes our point.
+ *
+ * Returns parcels sorted by acreage descending (in the rare case multiple
+ * parcels contain the same point — boundary noise, overlapping abstracts —
+ * the larger one is usually the right primary tract).
+ */
+async function queryParcelAtPoint(lat: number, lng: number): Promise<any[]> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  // 50m envelope (≈ 0.0005° at TX latitudes)
+  const d = 0.0005;
+  const bbox = `${lng - d},${lat - d},${lng + d},${lat + d}`;
+  const params = new URLSearchParams({
+    geometry: bbox,
+    geometryType: 'esriGeometryEnvelope',
+    inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects',
+    outFields: 'prop_id,owner_name,gis_area,county',
+    returnGeometry: 'true',
+    outSR: '4326',
+    geometryPrecision: '6',
+    resultRecordCount: '10',
+    f: 'geojson',
+  });
+  try {
+    const res = await fetch(`${TXGIO_QUERY}?${params}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const features = Array.isArray(json?.features) ? json.features : [];
+    if (features.length === 0) return [];
+
+    // Filter for parcels whose geometry actually contains the point.
+    // Envelope intersect is permissive — a neighboring parcel whose
+    // bbox grazes our point would otherwise sneak through.
+    const pt = turf.point([lng, lat]);
+    const containing = features.filter((f: any) => {
+      try {
+        return turf.booleanPointInPolygon(pt, f as any);
+      } catch {
+        return false;
+      }
+    });
+
+    // Sort by acreage descending — when boundary noise puts multiple
+    // parcels at the same point, the larger tract is usually right.
+    containing.sort(
+      (a: any, b: any) =>
+        (Number(b.properties?.gis_area) || 0) - (Number(a.properties?.gis_area) || 0)
+    );
+
+    console.log(
+      `[autoLocate] queryParcelAtPoint (${lat.toFixed(5)},${lng.toFixed(5)}) → ` +
+      `${features.length} envelope hits, ${containing.length} containing`
+    );
+    return containing;
+  } catch (e: any) {
+    console.warn('[autoLocate] queryParcelAtPoint threw:', e?.message);
     return [];
   }
 }
@@ -846,6 +978,14 @@ export type LocatableComp = {
   description?: string | null;
   address?: string | null;
   aerialImage?: string | null;
+  // Optional pre-extracted coordinates. Per the smart-lat/lng rule
+  // (commit 59e09e2): these are populated ONLY when the AI saw
+  // coordinates explicitly printed in the source doc — never
+  // hallucinated from prose. When set, we use them as the STARTING
+  // POINT for a TxGIO point-in-polygon lookup, not as the final pin.
+  // The autolocate result is still grounded in real parcel data.
+  latitude?: number | null;
+  longitude?: number | null;
 };
 
 export async function autoLocateFromMetadata(
@@ -865,6 +1005,86 @@ export async function autoLocateFromMetadata(
   const ownerSignals = [comp.grantee, comp.grantor, comp.property_name].filter(
     (s): s is string => typeof s === 'string' && s.trim().length > 0
   );
+
+  // ── STEP -1 (NEW): Reverse-lookup parcel at printed-in-doc coords ────
+  // When the comp has lat/lng populated, those coords came from the AI
+  // extraction reading them VERBATIM from the source doc — Stouffer-
+  // style appraisals print "Geographic Location: 30.10; -98.59" next to
+  // each comp. The smart-lat/lng prompt rule (commit 59e09e2) guarantees
+  // they were NOT inferred from prose or hallucinated from city names.
+  //
+  // This step is the most direct signal we have:
+  //   1. Query TxGIO for the parcel containing the printed point
+  //   2. Back-check ownership against the comp's grantee
+  //   3. Return with confidence ranked by ownership match
+  //
+  // If TxGIO returns nothing at the point (rare — usually unmapped
+  // tracts or off-by-50m coord precision), fall through to the
+  // existing pipeline so owner search still gets a shot. The lat/lng
+  // is treated as a starting hint, NOT as the authoritative pin —
+  // every result still grounds in real parcel data.
+  const hasPrintedCoords =
+    Number.isFinite(comp.latitude as number) &&
+    Number.isFinite(comp.longitude as number) &&
+    Math.abs(comp.latitude as number) > 0.0001 &&
+    Math.abs(comp.longitude as number) > 0.0001;
+  if (hasPrintedCoords) {
+    const lat = comp.latitude as number;
+    const lng = comp.longitude as number;
+    const parcelsAtPoint = await queryParcelAtPoint(lat, lng);
+    if (parcelsAtPoint.length > 0) {
+      const parcel = parcelsAtPoint[0]; // largest if multiple
+      const txgioOwner = (parcel.properties?.owner_name || '').toString();
+      const txgioAcres = Number(parcel.properties?.gis_area) || 0;
+
+      // Back-check ownership against the comp's grantee/grantor.
+      // Match → HIGH confidence (printed coords + verified owner).
+      // No match → MEDIUM with a verify-this note. Still better than
+      // falling through, because at least the pin is on a real parcel.
+      const ownerMatchSignal = ownerSignals.find((s) => ownerMatches(txgioOwner, s));
+
+      if (ownerMatchSignal) {
+        return featureToResult(
+          parcel,
+          'high',
+          `Printed coords + owner verified: parcel at (${lat.toFixed(4)}, ${lng.toFixed(4)}) ` +
+            `owned by "${txgioOwner}" (matches "${ownerMatchSignal}"), ${txgioAcres.toFixed(1)} ac.`
+        );
+      }
+
+      // No ownership tokens to back-check (MLS sold sheet with no
+      // grantee) → still a confident pin since the coords are real
+      // and came from the doc. Caller can verify visually.
+      if (ownerSignals.length === 0) {
+        return featureToResult(
+          parcel,
+          'medium',
+          `Printed coords: parcel at (${lat.toFixed(4)}, ${lng.toFixed(4)}) ` +
+            `owned by "${txgioOwner}", ${txgioAcres.toFixed(1)} ac. No grantee to verify against.`
+        );
+      }
+
+      // Owner mismatch — we have grantee but TxGIO record doesn't show
+      // it. Could be a stale TxGIO record (recent sale not yet
+      // propagated), or our coords landed on a neighboring tract.
+      // Return MEDIUM with a verify note rather than HIGH — broker
+      // should eyeball before trusting the pin.
+      return featureToResult(
+        parcel,
+        'medium',
+        `Printed coords: pinned to parcel at (${lat.toFixed(4)}, ${lng.toFixed(4)}) ` +
+          `owned by "${txgioOwner}", ${txgioAcres.toFixed(1)} ac — owner does NOT match ` +
+          `comp grantee "${ownerSignals[0]}". Possibly stale TxGIO data; verify visually.`
+      );
+    }
+    // No parcel at the printed point → fall through to owner search.
+    // This happens when the printed coords are off by more than 50m
+    // or land on an unmapped tract. Owner search may still succeed.
+    console.log(
+      `[autoLocate] Printed coords (${lat.toFixed(4)}, ${lng.toFixed(4)}) ` +
+      `landed in no parcel — falling through to owner search`
+    );
+  }
 
   // ── STEP 0 (NEW, behind feature flag): Owner-first strategy ──────────
   // Search TxGIO by owner name + county, looking for an acreage match.
@@ -893,10 +1113,19 @@ export async function autoLocateFromMetadata(
   }
 
   if (candidates.length === 1) {
-    return featureToResult(
+    // Unique acreage candidate in county. Back-check ownership before
+    // returning HIGH — without the check, a same-county neighbor with
+    // similar acreage could match and we'd never know. Owner mismatch
+    // demotes to MEDIUM with a verify note (parcel match is still likely
+    // correct — could be stale TxGIO data — but broker should eyeball).
+    return applyOwnerBackCheck(
+      featureToResult(
+        candidates[0],
+        'high',
+        `Unique parcel at ${candidates[0].properties?.gis_area?.toFixed?.(2) ?? '?'} ac in ${counties.join('/')} County.`
+      ),
       candidates[0],
-      'high',
-      `Unique parcel at ${candidates[0].properties?.gis_area?.toFixed?.(2) ?? '?'} ac in ${counties.join('/')} County.`
+      ownerSignals
     );
   }
 
@@ -989,10 +1218,17 @@ export async function autoLocateFromMetadata(
     maxAcres
   );
   if (spatialCandidates.length === 1) {
-    return featureToResult(
+    // Same-bbox-same-acreage candidate. Back-check ownership before
+    // returning HIGH — geocoded search hints can land us in the
+    // right neighborhood but on the wrong parcel.
+    return applyOwnerBackCheck(
+      featureToResult(
+        spatialCandidates[0],
+        'high',
+        `Single parcel match near ${signals.search_hint} at ${spatialCandidates[0].properties?.gis_area?.toFixed?.(1)} ac.`
+      ),
       spatialCandidates[0],
-      'high',
-      `Single parcel match near ${signals.search_hint} at ${spatialCandidates[0].properties?.gis_area?.toFixed?.(1)} ac.`
+      ownerSignals
     );
   }
   if (spatialCandidates.length > 1) {
