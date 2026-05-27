@@ -185,3 +185,117 @@ export async function verifyParcelMatch(
     return null;
   }
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Aerial-vs-photo classifier
+// ──────────────────────────────────────────────────────────────────────
+//
+// extractLargestAerialPerPage() naively pulls the LARGEST embedded image
+// from each PDF page. For a typical Texas appraisal that's a satellite
+// aerial of the subject parcel — exactly what we want as the comp's
+// thumbnail. But for marketing flyers, MLS sold sheets, or appraisals
+// that lead with a hero shot of the ranch house, the largest image can
+// be:
+//
+//   - A terrestrial photo of a house, barn, or pasture (looks great in
+//     the PDF, useless as a "this is the parcel" thumbnail)
+//   - A logo, headshot, signature, or scanned cover sheet
+//   - A floor plan or schematic
+//
+// Attaching any of those as the comp's aerial gives the broker
+// confidently-wrong context — the report shows a house instead of the
+// land. We need a cheap binary gate: is this image actually an aerial
+// view of a parcel?
+//
+// GPT-4o-mini vision is the right tool. ~$0.0001 per image. A 5-page
+// appraisal classifies in ~3-5 seconds total in parallel; the cost is
+// rounding error against any other AI call we make.
+//
+// Conservative bias: when uncertain, return false. Better to attach NO
+// thumbnail than the wrong one — matches the "honest failure beats
+// confident wrong" principle from the autolocate work.
+
+const CLASSIFY_AERIAL_PROMPT = `You classify a single image as either an
+AERIAL view of a land parcel (suitable as a property thumbnail) or NOT.
+
+Return one word:
+
+  AERIAL — Top-down satellite or aerial photography of land. Trees,
+           pastures, fields, roads from above, parcel outlines, terrain
+           features visible from the sky. This is what we want.
+
+  PHOTO  — Terrestrial / ground-level photograph. Building exteriors,
+           interior shots, livestock, people, vehicles, fence lines from
+           ground perspective, landscape with horizon visible.
+
+  OTHER  — Logos, signatures, headshots, scanned cover pages, floor
+           plans, charts, marketing graphics, anything else that isn't
+           a top-down view of land.
+
+Be conservative — only return AERIAL when you are genuinely confident
+the image is a top-down view of land. When in doubt, return PHOTO or
+OTHER. Reply with a single word and nothing else.`;
+
+export type AerialClassification = 'AERIAL' | 'PHOTO' | 'OTHER';
+
+/**
+ * Classify a single image data URL as AERIAL / PHOTO / OTHER. Returns
+ * the classification string, or null if the call failed (caller should
+ * treat null as "unverified — don't use as thumbnail").
+ *
+ * Uses gpt-4o-mini with detail:'low' to keep cost minimal (~$0.0001).
+ */
+export async function classifyAerial(
+  imageDataUrl: string | null | undefined
+): Promise<AerialClassification | null> {
+  if (!imageDataUrl) return null;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 5,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: CLASSIFY_AERIAL_PROMPT },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Classify this image:' },
+            { type: 'image_url', image_url: { url: imageDataUrl, detail: 'low' as const } },
+          ],
+        },
+      ],
+    });
+    const raw = (completion.choices[0]?.message?.content || '').trim().toUpperCase();
+    // Tolerate slight variation in the model's output; first word wins.
+    const firstWord = raw.split(/\s+/)[0];
+    if (firstWord === 'AERIAL') return 'AERIAL';
+    if (firstWord === 'PHOTO') return 'PHOTO';
+    if (firstWord === 'OTHER') return 'OTHER';
+    // Unrecognized response — treat as unverified
+    console.warn(`classifyAerial: unrecognized response "${raw}"`);
+    return null;
+  } catch (e: any) {
+    console.error('classifyAerial failed:', e?.message);
+    return null;
+  }
+}
+
+/**
+ * Filter an array of candidate aerial images down to just the ones
+ * classified as AERIAL. Runs all classifications in parallel.
+ * Maintains the original ordering of survivors.
+ *
+ * Used by the import pipeline before attaching thumbnails to comps —
+ * keeps house photos and logos from sneaking into the comp record as
+ * "the parcel aerial."
+ */
+export async function filterAerialsByClassification<
+  T extends { dataUrl: string }
+>(candidates: T[]): Promise<T[]> {
+  if (candidates.length === 0) return [];
+  const classifications = await Promise.all(
+    candidates.map((c) => classifyAerial(c.dataUrl))
+  );
+  return candidates.filter((_, i) => classifications[i] === 'AERIAL');
+}
