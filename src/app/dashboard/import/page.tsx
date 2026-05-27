@@ -792,6 +792,54 @@ async function locateCompForImport(comp: any) {
   return geocodeAddressFallback(comp);
 }
 
+/**
+ * Aerial-vs-photo classification — server-side helper.
+ *
+ * Browser-side import flow can't call the OpenAI API directly (the
+ * key is server-only), so we POST the candidates to /api/classify-aerial
+ * which returns AERIAL / PHOTO / OTHER for each. Only AERIAL survivors
+ * get attached as comp thumbnails.
+ *
+ * Why this exists: extractLargestAerialPerPage() naively picks the
+ * largest embedded image per PDF page. For aerial-led appraisals
+ * that's right; for marketing flyers or MLS sheets it often grabs a
+ * house photo, headshot, logo, or floor plan. Attaching those as the
+ * comp's "aerial" gives the broker confidently-wrong context in the
+ * report. The classification step closes that gap.
+ *
+ * On API failure, we conservatively return ALL candidates (better to
+ * keep a possibly-wrong thumbnail than lose every aerial because of a
+ * transient classification outage). The user-facing visual verification
+ * still gates the wrong-thumbnail case via the "Looks right" /
+ * "Needs review" buttons.
+ *
+ * Cost: ~$0.0001 per image × ~5 pages = ~$0.0005 per PDF. Rounding error.
+ */
+async function filterAerialsByClassificationViaApi(
+  candidates: Array<{ page: number; dataUrl: string }>
+): Promise<Array<{ page: number; dataUrl: string }>> {
+  if (candidates.length === 0) return [];
+  try {
+    const res = await fetch('/api/classify-aerial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ images: candidates.map((c) => c.dataUrl) }),
+    });
+    if (!res.ok) {
+      console.warn(`classify-aerial HTTP ${res.status} — keeping all candidates`);
+      return candidates;
+    }
+    const data = await res.json();
+    const classifications: Array<string | null> = Array.isArray(data?.classifications)
+      ? data.classifications
+      : [];
+    return candidates.filter((_, i) => classifications[i] === 'AERIAL');
+  } catch (e: any) {
+    console.warn('classify-aerial threw — keeping all candidates:', e?.message);
+    return candidates;
+  }
+}
+
 // ─── Aerial attribution (shared between single-shot + chunked paths) ──
 //
 // Past failure mode: extractFromChunkedPdf (the >5-page path) never
@@ -1242,6 +1290,23 @@ export default function ImportPage() {
       return { kind: 'render_failed', message: 'no pages rendered' };
     }
 
+    // Kick off aerial extraction in parallel with the AI comp-extraction
+    // call. Both walk the PDF; pdfjs caches the parse so the second
+    // open is cheap. The network/AI call is the dominant cost anyway.
+    //
+    // Previously the batch path (this function) skipped aerial extraction
+    // entirely — only single-file uploads got thumbnails. Wiring it in
+    // here closes that gap so multi-file imports get the same aerial
+    // attribution + visual verification as single-file imports.
+    //
+    // The classification step (AERIAL / PHOTO / OTHER) runs AFTER
+    // extraction completes; we don't want to start classifying images
+    // we might not need.
+    const aerialsPromise: Promise<Array<{ page: number; dataUrl: string }>> =
+      file.type === 'application/pdf'
+        ? extractLargestAerialPerPage(file).catch(() => [])
+        : Promise.resolve([]);
+
     const aggressivePreamble = retryAggressive
       ? `IMPORTANT: My first attempt to extract this document returned no comps. ` +
         `Look again — this is almost certainly a Type A single-property sale ` +
@@ -1306,6 +1371,30 @@ export default function ImportPage() {
             _auto_located_confidence: located.match_confidence,
           } as ExtractedComp;
         }
+      }
+
+      // Aerial attribution — pulls candidate aerials from the source
+      // PDF, runs each through the photo-vs-aerial classifier, and
+      // attaches only the verified AERIAL images to the matching comp.
+      // House photos, logos, headshots, floor plans, etc. get dropped
+      // here rather than landing in the DB as the comp's thumbnail.
+      try {
+        const candidatesPerPage = await aerialsPromise;
+        if (candidatesPerPage.length > 0) {
+          const verified = await filterAerialsByClassificationViaApi(candidatesPerPage);
+          console.log(
+            `[batch] aerials: ${candidatesPerPage.length} candidates → ${verified.length} verified AERIAL`
+          );
+          if (verified.length > 0) {
+            const aerialForAttach: string | Array<{ page: number; dataUrl: string }> =
+              verified.length === 1 ? verified[0].dataUrl : verified;
+            attachAerialsToComps(comps, aerialForAttach);
+          }
+        }
+      } catch (e: any) {
+        // Aerial classification failure shouldn't kill the import —
+        // comps just go in without thumbnails. Logged for diagnosis.
+        console.warn('[batch] aerial classify step failed:', e?.message);
       }
 
       return { kind: 'ok', comps };
@@ -1798,7 +1887,19 @@ export default function ImportPage() {
     // Attach the per-page aerials that were extracted in parallel with
     // the AI chunks. Same helper the ≤5-page path uses, so improvements
     // to attribution heuristics apply everywhere automatically.
-    const aerialsPerPage = await aerialsPromise;
+    //
+    // Photo-vs-aerial classification before attribution — drops house
+    // photos, headshots, logos, floor plans before they sneak in as the
+    // comp's "aerial." On classifier failure we keep all candidates
+    // (visual verification UX still gates wrong thumbnails downstream).
+    const aerialsRaw = await aerialsPromise;
+    const aerialsPerPage =
+      aerialsRaw.length > 0 ? await filterAerialsByClassificationViaApi(aerialsRaw) : aerialsRaw;
+    if (aerialsRaw.length !== aerialsPerPage.length) {
+      console.log(
+        `[chunked] aerials: ${aerialsRaw.length} candidates → ${aerialsPerPage.length} verified AERIAL`
+      );
+    }
     const sourceAerialForAttribution: string | null | Array<{ page: number; dataUrl: string }> =
       aerialsPerPage.length === 0
         ? null
@@ -1920,10 +2021,26 @@ export default function ImportPage() {
         //   - Single-comp result → attaches the best aerial (largest)
         //   - Multi-comp result → attributes each aerial to the comp
         //     whose citations reference that page
-        const [images, sourceAerialPages] = await Promise.all([
+        const [images, sourceAerialCandidates] = await Promise.all([
           pdfToImages(file, { scale: 1.5, maxPages: 60 }),
           extractLargestAerialPerPage(file).catch(() => [] as Array<{ page: number; dataUrl: string }>),
         ]);
+        // Filter the candidate aerials through the photo-vs-aerial
+        // classifier. Drops house photos, headshots, logos, floor
+        // plans, etc. before they sneak into the comp record. The
+        // filter falls back to "keep all" on classification failure so
+        // we never silently drop every aerial because of a transient
+        // outage — the visual verification UX still gates wrong
+        // thumbnails downstream.
+        const sourceAerialPages =
+          sourceAerialCandidates.length > 0
+            ? await filterAerialsByClassificationViaApi(sourceAerialCandidates)
+            : sourceAerialCandidates;
+        if (sourceAerialCandidates.length !== sourceAerialPages.length) {
+          console.log(
+            `[single] aerials: ${sourceAerialCandidates.length} candidates → ${sourceAerialPages.length} verified AERIAL`
+          );
+        }
         // Pass the per-page array if we have multiple aerials, OR the
         // single best (largest) when only one page yielded an image —
         // keeps the single-comp single-aerial fast path working.
