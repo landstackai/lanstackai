@@ -7,7 +7,7 @@ import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -260,6 +260,13 @@ export default function MapPage() {
   const [subjectOverviewNotes, setSubjectOverviewNotes] = useState<string>('');
   const [subjectOverviewProse, setSubjectOverviewProse] = useState<string>('');
   const [subjectOverviewGenerating, setSubjectOverviewGenerating] = useState(false);
+
+  // Marketing PDF download — when the broker clicks Download Marketing PDF,
+  // we flip this on so the button shows a spinner while react-pdf
+  // renders server-side (~5-15s on a cold start). The PDF route streams
+  // back a binary application/pdf; we kick off the file save via an
+  // anchor element to preserve the route's Content-Disposition filename.
+  const [pdfDownloading, setPdfDownloading] = useState(false);
 
   // Share + collaboration state for the CMA workspace right panel.
   const [shareCopied, setShareCopied] = useState(false);
@@ -2015,6 +2022,65 @@ export default function MapPage() {
       setTimeout(() => setShareCopied(false), 2500);
     } catch {
       toast(url, { duration: 8000 });
+    }
+  }, [viewingCMA]);
+
+  // Download the marketing-grade PDF for the open CMA. Calls
+  // /api/cma/[id]/pdf which renders the six-page Borgelt-style report
+  // via @react-pdf/renderer server-side and streams back a binary PDF.
+  // We trigger the file save via an anchor click so the browser
+  // respects the route's Content-Disposition filename.
+  //
+  // Why fetch+blob instead of <a href> directly: the fetch path gives
+  // us a spinner state, lets us surface render errors as toasts, and
+  // doesn't navigate the broker away from the workspace on success.
+  const downloadMarketingPdf = useCallback(async () => {
+    const cmaId = viewingCMA?.id;
+    if (!cmaId) {
+      toast.error('No CMA open');
+      return;
+    }
+    setPdfDownloading(true);
+    try {
+      const res = await fetch(`/api/cma/${cmaId}/pdf`);
+      if (!res.ok) {
+        // PDF route returns JSON on error. Surface the actual detail
+        // (server-side error message) in the toast so we can see what
+        // failed — generic "PDF render failed" is useless for debugging.
+        let detail = '';
+        try {
+          const err = await res.json();
+          detail = err?.detail || err?.error || '';
+          // Log the full JSON to console for deeper inspection.
+          // eslint-disable-next-line no-console
+          console.error('[pdf] download failed', err);
+        } catch {}
+        toast.error(detail ? `PDF: ${detail}` : 'PDF render failed', { duration: 8000 });
+        return;
+      }
+      const blob = await res.blob();
+
+      // Pull filename out of the Content-Disposition header so we
+      // preserve the server-built "Landstack CMA - <Subject> - <Date>.pdf"
+      // naming the route uses.
+      const cd = res.headers.get('Content-Disposition') || '';
+      const match = cd.match(/filename="([^"]+)"/);
+      const filename = match?.[1] || `Landstack CMA - ${Date.now()}.pdf`;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      toast.success('Marketing PDF downloaded');
+    } catch (e: any) {
+      toast.error(e?.message || 'PDF download failed');
+    } finally {
+      setPdfDownloading(false);
     }
   }, [viewingCMA]);
 
@@ -4467,6 +4533,30 @@ export default function MapPage() {
                 >
                   <Users size={12} />
                   Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
+                </button>
+                {/* Marketing-grade printable PDF — server-rendered via
+                    @react-pdf/renderer (/api/cma/[id]/pdf). Renders the
+                    six-page Borgelt-style CMA: cover + subject overview +
+                    comp table + annotated comp map + opinion of value
+                    + methodology. ~5-15s on cold start, hence the
+                    explicit spinner state. */}
+                <button
+                  onClick={downloadMarketingPdf}
+                  disabled={pdfDownloading || !viewingCMA?.id}
+                  className="col-span-2 py-2 border border-gold/40 bg-gold/10 hover:bg-gold/15 text-xs font-bold text-gold-2 rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ borderColor: 'rgba(182,138,53,0.4)', backgroundColor: 'rgba(182,138,53,0.10)', color: '#8C6A29' }}
+                >
+                  {pdfDownloading ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      Building PDF…
+                    </>
+                  ) : (
+                    <>
+                      <Download size={12} />
+                      Download Marketing PDF
+                    </>
+                  )}
                 </button>
                 <button
                   onClick={exitCmaWorkspace}

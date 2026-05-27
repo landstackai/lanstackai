@@ -6,7 +6,7 @@ import { CMA, Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
-import { MapPin, ThumbsUp, ThumbsDown, HelpCircle, Layers, ArrowUpDown, ChevronDown, ExternalLink, Printer, MessageCircle, X } from 'lucide-react';
+import { MapPin, ThumbsUp, ThumbsDown, HelpCircle, Layers, ArrowUpDown, ChevronDown, ExternalLink, Printer, MessageCircle, X, Download, Loader2 } from 'lucide-react';
 import { FeatureChip, isStrongFeature } from '@/components/comp/FeatureChip';
 import mapboxgl from 'mapbox-gl';
 
@@ -53,6 +53,51 @@ export default function ClientReport({ params }: ClientReportProps) {
   // sit one click away for anyone who wants to verify the math. Reduces
   // first-glance noise from ~20 dollar amounts on the panel to ~5.
   const [perAcreDetailOpen, setPerAcreDetailOpen] = useState(false);
+
+  // Marketing PDF download — the client can grab the six-page
+  // printable CMA from the share report. Hits the public share PDF
+  // route (/api/share/[token]/pdf) which generates the same PDF the
+  // broker gets, minus the broker's email/phone (anon profiles RLS
+  // only exposes name + brokerage). ~5-15s on serverless cold start,
+  // hence the explicit spinner state.
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+
+  // Download the marketing PDF. Public share route returns the same
+  // six-page CMA the broker gets (minus broker email/phone). Triggers
+  // the file save via an anchor element so the browser preserves the
+  // server-set filename ("Landstack CMA - <Subject> - <Date>.pdf").
+  const downloadMarketingPdf = async () => {
+    setPdfDownloading(true);
+    try {
+      const res = await fetch(`/api/share/${params.token}/pdf`);
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const err = await res.json();
+          detail = err?.detail || err?.error || '';
+        } catch {}
+        alert(detail || 'PDF download failed. Please try again.');
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const match = cd.match(/filename="([^"]+)"/);
+      const filename = match?.[1] || `Landstack CMA - ${Date.now()}.pdf`;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(e?.message || 'PDF download failed. Please try again.');
+    } finally {
+      setPdfDownloading(false);
+    }
+  };
 
   const toggleExpanded = (id: string) => {
     setExpandedCompIds((prev) => {
@@ -628,7 +673,7 @@ export default function ClientReport({ params }: ClientReportProps) {
                     map. Calm white card on cream, vault-style restraint —
                     color identity comes from the small red dot, not a tinted
                     background. */}
-                <div className="p-4 border-b border-beige">
+                <div className="p-4 border-b border-beige space-y-3">
                   <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
                     <div className="flex items-center gap-2">
                       <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
@@ -643,6 +688,35 @@ export default function ClientReport({ params }: ClientReportProps) {
                       {properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}
                     </p>
                   </div>
+
+                  {/* Download Marketing PDF — the client can grab the
+                      printable six-page CMA. Gold accent matches the
+                      PDF's brand palette so the visual handshake feels
+                      intentional when they open the file. Same content
+                      as the broker's PDF, minus the broker's
+                      email/phone (anon profiles RLS). */}
+                  <button
+                    onClick={downloadMarketingPdf}
+                    disabled={pdfDownloading}
+                    className="w-full py-2.5 px-3 border rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: 'rgba(182,138,53,0.45)',
+                      backgroundColor: 'rgba(182,138,53,0.12)',
+                      color: '#8C6A29',
+                    }}
+                  >
+                    {pdfDownloading ? (
+                      <>
+                        <Loader2 size={13} className="animate-spin" />
+                        Building PDF…
+                      </>
+                    ) : (
+                      <>
+                        <Download size={13} />
+                        Download Marketing PDF
+                      </>
+                    )}
+                  </button>
                 </div>
 
                 {/* Per-acre average cards moved BELOW the Suggested List
