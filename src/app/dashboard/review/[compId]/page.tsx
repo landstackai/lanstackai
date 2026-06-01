@@ -39,6 +39,7 @@ import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { buildOwnerSearchChips } from '@/lib/utils/abbreviateOwner';
 import { useMapHover, escHtml } from '@/lib/hooks/useMapHover';
 import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
+import { findDuplicateClusters } from '@/lib/utils/findDuplicates';
 import toast from 'react-hot-toast';
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
@@ -108,6 +109,14 @@ export default function ReviewPage() {
   const [comp, setComp] = useState<Comp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Possible-duplicate cluster mates — comps elsewhere in the vault
+  // that match THIS comp under the locked dedup rule (same county +
+  // acreage ±1% + price ±0.1% + owner overlap + sale_date ±30 days,
+  // skip missing fields). Loaded after the main comp loads. When
+  // non-empty we surface a banner above the side panel with merge /
+  // dismiss actions so the broker doesn't re-save a duplicate.
+  const [dupClusterMates, setDupClusterMates] = useState<Comp[]>([]);
+  const [merging, setMerging] = useState(false);
   // Aerial panel collapses to a small toggle button after verification —
   // see DESIGN_DECISIONS §5 (aerial as verification tool, not permanent UI).
   const [aerialCollapsed, setAerialCollapsed] = useState(false);
@@ -268,6 +277,54 @@ export default function ReviewPage() {
       // Default the aerial panel to expanded when the comp needs review,
       // collapsed when it's already verified. Broker can toggle either way.
       setAerialCollapsed(!compData.needs_location_review);
+
+      // ── Possible-duplicate detection ────────────────────────────
+      // Fetch every other comp this user can see and run the cluster
+      // detector to find ones that look like the same transaction.
+      // Filters out THIS comp (self) before clustering. Respects the
+      // user's sticky dismissals from localStorage so we don't keep
+      // nagging about pairs they already cleared.
+      try {
+        let dismissed: Set<string> = new Set();
+        try {
+          const raw = localStorage.getItem('landstack:dismissedDupePairs');
+          if (raw) {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr)) dismissed = new Set(arr);
+          }
+        } catch {}
+        const { data: allComps } = await supabase
+          .from('comps')
+          .select('id, county, acres, sale_price, sale_date, grantor, grantee, property_name, latitude, longitude, needs_location_review, confidence, created_at, address, description, ppa_land_only, price_per_acre, improvements_value, improvement_value, improvement_source, has_improvements, parcel_id');
+        if (cancelled) return;
+        if (allComps && allComps.length > 0) {
+          const clusters = findDuplicateClusters(
+            allComps.map((c: any) => ({
+              id: c.id,
+              county: c.county,
+              acres: c.acres,
+              sale_price: c.sale_price,
+              sale_date: c.sale_date,
+              grantor: c.grantor,
+              grantee: c.grantee,
+            })),
+            dismissed
+          );
+          // Find the cluster containing THIS comp and pull out the
+          // other members.
+          const myCluster = clusters.find((cl) => cl.ids.includes(compData.id));
+          if (myCluster) {
+            const others = allComps.filter(
+              (c: any) => myCluster.ids.includes(c.id) && c.id !== compData.id
+            ) as unknown as Comp[];
+            setDupClusterMates(others);
+          }
+        }
+      } catch (e: any) {
+        // Dedup check is a nice-to-have on the review page — if it fails,
+        // the broker can still do the review. Just don't crash the page.
+        console.warn('[review] dup cluster scan failed:', e?.message);
+      }
     })();
     return () => { cancelled = true; };
   }, [params?.compId, supabase]);
@@ -977,6 +1034,109 @@ export default function ReviewPage() {
     toast.success('Comp deleted');
     router.push('/dashboard/vault');
   }, [comp, supabase, router]);
+
+  // ── Merge this comp INTO an existing vault comp ──────────────────
+  // Used by the duplicate banner. The "target" comp (the verified
+  // vault row the broker picked) wins. We back-fill any null fields
+  // on the target from this comp's values — preserves the better
+  // data from each side without losing anything — then delete THIS
+  // comp and navigate back to the vault.
+  //
+  // Why target wins on conflict (both non-null but different): the
+  // verified row was already triaged and trusted by the broker. The
+  // unverified candidate likely came in fresh from AI extraction.
+  // Trusting the verified value is the conservative default; the
+  // broker can still edit the target afterward if needed.
+  const handleMergeInto = useCallback(async (target: Comp) => {
+    if (!comp || !target || merging) return;
+    setMerging(true);
+    try {
+      // Field-level best-wins for fields where target is null AND
+      // this comp has a value. Lat/lng/geometry only fill in when
+      // BOTH are null on the target — the verified row has a real
+      // pin we shouldn't overwrite. Typed as string[] not keyof Comp
+      // because some optional schema columns aren't in the Comp type
+      // surface yet (improvement_value singular, has_improvements,
+      // best_use, etc.) but exist in the DB and are safe to back-fill.
+      const fillIfNull = (key: string) => {
+        const tVal = (target as any)[key];
+        const cVal = (comp as any)[key];
+        const targetEmpty = tVal == null || tVal === '';
+        const candidateHasValue = cVal != null && cVal !== '';
+        return targetEmpty && candidateHasValue ? cVal : undefined;
+      };
+      const fields: Record<string, any> = {};
+      const candidateFields: string[] = [
+        'address', 'city', 'description', 'sale_date', 'sale_price',
+        'acres', 'price_per_acre', 'ppa_land_only', 'improvements_value',
+        'improvement_value', 'improvement_source', 'has_improvements',
+        'grantor', 'grantee', 'property_name', 'source_url',
+        'aerial_image', 'listing_thumbnail', 'water', 'road_frontage',
+        'dev_potential', 'best_use', 'topography', 'minerals_sold',
+        'ag_exemption', 'flood_plain_pct', 'flood_plain', 'wildlife_notes',
+        'irrigation', 'improvements_notes',
+      ];
+      for (const k of candidateFields) {
+        const v = fillIfNull(k);
+        if (v !== undefined) fields[k] = v;
+      }
+
+      if (Object.keys(fields).length > 0) {
+        const { error: updateErr } = await supabase
+          .from('comps')
+          .update(fields)
+          .eq('id', target.id);
+        if (updateErr) {
+          toast.error(`Merge failed: ${updateErr.message}`);
+          setMerging(false);
+          return;
+        }
+      }
+
+      // Delete THIS comp now that target absorbed the new data.
+      const { error: delErr } = await supabase.from('comps').delete().eq('id', comp.id);
+      if (delErr) {
+        toast.error(`Merge update succeeded but delete failed: ${delErr.message}`);
+        setMerging(false);
+        return;
+      }
+
+      const filledCount = Object.keys(fields).length;
+      toast.success(
+        filledCount > 0
+          ? `Merged — ${filledCount} field${filledCount === 1 ? '' : 's'} filled into "${target.property_name || 'vault comp'}"`
+          : `Removed as duplicate of "${target.property_name || 'vault comp'}"`
+      );
+      // Navigate to the target comp's review page so the broker can
+      // verify the merge looks right.
+      router.push(`/dashboard/review/${target.id}`);
+    } catch (e: any) {
+      toast.error(`Merge failed: ${e?.message || 'unknown error'}`);
+      setMerging(false);
+    }
+  }, [comp, merging, supabase, router]);
+
+  // Dismiss a possible-duplicate pair — broker says "these are
+  // actually different properties." Sticky via localStorage so the
+  // same pair never re-suggests. Pairs with each cluster mate.
+  const handleDismissDuplicates = useCallback(() => {
+    if (!comp || dupClusterMates.length === 0) return;
+    try {
+      const raw = localStorage.getItem('landstack:dismissedDupePairs');
+      const existing: string[] = raw ? JSON.parse(raw) : [];
+      const next = new Set(existing);
+      for (const mate of dupClusterMates) {
+        const a = comp.id, b = mate.id;
+        const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+        next.add(key);
+      }
+      localStorage.setItem('landstack:dismissedDupePairs', JSON.stringify(Array.from(next)));
+      setDupClusterMates([]);
+      toast.success("Got it — won't suggest these as duplicates again");
+    } catch {
+      toast.error('Could not save dismissal preference');
+    }
+  }, [comp, dupClusterMates]);
 
   // ── Stage B: Reselect parcels mode ──────────────────────────────────
   // Broker enters this mode to fix a wrong cluster — click parcels on
@@ -1810,6 +1970,88 @@ export default function ReviewPage() {
               {comp.county}{comp.state ? `, ${comp.state}` : ''}
             </p>
           </div>
+
+          {/* ─── Possible duplicate banner ──────────────────────────
+              Surfaces when THIS comp is part of a duplicate cluster
+              (per the locked rule). Lists each cluster mate with a
+              "Merge into" button so the broker can collapse the dupe
+              instead of accidentally saving a second copy. Verified
+              vault comps highlighted with a green check so the broker
+              knows which is the canonical record. The "These are
+              different" dismissal is sticky in localStorage — the
+              same pair never re-suggests once cleared. */}
+          {dupClusterMates.length > 0 && (() => {
+            const verifiedMates = dupClusterMates.filter((m) => !m.needs_location_review);
+            return (
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 space-y-2.5">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle size={14} className="text-orange-600 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-xs font-semibold text-orange-900">
+                      Possible duplicate of {dupClusterMates.length === 1 ? 'an existing comp' : `${dupClusterMates.length} existing comps`} in your vault
+                    </p>
+                    <p className="text-[11px] text-orange-800 mt-0.5">
+                      Same county, acreage, price{verifiedMates.length > 0 ? ' — one is already verified' : ''}. Save anyway only if these are different sales.
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  {dupClusterMates.map((mate) => {
+                    const isVerified = !mate.needs_location_review;
+                    return (
+                      <div
+                        key={mate.id}
+                        className="bg-white border border-orange-200 rounded p-2 flex items-center gap-2"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            {isVerified && (
+                              <Check size={11} className="text-emerald-600 flex-shrink-0" />
+                            )}
+                            <span className="text-xs font-semibold text-ink truncate">
+                              {mate.property_name || 'Untitled comp'}
+                            </span>
+                            {isVerified && (
+                              <span className="inline-flex items-center px-1 py-0 rounded text-[9px] font-medium bg-emerald-100 text-emerald-800 flex-shrink-0">
+                                In vault
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-ink-2 truncate">
+                            {mate.county || '—'}
+                            {mate.acres ? ` · ${formatAcres(mate.acres)}` : ''}
+                            {mate.sale_price ? ` · ${formatCurrency(mate.sale_price)}` : ''}
+                            {mate.sale_date ? ` · ${mate.sale_date}` : ''}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => router.push(`/dashboard/review/${mate.id}`)}
+                          className="text-[10px] font-medium text-ink-2 hover:text-ink underline-offset-2 hover:underline whitespace-nowrap"
+                          title="View this comp"
+                        >
+                          View
+                        </button>
+                        <button
+                          onClick={() => handleMergeInto(mate)}
+                          disabled={merging}
+                          className="text-[10px] font-semibold text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 px-2 py-1 rounded whitespace-nowrap"
+                          title="Merge this comp's data into the target, then delete this row"
+                        >
+                          {merging ? 'Merging…' : 'Merge into'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={handleDismissDuplicates}
+                  className="text-[11px] text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                >
+                  These are different properties
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Reselect Mode + Draw Mode banners moved down to the
               "Workflow section" (under Grantor/Grantee). Subject info,

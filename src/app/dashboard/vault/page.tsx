@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Comp, CompFilters } from '@/types';
-import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion, Sparkles, X } from 'lucide-react';
+import { Search, Filter, Grid, List, SlidersHorizontal, Plus, FileText, ArrowUp, ArrowDown, Edit, AlertTriangle, Clock, MapPinOff, ChevronDown, ChevronUp, ShieldQuestion, Sparkles, X, Check } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { reverseGeocodeCity } from '@/lib/utils/reverseGeocode';
 import CompCard from '@/components/comp/CompCard';
@@ -1356,22 +1356,55 @@ export default function VaultPage() {
                                 Not duplicates
                               </button>
                             </div>
+                            {/* Mixed-cluster note — surfaces when the
+                                cluster contains at least one verified
+                                vault comp alongside needs-review ones.
+                                Tells the broker the canonical record
+                                already exists so the right action is
+                                usually merge-into-vault, not "review and
+                                save another copy." */}
+                            {(() => {
+                              const verifiedCount = members.filter(
+                                (m) => classifyReview(m) === null
+                              ).length;
+                              const reviewCount = members.length - verifiedCount;
+                              if (verifiedCount > 0 && reviewCount > 0) {
+                                return (
+                                  <div className="px-5 pb-2 -mt-1 text-[11px] text-ink-2 italic">
+                                    Mixed cluster — {verifiedCount} verified vault comp{verifiedCount === 1 ? '' : 's'} + {reviewCount} needs review. Open a needs-review row to merge it into the verified record.
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
                             <table className="w-full">
                               <tbody>
                                 {members.map((c) => {
                                   const r = classifyReview(c);
+                                  const isVerified = r === null;
                                   const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
                                   return (
                                     <tr
                                       key={c.id}
                                       onClick={() => router.push(`/dashboard/review/${c.id}`)}
-                                      className="border-t border-beige/60 hover:bg-orange-50/60 cursor-pointer transition-colors"
+                                      className={`border-t border-beige/60 hover:bg-orange-50/60 cursor-pointer transition-colors ${
+                                        isVerified ? 'bg-emerald-50/40' : ''
+                                      }`}
                                     >
                                       <td className="py-2.5 pl-8 w-7">
-                                        {reviewIcon(r?.icon || 'gray')}
+                                        {isVerified ? (
+                                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                        ) : (
+                                          reviewIcon(r?.icon || 'gray')
+                                        )}
                                       </td>
                                       <td className="py-2.5 px-2 text-sm text-ink font-semibold">
                                         {c.property_name || `${compCounty} comp`}
+                                        {isVerified && (
+                                          <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800">
+                                            In vault
+                                          </span>
+                                        )}
                                       </td>
                                       <td className="py-2.5 px-2 text-xs text-ink-2 whitespace-nowrap">
                                         {c.county || '—'} {c.acres ? `· ${formatAcres(c.acres)}` : ''}
@@ -1382,11 +1415,17 @@ export default function VaultPage() {
                                         {c.sale_date || 'no date'}
                                       </td>
                                       <td className="py-2.5 px-3 text-right whitespace-nowrap w-px">
+                                        {/* Verified rows get a muted
+                                            delete affordance so brokers
+                                            don't nuke their canonical
+                                            record while triaging dupes. */}
+                                        <div className={isVerified ? 'opacity-30 hover:opacity-100 transition-opacity' : ''}>
                                         <DeleteConfirmButton
                                           variant="icon"
-                                          title="Delete this comp"
+                                          title={isVerified ? 'Delete (verified vault comp)' : 'Delete this comp'}
                                           onConfirm={() => handleDeleteComp(c.id)}
                                         />
+                                        </div>
                                       </td>
                                     </tr>
                                   );
