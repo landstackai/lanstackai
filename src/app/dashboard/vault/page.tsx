@@ -13,6 +13,7 @@ import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import { useSearchParams } from 'next/navigation';
 import { formatPPA, formatAcres, formatCurrency } from '@/lib/utils';
 import { getRegionForCounty, getRegionsInDisplayOrder, UNASSIGNED_REGION } from '@/lib/utils/texasRegions';
+import { findDuplicateClusters, type DuplicateCluster } from '@/lib/utils/findDuplicates';
 import toast from 'react-hot-toast';
 
 // Heuristic city extractor — comps store free-text "address" (e.g.
@@ -151,6 +152,51 @@ export default function VaultPage() {
   // when there are items to review, closed when there aren't (handled in
   // the render — this state only stores the user's manual toggle).
   const [needsReviewOpen, setNeedsReviewOpen] = useState(true);
+
+  // Pairs the broker has explicitly marked as "not duplicates."
+  // Persists across reloads in localStorage so we don't keep nagging
+  // them about the same false positive. Key format:
+  // "smallerId|largerId" so dismissals are order-independent.
+  const [dismissedDupePairs, setDismissedDupePairs] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('landstack:dismissedDupePairs');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) setDismissedDupePairs(new Set(arr));
+      }
+    } catch {}
+  }, []);
+  const dismissPair = useCallback((idA: string, idB: string) => {
+    const key = idA < idB ? `${idA}|${idB}` : `${idB}|${idA}`;
+    setDismissedDupePairs((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      try {
+        localStorage.setItem('landstack:dismissedDupePairs', JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  }, []);
+  // For a cluster: dismiss every pair in it (broker said "these are
+  // all different properties"). Easier than asking them to dismiss
+  // each pair individually.
+  const dismissCluster = useCallback((ids: string[]) => {
+    setDismissedDupePairs((prev) => {
+      const next = new Set(prev);
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = ids[i], b = ids[j];
+          const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+          next.add(key);
+        }
+      }
+      try {
+        localStorage.setItem('landstack:dismissedDupePairs', JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  }, []);
 
   const router = useRouter();
 
@@ -1002,6 +1048,36 @@ export default function VaultPage() {
                 const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
                 return tb - ta;
               });
+
+            // ─── Duplicate clusters across the WHOLE vault ─────────────
+            // Scan EVERY comp, not just the needs-review subset — a comp
+            // already in the verified vault can still be the duplicate
+            // of a freshly-imported one. The broker needs to see both.
+            // Uses the locked rule: same county + acreage ±1% + price
+            // ±0.1% + (owner overlap OR no owner data) + (sale_date ±30
+            // days OR no date). Dismissed pairs are sticky via
+            // localStorage so we don't keep nagging.
+            const duplicateClusters: DuplicateCluster[] = findDuplicateClusters(
+              comps.map((c) => ({
+                id: c.id,
+                county: c.county,
+                acres: c.acres,
+                sale_price: c.sale_price,
+                sale_date: c.sale_date,
+                grantor: c.grantor,
+                grantee: c.grantee,
+              })),
+              dismissedDupePairs
+            );
+            // Set of comp ids that appear in ANY cluster — used to
+            // suppress the flat needs-review row for these comps so
+            // they don't render twice (once in the cluster, once in
+            // the flat list below).
+            const clusteredCompIds = new Set<string>(
+              duplicateClusters.flatMap((cl) => cl.ids)
+            );
+            // Lookup helper for cluster rendering — map id → comp.
+            const compsById = new Map<string, Comp>(comps.map((c) => [c.id, c]));
             const sortedBase = [...filtered].sort((a, b) => {
               const mul = sortDir === 'asc' ? 1 : -1;
               // Sort uses the same priority chain as the row render:
@@ -1225,14 +1301,124 @@ export default function VaultPage() {
             };
             return (
               <>
+                {/* ─── Possible duplicates section ─────────────────────
+                    Renders above the needs-review section because a
+                    duplicate is more actionable than a missing pin —
+                    fixing duplicates often dissolves several needs-
+                    review items at once (merge collapses 4 rows into 1
+                    that's already cleanly located).
+                    Each cluster is a group of comps that look like the
+                    same transaction under the locked dedup rule
+                    (county + acreage ±1% + price ±0.1% + owner overlap
+                    + sale_date ±30 days, skip-missing-field). The
+                    broker can merge the cluster into one canonical
+                    comp, OR mark "not duplicates" — which is sticky
+                    via localStorage so we don't re-suggest the pair. */}
+                {duplicateClusters.length > 0 && (
+                  <div className="bg-white border border-beige rounded-xl mb-4 overflow-hidden shadow-sm relative">
+                    <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500" />
+                    <div className="flex items-center gap-2.5 pl-5 pr-4 py-3.5 border-b border-beige">
+                      <div className="flex items-center justify-center w-6 h-6 bg-orange-100 rounded-full">
+                        <AlertTriangle size={12} className="text-orange-700" />
+                      </div>
+                      <span className="text-sm font-semibold text-ink">
+                        {duplicateClusters.length} possible duplicate {duplicateClusters.length === 1 ? 'cluster' : 'clusters'}
+                      </span>
+                      <span className="text-xs text-ink-2">
+                        — same county, same acreage, same price (±tolerances)
+                      </span>
+                    </div>
+                    <div className="divide-y divide-beige">
+                      {duplicateClusters.map((cluster) => {
+                        const members = cluster.ids
+                          .map((id) => compsById.get(id))
+                          .filter((c): c is Comp => Boolean(c));
+                        if (members.length < 2) return null;
+                        // Header line: a representative summary so the
+                        // broker sees what cluster they're looking at
+                        // at a glance ("234.22± ac in Gillespie · $5.30M").
+                        const rep = members[0];
+                        const acresText = rep.acres ? formatAcres(rep.acres) : '—';
+                        const priceText = rep.sale_price ? formatCurrency(rep.sale_price) : '—';
+                        const countyText = rep.county || '—';
+                        return (
+                          <div key={cluster.key} className="bg-orange-50/30">
+                            <div className="flex items-center justify-between gap-3 pl-5 pr-4 py-2.5">
+                              <div className="text-xs text-ink-2">
+                                <span className="font-semibold text-ink">{members.length} rows</span>
+                                {' · '}{acresText}{' · '}{countyText}{' · '}{priceText}
+                              </div>
+                              <button
+                                onClick={() => dismissCluster(cluster.ids)}
+                                className="text-[11px] text-ink-2 hover:text-ink underline-offset-2 hover:underline transition-colors"
+                                title="These are NOT duplicates — never suggest this group again"
+                              >
+                                Not duplicates
+                              </button>
+                            </div>
+                            <table className="w-full">
+                              <tbody>
+                                {members.map((c) => {
+                                  const r = classifyReview(c);
+                                  const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
+                                  return (
+                                    <tr
+                                      key={c.id}
+                                      onClick={() => router.push(`/dashboard/review/${c.id}`)}
+                                      className="border-t border-beige/60 hover:bg-orange-50/60 cursor-pointer transition-colors"
+                                    >
+                                      <td className="py-2.5 pl-8 w-7">
+                                        {reviewIcon(r?.icon || 'gray')}
+                                      </td>
+                                      <td className="py-2.5 px-2 text-sm text-ink font-semibold">
+                                        {c.property_name || `${compCounty} comp`}
+                                      </td>
+                                      <td className="py-2.5 px-2 text-xs text-ink-2 whitespace-nowrap">
+                                        {c.county || '—'} {c.acres ? `· ${formatAcres(c.acres)}` : ''}
+                                      </td>
+                                      <td className="py-2.5 px-2 text-xs text-ink/80 whitespace-nowrap">
+                                        {c.sale_price ? formatCurrency(c.sale_price) : '—'}
+                                        {' · '}
+                                        {c.sale_date || 'no date'}
+                                      </td>
+                                      <td className="py-2.5 px-3 text-right whitespace-nowrap w-px">
+                                        <DeleteConfirmButton
+                                          variant="icon"
+                                          title="Delete this comp"
+                                          onConfirm={() => handleDeleteComp(c.id)}
+                                        />
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* ─── Needs review section (collapsible) ──────────────
                     Surfaces comps that need attention — no pin, math
                     issues, low confidence — above the main vault list so
                     they don't get lost in a long-scroll. Sorted newest
                     first so the most recent imports route to triage
                     immediately. Click any row to open the per-comp
-                    review page. */}
-                {reviewComps.length > 0 && (
+                    review page. Rows that ALSO appear in a duplicate
+                    cluster (above) are suppressed here to avoid showing
+                    the same comp twice on the page. */}
+                {(() => {
+                  // Count only review comps NOT already shown in the
+                  // duplicate clusters section above, so the header
+                  // ("X properties need review") matches what the
+                  // broker actually sees in this list.
+                  const visibleReviewCount = reviewComps.filter(
+                    (c) => !clusteredCompIds.has(c.id)
+                  ).length;
+                  if (visibleReviewCount === 0) return null;
+                  return (
                   <div className="bg-white border border-beige rounded-xl mb-4 overflow-hidden shadow-sm relative">
                     {/* Amber left-edge accent — semantic alert color.
                         Slightly desaturated to fit the warm palette. */}
@@ -1247,7 +1433,7 @@ export default function VaultPage() {
                           <AlertTriangle size={12} className="text-amber-700" />
                         </div>
                         <span className="text-sm font-semibold text-ink">
-                          {reviewComps.length} {reviewComps.length === 1 ? 'property needs' : 'properties need'} review
+                          {visibleReviewCount} {visibleReviewCount === 1 ? 'property needs' : 'properties need'} review
                         </span>
                         <span className="text-xs text-ink-2">— click any row to fix</span>
                       </div>
@@ -1260,6 +1446,11 @@ export default function VaultPage() {
                             {reviewComps.map((c) => {
                               const r = classifyReview(c);
                               if (!r) return null;
+                              // Suppress rows that already appear in
+                              // the duplicate cluster section above —
+                              // showing the same comp twice on one page
+                              // is noise.
+                              if (clusteredCompIds.has(c.id)) return null;
                               const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
                               return (
                                 <tr
@@ -1302,7 +1493,8 @@ export default function VaultPage() {
                       </div>
                     )}
                   </div>
-                )}
+                  );
+                })()}
 
               <div className="bg-white border border-beige rounded-xl overflow-hidden shadow-sm">
                 {/* Table-card header bar — slim row above the column
