@@ -2368,6 +2368,49 @@ export default function MapPage() {
     );
   }, [viewingCMA]);
 
+  // Same write as saveSubjectFromParcels but accepts a raw geometry +
+  // total acres directly. Used by the Redraw Boundary path where the
+  // broker draws a freehand polygon (no parcel data to union from).
+  const saveSubjectFromGeometry = useCallback(
+    async (cmaId: string, geometry: any, totalAcres: number) => {
+      if (!geometry) {
+        toast.error('No boundary to save');
+        return;
+      }
+      // @ts-expect-error — turf v6.5 .d.ts not exposed
+      const turf = (await import('@turf/turf')) as any;
+      let lat: number | null = null;
+      let lng: number | null = null;
+      try {
+        const feat = geometry.type === 'Feature' ? geometry : { type: 'Feature', properties: {}, geometry };
+        const c = turf.centroid(feat);
+        lng = c.geometry.coordinates[0];
+        lat = c.geometry.coordinates[1];
+      } catch {}
+      const { error } = await supabase
+        .from('cmas')
+        .update({
+          subject_latitude: lat,
+          subject_longitude: lng,
+          subject_boundary_geojson: geometry.geometry || geometry,
+          ...(totalAcres > 0 ? { subject_acres: totalAcres } : {}),
+        })
+        .eq('id', cmaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success(`Subject boundary updated — ${totalAcres.toFixed(1)} ac`);
+      setSettingSubjectForCma(null);
+      resetParcelState();
+      setSheetMode('none');
+      // Refresh the CMA so the map re-renders with the new subject.
+      const { data } = await supabase.from('cmas').select('*').eq('id', cmaId).single();
+      if (data) setViewingCMA(data);
+    },
+    [supabase, resetParcelState]
+  );
+
   const saveSubjectFromParcels = useCallback(
     async (cmaId: string, parcels: ParcelFeature[]) => {
       if (parcels.length === 0) {
@@ -3598,9 +3641,27 @@ export default function MapPage() {
     setDrawingActive(false);
 
     setMapMode('view');
+
+    // If the broker is in subject-edit mode for an existing CMA,
+    // skip the Boundary Created sheet entirely and save the unioned
+    // geometry directly as the CMA's new subject. Same shortcut
+    // handleCreateBoundary already takes for parcel-only flows —
+    // applied here so the DRAW path works too. Without this, a
+    // freehand redraw of a subject boundary would land on the sheet
+    // and force the broker to click "Use as CMA Subject" (which
+    // creates a NEW CMA, not updates the current one).
+    if (settingSubjectForCma) {
+      saveSubjectFromGeometry(
+        settingSubjectForCma,
+        merged?.geometry || merged,
+        totalAcres
+      );
+      return;
+    }
+
     setSheetMode('boundary_created');
     toast.success(`Combined into ${totalAcres.toFixed(1)} acres`);
-  }, [selectedParcels, mapLoaded]);
+  }, [selectedParcels, mapLoaded, settingSubjectForCma, saveSubjectFromGeometry]);
 
   // Save the currently-drawn polygon + selected parcels as a brand-new
   // comp. Mirrors combineAll's union math (so the broker doesn't have
@@ -4677,13 +4738,17 @@ export default function MapPage() {
 
               {/* Action row */}
               <div className="grid grid-cols-2 gap-2">
-                {/* Map / Edit Subject Tract — always available so the
-                    broker can refine the subject boundary at any time
-                    (carve-outs, re-survey, fixed wrong parcel set, etc.).
-                    Label + styling differ based on whether the CMA
-                    already has a subject:
-                      • No subject yet → prominent brick-red CTA
-                      • Subject set → subtler "Edit" affordance */}
+                {/* Subject tract editing — two modes available at all
+                    times once a CMA exists:
+                      • Reselect Parcels — re-tap TxGIO parcels to
+                        rebuild the subject from parcel data
+                      • Redraw Boundary — freehand polygon (handles
+                        carve-outs that don't align with parcel borders,
+                        partial-parcel sales, hand-traced from a survey)
+                    First-time setup (no subject yet) prefers Reselect
+                    since most subjects ARE parcel-based — the prominent
+                    brick-red CTA. Once a subject exists, both options
+                    show as peer buttons. */}
                 {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
                   <button
                     onClick={startMapSubjectForCMA}
@@ -4693,13 +4758,43 @@ export default function MapPage() {
                     <MapPin size={12} /> Map Subject Tract
                   </button>
                 ) : (
-                  <button
-                    onClick={startMapSubjectForCMA}
-                    className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                    title="Re-select the subject parcels — useful for carve-outs, re-surveys, or fixing a wrong initial selection"
-                  >
-                    <Pencil size={12} /> Edit Subject Tract
-                  </button>
+                  <>
+                    <button
+                      onClick={startMapSubjectForCMA}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Re-select TxGIO parcels for the subject"
+                    >
+                      <Pencil size={12} /> Reselect Parcels
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!viewingCMA || !drawRef.current) return;
+                        setSettingSubjectForCma(viewingCMA.id);
+                        setSelectedParcels([]);
+                        setSelectedComp(null);
+                        setTappedParcel(null);
+                        // Clear any existing drawn polygons so the broker
+                        // starts with a clean canvas.
+                        drawRef.current.deleteAll();
+                        setDrawnCount(0);
+                        // Enter MapboxDraw's polygon-drawing mode. The
+                        // existing combineAll → saveSubjectFromGeometry
+                        // path handles save when the broker hits Combine.
+                        try {
+                          (drawRef.current as any).changeMode('draw_polygon');
+                        } catch {}
+                        setDrawingActive(true);
+                        toast(
+                          `Draw a freehand boundary for "${viewingCMA.subject_name || 'CMA'}". Combine to save.`,
+                          { icon: '✏️', duration: 4500 }
+                        );
+                      }}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Draw a freehand boundary — handles carve-outs and partial-parcel sales"
+                    >
+                      <Pencil size={12} /> Redraw Boundary
+                    </button>
+                  </>
                 )}
                 <button
                   onClick={editCmaComps}
