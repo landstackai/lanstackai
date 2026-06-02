@@ -346,13 +346,39 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     // "invalid input syntax for type uuid: 'undefined'" with no hint
     // which column. The self-healing retry below catches missing-column
     // errors but can't recover from UUID format errors mid-payload.
-    // Scrubbing once at the top makes the payload safe regardless of
-    // where the bad value originated.
+    //
+    // Belt + suspenders pass:
+    //   1) Any value === undefined → null
+    //   2) Any value === 'undefined' (literal string) → null
+    //   3) For columns that look UUID-shaped by name (*_id, *_by,
+    //      created_by, etc.) — coerce empty string '' to null AND
+    //      verify the value matches the UUID regex (or null). Any
+    //      non-conforming value gets nulled rather than passed
+    //      through to Postgres as "invalid input syntax".
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const isUuidShapedKey = (k: string) =>
+      k === 'created_by' ||
+      k === 'team_id' ||
+      k === 'transaction_agent_id' ||
+      k === 'improvement_verified_by' ||
+      k.endsWith('_by') ||
+      (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id'); // parcel_id is TEXT
     for (const k of Object.keys(payload)) {
-      const v = (payload as any)[k];
+      let v = (payload as any)[k];
       if (v === undefined || v === 'undefined') {
-        (payload as any)[k] = null;
+        v = null;
       }
+      if (isUuidShapedKey(k)) {
+        if (v === '' || v === 'null') v = null;
+        if (v != null && (typeof v !== 'string' || !UUID_RE.test(v))) {
+          // Anything in a UUID-shaped column that isn't a real UUID
+          // gets nulled. Loud warning so we can find the upstream leak
+          // later, but never blocks the save.
+          console.warn(`[CompModal] dropping non-UUID value for "${k}":`, v);
+          v = null;
+        }
+      }
+      (payload as any)[k] = v;
     }
 
     // Self-healing save: if a column doesn't exist in the deployed Supabase
