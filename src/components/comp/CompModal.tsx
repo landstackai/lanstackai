@@ -322,6 +322,22 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       is_draft: false,
     };
 
+    // Defensive scrub: any field whose value is the literal `undefined`
+    // (or the STRING "undefined" — leaks in from bad form state where a
+    // value got stringified somewhere upstream) gets coerced to null
+    // before the save. Postgres UUID columns are the loudest about this:
+    // "invalid input syntax for type uuid: 'undefined'" with no hint
+    // which column. The self-healing retry below catches missing-column
+    // errors but can't recover from UUID format errors mid-payload.
+    // Scrubbing once at the top makes the payload safe regardless of
+    // where the bad value originated.
+    for (const k of Object.keys(payload)) {
+      const v = (payload as any)[k];
+      if (v === undefined || v === 'undefined') {
+        (payload as any)[k] = null;
+      }
+    }
+
     // Self-healing save: if a column doesn't exist in the deployed Supabase
     // schema (e.g. a migration hasn't been run yet), strip that field from
     // the payload and retry. Up to 10 retries — covers the case where a
@@ -349,7 +365,10 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
 
     if (!success) {
       const detail = lastError?.message || lastError?.details || 'unknown error';
-      console.error('[CompModal] save failed:', lastError);
+      // Log the full payload alongside the error so next time we hit
+      // a Postgres type error we can grep the console for which field
+      // had the bad value (e.g. transaction_agent_id: "undefined").
+      console.error('[CompModal] save failed:', lastError, { payload: current });
       toast.error(`Save failed: ${detail}`, { duration: 6000 });
       setLoading(false);
     } else {
