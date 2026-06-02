@@ -401,11 +401,40 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     // payload references several columns from un-run migrations.
     let current: Record<string, any> = { ...payload };
 
-    // PRE-SAVE PAYLOAD LOG — proves what bundle is live + lets us
-    // diagnose UUID/type errors that name no column. Picked up if
-    // the broker reports a save failure: ask for this line from
-    // their console and we know the exact field with the bad value.
-    console.info('[CompModal] save payload (post-scrub):', JSON.parse(JSON.stringify(current)));
+    // FINAL JSON-LEVEL SCRUB — defense in depth.
+    // Round-trip the payload through JSON.stringify with a replacer
+    // that PHYSICALLY rewrites any "undefined" string value to null.
+    // Even if the upstream scrubs missed something, or some clever
+    // upstream code re-introduced 'undefined' between the scrub and
+    // this save call, the JSON that goes onto the wire literally
+    // cannot contain the literal string "undefined".
+    //
+    // This is the last guarantee before the network call. Anything
+    // that gets past every JS guard above this point gets caught
+    // here at the serialization boundary.
+    const safeJson = JSON.stringify(current, (key, value) => {
+      if (value === 'undefined' || value === 'null' || value === undefined) return null;
+      // For UUID-shaped keys (created_by, *_id, *_by) that aren't
+      // null and aren't a real UUID, force null. Same rule as the
+      // earlier scrub but applied as a JSON-serialization barrier
+      // so it cannot be bypassed by closure/reference issues.
+      const isUuid = (k: string) =>
+        k === 'created_by' ||
+        k === 'team_id' ||
+        k === 'transaction_agent_id' ||
+        k === 'improvement_verified_by' ||
+        k.endsWith('_by') ||
+        (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id');
+      if (isUuid(key) && value != null) {
+        if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+          return null;
+        }
+      }
+      return value;
+    });
+    current = JSON.parse(safeJson);
+
+    console.info('[CompModal] save payload (final):', current);
     let lastError: any = null;
     let success = false;
     for (let attempt = 0; attempt < 10; attempt++) {
