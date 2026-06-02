@@ -3609,7 +3609,19 @@ export default function MapPage() {
   // the broker drew a parcel and had nowhere to "Create Comp" from
   // that boundary.
   const handleCreateCompFromBoundary = useCallback(async () => {
-    if (!map.current || !mapLoaded) return;
+    // DEBUG (delete once verified): visible breadcrumb so we can see
+    // when this helper runs vs. silently returns.
+    toast('handleCreateCompFromBoundary fired', { duration: 2000 });
+    console.log('[handleCreateCompFromBoundary] state:', {
+      mapReady: !!map.current && mapLoaded,
+      drawnFeatures: drawRef.current?.getAll().features.length || 0,
+      selectedParcelsCount: selectedParcels.length,
+      mergedGeometryPresent: !!mergedGeometry,
+    });
+    if (!map.current || !mapLoaded) {
+      toast.error('Map not ready');
+      return;
+    }
 
     const drawn = (drawRef.current?.getAll().features || []).filter(
       (f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon'
@@ -3700,22 +3712,31 @@ export default function MapPage() {
   }, [selectedParcels, mapLoaded, resetParcelState, mergedGeometry]);
 
   const handleAddAsNewComp = useCallback(() => {
+    // DEBUG (delete once verified): the user has hit "Add as New Comp"
+    // multiple times in a row with nothing happening. These toasts
+    // confirm the click reaches each step so we can see WHERE the
+    // chain stops if the modal doesn't open.
+    toast('handleAddAsNewComp fired', { duration: 2000 });
+    console.log('[handleAddAsNewComp] state:', {
+      selectedParcelsCount: selectedParcels.length,
+      tappedParcel: tappedParcel ? 'set' : 'null',
+      mergedAcres,
+      mergedGeometryPresent: !!mergedGeometry,
+    });
+
     const primary = selectedParcels[0] || tappedParcel;
 
     // Drawn-only case: no parcel selected, but the broker has a polygon
     // on the map (the "Boundary Created" sheet path after Combine on
     // freehand-drawn shapes). Defer to the full handleCreateCompFromBoundary
-    // helper which handles drawn-only, parcel-only, and mixed cases —
-    // including reverse-geocoding the centroid for county derivation
-    // and writing the unioned geometry to boundary_geojson on save.
-    //
-    // Without this fallback the button was silently no-op'd because
-    // `primary` was undefined → early return → nothing happened.
+    // helper which handles drawn-only, parcel-only, and mixed cases.
     if (!primary) {
+      toast('No primary parcel — falling through to boundary handler', { duration: 2000 });
       handleCreateCompFromBoundary();
       return;
     }
 
+    toast(`Opening modal for parcel: ${primary.county || 'unknown'}`, { duration: 2000 });
     setPrefilledComp({
       county: primary.county || '',
       state: primary.state || 'TX',
@@ -3727,7 +3748,7 @@ export default function MapPage() {
     setSheetMode('none');
     setShowAddModal(true);
     resetParcelState();
-  }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState, handleCreateCompFromBoundary]);
+  }, [selectedParcels, tappedParcel, mergedAcres, mergedGeometry, resetParcelState, handleCreateCompFromBoundary]);
 
   // Switch between Satellite and Terrain views. Both use the same base
   // style URL — the only difference is whether the contour-line overlay
