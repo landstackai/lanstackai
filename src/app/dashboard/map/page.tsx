@@ -127,6 +127,13 @@ export default function MapPage() {
   const [tappedParcel, setTappedParcel] = useState<ParcelFeature | null>(null);
   const [selectedParcels, setSelectedParcels] = useState<ParcelFeature[]>([]);
   const [mergedAcres, setMergedAcres] = useState(0);
+  // The unioned geometry produced by combineAll. Lives in React state
+  // (in addition to the merged-boundary Mapbox source) so downstream
+  // actions like "Add as New Comp" can use it AFTER combineAll has
+  // emptied drawRef + selectedParcels. Without this, the sheet's
+  // "Add as New Comp" would silently no-op because the polygon was
+  // already absorbed by the merged-boundary source on the map.
+  const [mergedGeometry, setMergedGeometry] = useState<any>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [prefilledComp, setPrefilledComp] = useState<any>(null);
@@ -455,6 +462,7 @@ export default function MapPage() {
     setSelectedParcels([]);
     setTappedParcel(null);
     setMergedAcres(0);
+    setMergedGeometry(null);
     setMapMode('view');
     setReselectingComp(null);
     setSettingSubjectForCma(null);
@@ -3479,6 +3487,7 @@ export default function MapPage() {
     }
     setSelectedParcels([]);
     setMergedAcres(0);
+    setMergedGeometry(null);
     drawRef.current.deleteAll();
     drawRef.current.changeMode('draw_polygon');
     setDrawingActive(true);
@@ -3529,6 +3538,7 @@ export default function MapPage() {
     setDrawVertexCount(0);
     setSelectedParcels([]);
     setMergedAcres(0);
+    setMergedGeometry(null);
     setSheetMode('none');
     if (map.current && mapLoaded) {
       try {
@@ -3566,6 +3576,12 @@ export default function MapPage() {
     let totalAcres = 0;
     try { totalAcres = turf.area(merged) / 4046.8564224; } catch {}
     setMergedAcres(totalAcres);
+    // Stash the unioned geometry in React state so downstream actions
+    // (Add as New Comp / Use as CMA Subject on the boundary_created
+    // sheet) can use it AFTER we delete drawRef and reset
+    // selectedParcels below. Without this, those actions had no
+    // polygon to read.
+    setMergedGeometry(merged?.geometry || merged);
 
     const src = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
     if (src) {
@@ -3602,18 +3618,30 @@ export default function MapPage() {
       .filter((p) => p.geometry)
       .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
     const all = [...drawn, ...parcelFeatures];
-    if (all.length === 0) {
+
+    // Compute the unioned geometry. Three sources, checked in order:
+    //   1. drawRef + selectedParcels (broker hit Create Comp BEFORE Combine)
+    //   2. mergedGeometry React state (broker hit Combine first → polygon
+    //      lives in merged-boundary source + this state)
+    //   3. Bail with an error if nothing
+    // Without #2 the sheet's "Add as New Comp" silently no-ops because
+    // combineAll empties drawRef.deleteAll() and resetParcelState() before
+    // the broker clicks anything.
+    let merged: any = null;
+    if (all.length > 0) {
+      merged = all[0];
+      for (let i = 1; i < all.length; i++) {
+        try {
+          const u = turf.union(merged as any, all[i] as any);
+          if (u) merged = u;
+        } catch {}
+      }
+    } else if (mergedGeometry) {
+      // Wrap raw geometry into a Feature so downstream turf calls work.
+      merged = { type: 'Feature', properties: {}, geometry: mergedGeometry };
+    } else {
       toast.error('Draw a polygon or select parcels first');
       return;
-    }
-
-    // Union everything into a single Feature. Same logic as combineAll.
-    let merged: any = all[0];
-    for (let i = 1; i < all.length; i++) {
-      try {
-        const u = turf.union(merged as any, all[i] as any);
-        if (u) merged = u;
-      } catch {}
     }
 
     // Acres + centroid from the unioned geometry.
@@ -3666,9 +3694,10 @@ export default function MapPage() {
     setDrawnCount(0);
     setDrawingActive(false);
     setMergedAcres(0);
+    setMergedGeometry(null);
 
     toast.success(`Boundary captured — ${totalAcres.toFixed(1)} ac. Fill in the sale details.`);
-  }, [selectedParcels, mapLoaded, resetParcelState]);
+  }, [selectedParcels, mapLoaded, resetParcelState, mergedGeometry]);
 
   const handleAddAsNewComp = useCallback(() => {
     const primary = selectedParcels[0] || tappedParcel;
@@ -4095,6 +4124,7 @@ export default function MapPage() {
                   } catch {}
                 }
                 setMergedAcres(0);
+    setMergedGeometry(null);
                 setMapMode('parcel_select');
                 setSheetMode('selecting');
                 setSelectedComp(null);
