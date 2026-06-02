@@ -435,6 +435,16 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     current = JSON.parse(safeJson);
 
     console.info('[CompModal] save payload (final):', current);
+    // DEBUG: surface whether boundary_geojson made it through to the
+    // wire. Several user reports of comps saving without their drawn/
+    // selected boundary — this confirms whether the issue is upstream
+    // (lost before save) or at the DB write step.
+    toast(
+      current.boundary_geojson
+        ? `Save: boundary INCLUDED (${(current.boundary_geojson as any)?.type || 'present'})`
+        : 'Save: boundary MISSING from payload',
+      { duration: 3000 }
+    );
     let lastError: any = null;
     let success = false;
     // ROOT CAUSE: the modal accepts both a fully-loaded existing

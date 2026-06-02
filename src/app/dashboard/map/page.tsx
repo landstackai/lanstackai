@@ -3748,6 +3748,20 @@ export default function MapPage() {
       .filter(Boolean)
       .join(',');
 
+    const finalBoundary = merged?.geometry || merged;
+    // DEBUG: surface whether the boundary actually made it into the
+    // prefill object. Several users reported comps saving without a
+    // boundary even though they drew/selected parcels first. This
+    // toast tells us if the boundary is being lost at THIS step or
+    // later (in CompModal's save handler).
+    console.log('[handleCreateCompFromBoundary] prefill boundary check:', {
+      mergedExists: !!merged,
+      mergedGeometryType: merged?.geometry?.type || merged?.type || 'unknown',
+      finalBoundaryExists: !!finalBoundary,
+      finalBoundaryType: finalBoundary?.type || 'unknown',
+      coordinateCount: finalBoundary?.coordinates?.length || 0,
+    });
+    toast(`Boundary captured: ${finalBoundary ? finalBoundary.type || 'present' : 'MISSING'}`, { duration: 3000 });
     setPrefilledComp({
       county,
       state: 'TX',
@@ -3755,7 +3769,7 @@ export default function MapPage() {
       latitude: lat,
       longitude: lng,
       parcel_id: parcelIds || null,
-      boundary_geojson: merged?.geometry || merged,
+      boundary_geojson: finalBoundary,
     });
     setSheetMode('none');
     setShowAddModal(true);
