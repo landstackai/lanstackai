@@ -2381,8 +2381,11 @@ export default function MapPage() {
           subject_latitude: lat,
           subject_longitude: lng,
           subject_boundary_geojson: merged?.geometry || merged,
-          // also keep subject_acres in sync
-          subject_acres: totalAcres > 0 ? totalAcres : undefined,
+          // also keep subject_acres in sync. When the union math gave
+          // us nothing (no parcels), omit the field by leaving it null
+          // rather than `undefined` — Supabase serialization of
+          // `undefined` is undefined-behavior across versions.
+          ...(totalAcres > 0 ? { subject_acres: totalAcres } : {}),
         })
         .eq('id', cmaId);
       if (error) {
