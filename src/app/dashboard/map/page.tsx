@@ -115,6 +115,11 @@ export default function MapPage() {
   const [overlays, setOverlays] = useState<{ floodplain: boolean }>({
     floodplain: false,
   });
+  // Live zoom level, synced via map 'move' events. Used to surface a
+  // "zoom in to see this overlay" hint when the broker has toggled Flood
+  // (minzoom 8) or entered Select Parcels mode (minzoom 13) at a state-
+  // wide view. Without this, both features fail silently at low zoom.
+  const [currentZoom, setCurrentZoom] = useState<number>(6);
   // Advanced-filters popover (opens from the sliders icon next to the
   // search bar). Holds the owner-search input + scope filter so we can
   // collapse the two top-of-map search bars into one without losing the
@@ -842,6 +847,15 @@ export default function MapPage() {
       });
 
       setMapLoaded(true);
+
+      // Live zoom tracking — feeds the "zoom in to see this overlay" hint
+      // below the toolbar. Cheap: Mapbox fires 'move' at ~60fps during pan/
+      // zoom; we just write a number to React state. React batches the
+      // setState so we don't get one render per frame.
+      setCurrentZoom(map.current!.getZoom());
+      map.current!.on('move', () => {
+        if (map.current) setCurrentZoom(map.current.getZoom());
+      });
     });
 
     // Map click — try county CAD vector layers first, then TxGIO via /api/parcel
@@ -4351,14 +4365,31 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Flood toggle */}
+          {/* Flood toggle — auto-zooms in when toggled ON at low zoom.
+              FEMA NFHL has minzoom:8 (tiles return blank/error at state-
+              wide views). Before this auto-zoom, brokers would click
+              Flood at the default zoom, see nothing happen, and assume
+              the feature was broken. Now we zoom them to a usable scale
+              (z10) AND show a toast explaining what we did. */}
           <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden w-[10rem] shadow-lg shadow-black/20">
             <button
-              onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
+              onClick={() => {
+                const turningOn = !overlays.floodplain;
+                setOverlays((o) => ({ ...o, floodplain: !o.floodplain }));
+                if (turningOn && map.current) {
+                  const z = map.current.getZoom();
+                  if (z < 9) {
+                    map.current.easeTo({ zoom: 10, duration: 800 });
+                    toast('Zooming in — flood zones render at zoom 8+', { icon: '🌊', duration: 3000 });
+                  } else {
+                    toast('Loading flood zones (FEMA can take a few seconds)…', { icon: '🌊', duration: 2500 });
+                  }
+                }
+              }}
               className={`w-full py-2 px-2 text-xs font-semibold transition-colors text-center flex items-center justify-center gap-1.5 ${
                 overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-cream-2-text hover:text-cream-1'
               }`}
-              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
+              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain (zoom 8+)'}
               aria-pressed={overlays.floodplain}
             >
               <Waves size={12} />
@@ -4385,12 +4416,27 @@ export default function MapPage() {
                   } catch {}
                 }
                 setMergedAcres(0);
-    setMergedGeometry(null);
+                setMergedGeometry(null);
                 setMapMode('parcel_select');
                 setSheetMode('selecting');
                 setSelectedComp(null);
                 setTappedParcel(null);
-                toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
+
+                // Auto-zoom if the user is too far out to see / hit parcels.
+                // The parcel raster + vector overlays are gated at minzoom 13;
+                // below that, clicking "Select Parcels" did nothing visible
+                // and brokers thought the feature was broken. Easing them
+                // into zoom 14 fires the parcel fetch and makes parcels
+                // immediately clickable.
+                if (map.current) {
+                  const z = map.current.getZoom();
+                  if (z < 13) {
+                    map.current.easeTo({ zoom: 14, duration: 900 });
+                    toast('Zooming in — parcels render at zoom 13+', { icon: '🗺️', duration: 3000 });
+                  } else {
+                    toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
+                  }
+                }
               }}
               className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
@@ -4407,6 +4453,24 @@ export default function MapPage() {
                 : reselectingComp
                 ? `Re-selecting: ${reselectingComp.property_name || reselectingComp.county || 'comp'}`
                 : 'Tap to select parcels'}
+            </div>
+          )}
+
+          {/* Zoom-gated overlay hints — appear when the broker has turned
+              on an overlay (flood) or entered a mode (Select Parcels) that
+              requires zooming in. Without this, both features fail silently
+              and brokers can't tell the difference between "broken" and
+              "not zoomed in enough yet." */}
+          {overlays.floodplain && currentZoom < 8 && (
+            <div className="bg-sky-400/15 border border-sky-400/40 backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold text-sky-300 flex items-center gap-1.5 shadow-lg shadow-black/20">
+              <Waves size={12} />
+              Zoom in for flood zones (currently {currentZoom.toFixed(1)} / need 8+)
+            </div>
+          )}
+          {mapMode === 'parcel_select' && currentZoom < 13 && (
+            <div className="bg-amber-warm/15 border border-amber-warm/40 backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold text-amber-warm flex items-center gap-1.5 shadow-lg shadow-black/20">
+              <MousePointer size={12} />
+              Zoom in for parcels (currently {currentZoom.toFixed(1)} / need 13+)
             </div>
           )}
 
