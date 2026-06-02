@@ -70,6 +70,13 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     confirmation_source: '',
     description: '',
     source_url: '',
+    // Optional pre-filled boundary geometry. When set (e.g. from the
+    // map page's "Create Comp" button after drawing a polygon or
+    // selecting parcels), it gets written to the comps row on save
+    // so the new comp lands with its boundary already populated. Not
+    // editable in the form UI — the boundary comes from upstream
+    // selection or from the per-comp /dashboard/review page.
+    boundary_geojson: null as any,
     visibility: 'team',
     confidence: 'Unverified',
     is_company_transaction: false,
@@ -185,6 +192,12 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
         confirmation_source: comp.confirmation_source || '',
         description: comp.description || '',
         source_url: comp.source_url || '',
+        // Carry boundary_geojson through. Two cases that matter:
+        //   1) Editing existing comp → preserve its current boundary so
+        //      saving doesn't wipe it.
+        //   2) Pre-fill from map page (drew polygon, hit "Create Comp")
+        //      → the new comp lands with the boundary already populated.
+        boundary_geojson: (comp as any).boundary_geojson ?? null,
         visibility: comp.visibility || 'team',
         confidence: comp.confidence || 'Unverified',
         is_company_transaction: comp.is_company_transaction || false,
@@ -314,6 +327,10 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       flood_plain: form.flood_plain,
       improvement_value: form.improvement_value !== '' ? parseFloat(form.improvement_value) : null,
       improvement_source: form.improvement_source || null,
+      // Conditional spread — only write boundary_geojson if we actually
+      // have one. Prevents an edit-comp save from accidentally NULLing
+      // an existing comp's boundary when the form never received one.
+      ...(form.boundary_geojson ? { boundary_geojson: form.boundary_geojson } : {}),
       // Agent-Verified auto-tags the verifier and timestamp (internal audit trail
       // — never shown on the client share report). For appraiser / broker_estimate
       // / cleared, blank out the audit columns.

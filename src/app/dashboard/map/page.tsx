@@ -7,7 +7,7 @@ import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download, Plus } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -3575,6 +3575,90 @@ export default function MapPage() {
     toast.success(`Combined into ${totalAcres.toFixed(1)} acres`);
   }, [selectedParcels, mapLoaded]);
 
+  // Save the currently-drawn polygon + selected parcels as a brand-new
+  // comp. Mirrors combineAll's union math (so the broker doesn't have
+  // to hit Combine first), then opens the Add Comp modal pre-filled
+  // with boundary + acres + centroid + county. Closes the gap where
+  // the broker drew a parcel and had nowhere to "Create Comp" from
+  // that boundary.
+  const handleCreateCompFromBoundary = useCallback(async () => {
+    if (!map.current || !mapLoaded) return;
+
+    const drawn = (drawRef.current?.getAll().features || []).filter(
+      (f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon'
+    );
+    const parcelFeatures = selectedParcels
+      .filter((p) => p.geometry)
+      .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+    const all = [...drawn, ...parcelFeatures];
+    if (all.length === 0) {
+      toast.error('Draw a polygon or select parcels first');
+      return;
+    }
+
+    // Union everything into a single Feature. Same logic as combineAll.
+    let merged: any = all[0];
+    for (let i = 1; i < all.length; i++) {
+      try {
+        const u = turf.union(merged as any, all[i] as any);
+        if (u) merged = u;
+      } catch {}
+    }
+
+    // Acres + centroid from the unioned geometry.
+    let totalAcres = 0;
+    try { totalAcres = turf.area(merged) / 4046.8564224; } catch {}
+    let lat: number | null = null;
+    let lng: number | null = null;
+    try {
+      const c = turf.centroid(merged as any);
+      lng = c.geometry.coordinates[0];
+      lat = c.geometry.coordinates[1];
+    } catch {}
+
+    // Derive county. Prefer first selected parcel's county (TxGIO data
+    // is authoritative). For drawn-only polygons, fall back to a
+    // reverse-geocode of the centroid. Safe because we're asking
+    // "what county is this point in," not "what address." Centroid-
+    // based reverse-geocode is fundamentally different from the
+    // hallucinated-from-prose pattern that the Pearsall fix banned.
+    let county = (selectedParcels[0] as any)?.county || '';
+    if (!county && lat != null && lng != null) {
+      try {
+        const { reverseGeocodeCity } = await import('@/lib/utils/reverseGeocode');
+        const result: any = await reverseGeocodeCity(lat, lng);
+        if (result?.county) county = result.county;
+      } catch {}
+    }
+
+    const parcelIds = selectedParcels
+      .map((p) => p.parcel_id)
+      .filter(Boolean)
+      .join(',');
+
+    setPrefilledComp({
+      county,
+      state: 'TX',
+      acres: totalAcres > 0 ? Math.round(totalAcres * 100) / 100 : undefined,
+      latitude: lat,
+      longitude: lng,
+      parcel_id: parcelIds || null,
+      boundary_geojson: merged?.geometry || merged,
+    });
+    setSheetMode('none');
+    setShowAddModal(true);
+
+    // Clear the staged selection — the merged shape lives only on
+    // the new comp from here.
+    resetParcelState();
+    if (drawRef.current) drawRef.current.deleteAll();
+    setDrawnCount(0);
+    setDrawingActive(false);
+    setMergedAcres(0);
+
+    toast.success(`Boundary captured — ${totalAcres.toFixed(1)} ac. Fill in the sale details.`);
+  }, [selectedParcels, mapLoaded, resetParcelState]);
+
   const handleAddAsNewComp = useCallback(() => {
     const primary = selectedParcels[0] || tappedParcel;
     if (!primary) return;
@@ -4087,7 +4171,7 @@ export default function MapPage() {
             </div>
           )}
 
-          {/* Combine + Discard (when something exists) */}
+          {/* Combine + Create Comp + Discard (when something exists) */}
           {(drawnCount > 0 || selectedParcels.length > 0) && !drawingActive && (
             <div className="flex gap-1.5">
               <button
@@ -4096,6 +4180,19 @@ export default function MapPage() {
               >
                 <Combine size={12} />
                 Combine ({drawnCount + selectedParcels.length})
+              </button>
+              {/* Create Comp — captures the drawn polygon (or union of
+                  selected parcels) and opens the Add Comp modal with
+                  boundary, acres, centroid, and county pre-filled.
+                  Closes the workflow gap where the broker had drawn a
+                  polygon and had nowhere to commit it to. */}
+              <button
+                onClick={handleCreateCompFromBoundary}
+                className="bg-slate-blue/10 backdrop-blur-sm border border-slate-blue/30 hover:border-slate-blue hover:bg-slate-blue/15 rounded-xl px-3 py-2 text-xs font-bold text-slate-blue-2 transition-colors flex items-center gap-1.5"
+                title="Save the current boundary as a new comp"
+              >
+                <Plus size={12} />
+                Create Comp
               </button>
               <button
                 onClick={clearDrawings}
