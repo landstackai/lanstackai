@@ -266,6 +266,12 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
   };
 
   const handleSave = async () => {
+    // BUILD STAMP — if you can read this in the console, the new
+    // nuclear-strip scrub is live. If you don't see it, the bundle
+    // hasn't refreshed. Delete this line once UUID save bug is
+    // confirmed dead.
+    console.info('[CompModal] handleSave v3-nuclear-strip — bundle is live');
+
     if (!form.county || !form.acres || !form.sale_price) {
       toast.error('County, acres, and price are required');
       return;
@@ -339,22 +345,26 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       is_draft: false,
     };
 
-    // Defensive scrub: any field whose value is the literal `undefined`
-    // (or the STRING "undefined" — leaks in from bad form state where a
-    // value got stringified somewhere upstream) gets coerced to null
-    // before the save. Postgres UUID columns are the loudest about this:
-    // "invalid input syntax for type uuid: 'undefined'" with no hint
-    // which column. The self-healing retry below catches missing-column
-    // errors but can't recover from UUID format errors mid-payload.
+    // NUCLEAR-OPTION SCRUB. Strip any key whose value looks dangerous
+    // entirely from the payload — instead of coercing to null, we just
+    // DELETE the key. Supabase treats missing keys as "leave that column
+    // alone" on updates, so the only behavioral change is: if a column
+    // had a value before, it stays unchanged; if it was null, it stays
+    // null. Net effect: that column simply isn't touched by this save.
     //
-    // Belt + suspenders pass:
-    //   1) Any value === undefined → null
-    //   2) Any value === 'undefined' (literal string) → null
-    //   3) For columns that look UUID-shaped by name (*_id, *_by,
-    //      created_by, etc.) — coerce empty string '' to null AND
-    //      verify the value matches the UUID regex (or null). Any
-    //      non-conforming value gets nulled rather than passed
-    //      through to Postgres as "invalid input syntax".
+    // Why this is bulletproof: even if the JSON serializer were doing
+    // something exotic (passing 'undefined' literal through), the value
+    // never enters the payload at all.
+    //
+    // We strip:
+    //   1) value === undefined (the literal JS value)
+    //   2) value === 'undefined' (the string — has bitten us 3 times)
+    //   3) value === 'null' (the STRING 'null', different from null)
+    //   4) For UUID-shaped column names: any value that isn't either
+    //      null OR a real UUID-formatted string gets stripped.
+    //
+    // Also instrument with console.warn for any stripped key so we can
+    // find the upstream leak source.
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const isUuidShapedKey = (k: string) =>
       k === 'created_by' ||
@@ -362,23 +372,27 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       k === 'transaction_agent_id' ||
       k === 'improvement_verified_by' ||
       k.endsWith('_by') ||
-      (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id'); // parcel_id is TEXT
+      (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id');
+    const strippedKeys: string[] = [];
     for (const k of Object.keys(payload)) {
-      let v = (payload as any)[k];
-      if (v === undefined || v === 'undefined') {
-        v = null;
-      }
-      if (isUuidShapedKey(k)) {
-        if (v === '' || v === 'null') v = null;
-        if (v != null && (typeof v !== 'string' || !UUID_RE.test(v))) {
-          // Anything in a UUID-shaped column that isn't a real UUID
-          // gets nulled. Loud warning so we can find the upstream leak
-          // later, but never blocks the save.
-          console.warn(`[CompModal] dropping non-UUID value for "${k}":`, v);
-          v = null;
+      const v = (payload as any)[k];
+      let shouldStrip = false;
+
+      if (v === undefined || v === 'undefined' || v === 'null') {
+        shouldStrip = true;
+      } else if (isUuidShapedKey(k) && v != null) {
+        if (typeof v !== 'string' || !UUID_RE.test(v)) {
+          shouldStrip = true;
         }
       }
-      (payload as any)[k] = v;
+
+      if (shouldStrip) {
+        strippedKeys.push(`${k}=${JSON.stringify(v)}`);
+        delete (payload as any)[k];
+      }
+    }
+    if (strippedKeys.length > 0) {
+      console.warn(`[CompModal] STRIPPED dangerous keys from payload:`, strippedKeys);
     }
 
     // Self-healing save: if a column doesn't exist in the deployed Supabase
