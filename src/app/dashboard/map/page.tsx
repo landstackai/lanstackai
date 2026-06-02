@@ -4677,6 +4677,13 @@ export default function MapPage() {
 
               {/* Action row */}
               <div className="grid grid-cols-2 gap-2">
+                {/* Map / Edit Subject Tract — always available so the
+                    broker can refine the subject boundary at any time
+                    (carve-outs, re-survey, fixed wrong parcel set, etc.).
+                    Label + styling differ based on whether the CMA
+                    already has a subject:
+                      • No subject yet → prominent brick-red CTA
+                      • Subject set → subtler "Edit" affordance */}
                 {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
                   <button
                     onClick={startMapSubjectForCMA}
@@ -4685,7 +4692,15 @@ export default function MapPage() {
                   >
                     <MapPin size={12} /> Map Subject Tract
                   </button>
-                ) : null}
+                ) : (
+                  <button
+                    onClick={startMapSubjectForCMA}
+                    className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                    title="Re-select the subject parcels — useful for carve-outs, re-surveys, or fixing a wrong initial selection"
+                  >
+                    <Pencil size={12} /> Edit Subject Tract
+                  </button>
+                )}
                 <button
                   onClick={editCmaComps}
                   className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
