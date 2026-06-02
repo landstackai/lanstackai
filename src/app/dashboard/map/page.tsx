@@ -3786,44 +3786,16 @@ export default function MapPage() {
     toast.success(`Boundary captured — ${totalAcres.toFixed(1)} ac. Fill in the sale details.`);
   }, [selectedParcels, mapLoaded, resetParcelState, mergedGeometry]);
 
+  // Sheet's "Add as New Comp" button — delegates to the full
+  // handleCreateCompFromBoundary helper unconditionally. That helper
+  // handles all three input shapes (drawn-only, parcels-only, mixed)
+  // AND includes boundary_geojson in the prefill. The previous version
+  // forked on "primary parcel exists" and used a slimmer prefill path
+  // that silently dropped the boundary from the saved comp — that's
+  // why brokers were getting comps without their drawn boundaries.
   const handleAddAsNewComp = useCallback(() => {
-    // DEBUG (delete once verified): the user has hit "Add as New Comp"
-    // multiple times in a row with nothing happening. These toasts
-    // confirm the click reaches each step so we can see WHERE the
-    // chain stops if the modal doesn't open.
-    toast('handleAddAsNewComp fired', { duration: 2000 });
-    console.log('[handleAddAsNewComp] state:', {
-      selectedParcelsCount: selectedParcels.length,
-      tappedParcel: tappedParcel ? 'set' : 'null',
-      mergedAcres,
-      mergedGeometryPresent: !!mergedGeometry,
-    });
-
-    const primary = selectedParcels[0] || tappedParcel;
-
-    // Drawn-only case: no parcel selected, but the broker has a polygon
-    // on the map (the "Boundary Created" sheet path after Combine on
-    // freehand-drawn shapes). Defer to the full handleCreateCompFromBoundary
-    // helper which handles drawn-only, parcel-only, and mixed cases.
-    if (!primary) {
-      toast('No primary parcel — falling through to boundary handler', { duration: 2000 });
-      handleCreateCompFromBoundary();
-      return;
-    }
-
-    toast(`Opening modal for parcel: ${primary.county || 'unknown'}`, { duration: 2000 });
-    setPrefilledComp({
-      county: primary.county || '',
-      state: primary.state || 'TX',
-      acres: mergedAcres || primary.acres || undefined,
-      latitude: primary.latitude,
-      longitude: primary.longitude,
-      parcel_id: primary.parcel_id,
-    });
-    setSheetMode('none');
-    setShowAddModal(true);
-    resetParcelState();
-  }, [selectedParcels, tappedParcel, mergedAcres, mergedGeometry, resetParcelState, handleCreateCompFromBoundary]);
+    handleCreateCompFromBoundary();
+  }, [handleCreateCompFromBoundary]);
 
   // Switch between Satellite and Terrain views. Both use the same base
   // style URL — the only difference is whether the contour-line overlay
