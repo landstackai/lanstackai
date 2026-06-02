@@ -838,6 +838,17 @@ export default function MapPage() {
 
     // Map click — try county CAD vector layers first, then TxGIO via /api/parcel
     map.current.on('click', async (e) => {
+      // Guard: when MapboxDraw is actively drawing a polygon (or editing
+      // an existing one's vertices), the user's clicks belong to THAT
+      // workflow, not parcel selection. Without this guard, every click
+      // to place a vertex was ALSO opening a parcel preview underneath.
+      // We check MapboxDraw's mode directly — more reliable than the
+      // React state which lags behind the actual mode by a render.
+      const drawMode = drawRef.current?.getMode();
+      if (drawMode === 'draw_polygon' || drawMode === 'direct_select') {
+        return;
+      }
+
       const { lng, lat } = e.lngLat;
       let parcel: ParcelFeature | null = null;
 
