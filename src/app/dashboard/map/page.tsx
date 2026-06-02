@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
-import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
+import { formatPPA, formatAcres, formatCurrency, formatDate, TEXAS_COUNTIES } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
 import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download, Plus } from 'lucide-react';
@@ -2808,12 +2808,202 @@ export default function MapPage() {
     return false;
   };
 
+  // Parse a coordinate string. Returns { lat, lng } if the input is a valid
+  // lat/lng pair, null otherwise.
+  //
+  // Supports:
+  //   "30.2076, -98.824"    "30.2076,-98.824"     "30.2076 -98.824"
+  //   "30.2076N 98.824W"   "30.2076° N, 98.824° W"
+  //   "30°12'27\"N 98°49'27\"W"  (degrees-minutes-seconds)
+  //
+  // Validates lat ∈ [-90, 90] and lng ∈ [-180, 180]. Cardinal suffixes
+  // (N/S/E/W) flip the sign as expected (W → negative lng, S → negative lat).
+  const parseCoordinates = (raw: string): { lat: number; lng: number } | null => {
+    const s = raw.trim();
+    if (!s) return null;
+
+    // DMS form: 30°12'27"N 98°49'27"W
+    const dmsRe = /^\s*(\d{1,3})°\s*(\d{1,2})['′]\s*([\d.]+)["″]?\s*([NSns])\s*[, ]+\s*(\d{1,3})°\s*(\d{1,2})['′]\s*([\d.]+)["″]?\s*([EWew])\s*$/;
+    const dms = s.match(dmsRe);
+    if (dms) {
+      const lat = (Number(dms[1]) + Number(dms[2]) / 60 + Number(dms[3]) / 3600) * (dms[4].toUpperCase() === 'S' ? -1 : 1);
+      const lng = (Number(dms[5]) + Number(dms[6]) / 60 + Number(dms[7]) / 3600) * (dms[8].toUpperCase() === 'W' ? -1 : 1);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng };
+      return null;
+    }
+
+    // Decimal form with optional cardinal suffix: "30.2076N 98.824W" or "30.2076, -98.824"
+    // Two numbers separated by comma, whitespace, or both. Optional °, optional N/S/E/W.
+    const decRe = /^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([NSns])?\s*[, ]+\s*(-?\d+(?:\.\d+)?)\s*°?\s*([EWew])?\s*$/;
+    const dec = s.match(decRe);
+    if (dec) {
+      let lat = Number(dec[1]);
+      let lng = Number(dec[3]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      if (dec[2] && dec[2].toUpperCase() === 'S') lat = -Math.abs(lat);
+      if (dec[4] && dec[4].toUpperCase() === 'W') lng = -Math.abs(lng);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng };
+      return null;
+    }
+
+    return null;
+  };
+
+  // Detect whether a free-text query looks like an owner-name search, and
+  // (optionally) peel a TX county off the tail. Returns { owner, county }
+  // when the input is a plausible name query, null otherwise.
+  //
+  // Conservative — only fires when we're fairly sure it's a name:
+  //   - All tokens alphabetic (or hyphen / apostrophe — "O'Brien", "Smith-Jones")
+  //   - 2+ tokens (a single word is too ambiguous; let the AI handle it)
+  //   - No road / address keywords (those are handled by isLikelyAddressOrStreet)
+  //   - No filter-y keywords ("acres", "sold", "ranch", "comp", "in", "with")
+  //
+  // County peel-off: checks the trailing 1 or 2 tokens against the TX county
+  // list. Two-word counties first (so "Live Oak" / "Tom Green" don't get
+  // mis-split). Counties stripped from the owner portion.
+  const parseOwnerSearch = (raw: string): { owner: string; county: string | null } | null => {
+    const s = raw.trim();
+    if (!s) return null;
+
+    // Reject if it looks like a filter query — words the AI handles better
+    if (/\b(acre|acres|sold|ppa|price|listed|active|pending|with|in|under|over|less|greater|than|water|river|creek|cma|comp|comps|filter|show|find|all|top|recent|date)\b/i.test(s)) {
+      return null;
+    }
+
+    // Tokens — alphabetic, hyphen, apostrophe, ampersand (entity names)
+    const tokens = s.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2) return null;
+    const allLookLikeNames = tokens.every((t) => /^[A-Za-z][A-Za-z'’\-&\.]*$/.test(t));
+    if (!allLookLikeNames) return null;
+
+    // Try peeling a 2-word TX county off the tail first, then 1-word.
+    const lowerCounties = new Set(TEXAS_COUNTIES.map((c) => c.toLowerCase()));
+    let county: string | null = null;
+    let ownerTokens = tokens;
+
+    if (tokens.length >= 3) {
+      const tail2 = `${tokens[tokens.length - 2]} ${tokens[tokens.length - 1]}`;
+      if (lowerCounties.has(tail2.toLowerCase())) {
+        // Match — preserve canonical casing from TEXAS_COUNTIES
+        const canon = TEXAS_COUNTIES.find((c) => c.toLowerCase() === tail2.toLowerCase())!;
+        county = canon;
+        ownerTokens = tokens.slice(0, -2);
+      }
+    }
+    if (!county && tokens.length >= 2) {
+      const tail1 = tokens[tokens.length - 1];
+      if (lowerCounties.has(tail1.toLowerCase())) {
+        const canon = TEXAS_COUNTIES.find((c) => c.toLowerCase() === tail1.toLowerCase())!;
+        county = canon;
+        ownerTokens = tokens.slice(0, -1);
+      }
+    }
+
+    // Need at least one token left for the owner portion. And if the
+    // remaining owner is a single token, only proceed if we successfully
+    // pulled a county off — a bare surname statewide is too broad.
+    if (ownerTokens.length === 0) return null;
+    if (ownerTokens.length === 1 && !county) return null;
+
+    return { owner: ownerTokens.join(' '), county };
+  };
+
   const askAi = useCallback(async () => {
     const q = searchQuery.trim();
     if (!q) return;
     setAskingAi(true);
 
-    // Fast path: address / street / zip — skip the AI roundtrip, go straight
+    // ────────────────────────────────────────────────────────────────────
+    // Fast path 1: COORDINATES
+    // ────────────────────────────────────────────────────────────────────
+    // Accept any of:
+    //   "30.2076, -98.824"     ← canonical
+    //   "30.2076,-98.824"      ← no space
+    //   "30.2076 -98.824"      ← space separator
+    //   "30.2076N 98.824W"     ← cardinal suffix (W flips to negative)
+    //   "30°12'27\"N 98°49'27\"W"  ← DMS (rare but easy to support)
+    // Validates lat ∈ [-90, 90], lng ∈ [-180, 180]. Outside-TX coords
+    // still fly there but with a soft warning — brokers occasionally
+    // paste from listings elsewhere.
+    const coords = parseCoordinates(q);
+    if (coords) {
+      clearAiSearch();
+      if (map.current) {
+        map.current.flyTo({ center: [coords.lng, coords.lat], zoom: 14, duration: 1200 });
+      }
+      // Soft warning if outside the rough TX bounding box (lat 25.8–36.5,
+      // lng -106.7 to -93.5). Still flies — brokers may be inspecting
+      // out-of-state references.
+      const insideTx = coords.lat >= 25.5 && coords.lat <= 36.8 && coords.lng >= -107 && coords.lng <= -93;
+      toast.success(
+        `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}${insideTx ? '' : ' (outside TX)'}`,
+        { duration: 2500 }
+      );
+      setAskingAi(false);
+      return;
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Fast path 2: OWNER NAME (+ optional county)
+    // ────────────────────────────────────────────────────────────────────
+    // "Dale Crenwelge Gillespie" → owner="Dale Crenwelge", county="Gillespie"
+    // "Schwartz Family Trust"    → owner="Schwartz Family Trust", county=null
+    //
+    // We peel a TX county off the tail if present (single-word or two-word
+    // county names like "Tom Green" / "Live Oak"). Anything that doesn't
+    // look like a road / address / number is fair game for owner search —
+    // address detection already ran above, so we know we're not stepping
+    // on a street query.
+    const ownerQuery = parseOwnerSearch(q);
+    if (ownerQuery) {
+      try {
+        const params = new URLSearchParams({ q: ownerQuery.owner });
+        if (ownerQuery.county) params.set('county', ownerQuery.county);
+        const res = await fetch(`/api/parcels-by-owner?${params}`);
+        const data = await res.json();
+        if (res.ok) {
+          const features = Array.isArray(data?.features) ? data.features : [];
+          if (features.length > 0) {
+            // Render via the existing owner-search-results source so the
+            // golden highlight + count banner show up exactly like the
+            // secondary owner-search input does.
+            const src = map.current?.getSource('owner-search-results') as mapboxgl.GeoJSONSource | undefined;
+            if (src) src.setData({ type: 'FeatureCollection', features });
+            setOwnerSearchQuery(ownerQuery.county ? `${ownerQuery.owner} (${ownerQuery.county})` : ownerQuery.owner);
+            setOwnerSearchCount(features.length);
+            setOwnerSearchTruncated(Boolean(data?.truncated));
+
+            // Fit to bbox so the user can see all matches
+            try {
+              // @ts-expect-error — turf v6.5 .d.ts not exposed
+              const turfMod = (await import('@turf/turf')) as any;
+              const fc = { type: 'FeatureCollection', features };
+              const bbox = turfMod.bbox(fc) as [number, number, number, number];
+              if (bbox.every(Number.isFinite) && map.current) {
+                map.current.fitBounds(
+                  [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+                  { padding: 80, duration: 1200, maxZoom: 15 }
+                );
+              }
+            } catch {}
+
+            toast.success(
+              `${features.length} parcel${features.length === 1 ? '' : 's'} owned by ${ownerQuery.owner}${ownerQuery.county ? ` in ${ownerQuery.county}` : ''}${data?.truncated ? ' (first 200)' : ''}`,
+              { duration: 4000 }
+            );
+            setAskingAi(false);
+            return;
+          }
+          // No matches — fall through to AI in case it was actually a filter query
+        }
+        // If !res.ok, fall through silently — the AI fallback might still understand it
+      } catch {
+        // Network blip — fall through to AI
+      }
+    }
+
+    // Fast path 3: address / street / zip — skip the AI roundtrip, go straight
     // to Mapbox geocoding. Avoids 2s of AI latency and the occasional
     // misclassification when the AI thinks a road name is a filter keyword.
     if (isLikelyAddressOrStreet(q)) {
@@ -2963,6 +3153,9 @@ export default function MapPage() {
       setAskingAi(false);
     }
   }, [searchQuery, comps, clearAiSearch, flyToPlace]);
+  // ⬆ Dep array is intentionally tight — the owner-search + coord fast
+  // paths read state setters (stable across renders) and the imperative
+  // map ref, both of which are exempt from React's deps lint.
 
   // Normalize a county string for comparison — strips "County" suffix,
   // collapses whitespace, lowercases. So "Frio County" / "frio" / "FRIO"
@@ -3865,7 +4058,7 @@ export default function MapPage() {
                   askAi();
                 }
               }}
-              placeholder="Ask: show me all 400+ acre comps in Real County"
+              placeholder="Ask, owner name (Dale Crenwelge Gillespie), coords (30.2076, -98.824), or address"
               className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10"
             />
             {searchQuery && (
