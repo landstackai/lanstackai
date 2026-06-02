@@ -3672,7 +3672,20 @@ export default function MapPage() {
 
   const handleAddAsNewComp = useCallback(() => {
     const primary = selectedParcels[0] || tappedParcel;
-    if (!primary) return;
+
+    // Drawn-only case: no parcel selected, but the broker has a polygon
+    // on the map (the "Boundary Created" sheet path after Combine on
+    // freehand-drawn shapes). Defer to the full handleCreateCompFromBoundary
+    // helper which handles drawn-only, parcel-only, and mixed cases —
+    // including reverse-geocoding the centroid for county derivation
+    // and writing the unioned geometry to boundary_geojson on save.
+    //
+    // Without this fallback the button was silently no-op'd because
+    // `primary` was undefined → early return → nothing happened.
+    if (!primary) {
+      handleCreateCompFromBoundary();
+      return;
+    }
 
     setPrefilledComp({
       county: primary.county || '',
@@ -3685,7 +3698,7 @@ export default function MapPage() {
     setSheetMode('none');
     setShowAddModal(true);
     resetParcelState();
-  }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState]);
+  }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState, handleCreateCompFromBoundary]);
 
   // Switch between Satellite and Terrain views. Both use the same base
   // style URL — the only difference is whether the contour-line overlay
