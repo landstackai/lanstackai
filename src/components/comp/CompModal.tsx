@@ -437,8 +437,19 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     console.info('[CompModal] save payload (final):', current);
     let lastError: any = null;
     let success = false;
+    // ROOT CAUSE: the modal accepts both a fully-loaded existing
+    // comp (has .id) AND a prefill object from the map-page "Add as
+    // New Comp" flow (no .id, just county/acres/centroid). Earlier
+    // code used `comp ? UPDATE : INSERT` — which sent any prefill
+    // object down the UPDATE path with `WHERE id = undefined`,
+    // producing the cryptic "invalid input syntax for type uuid:
+    // undefined" error that's bitten us multiple times.
+    //
+    // Fix: only UPDATE when comp.id is an actual UUID. Anything else
+    // (no comp, prefill object, malformed comp) is treated as INSERT.
+    const isExistingComp = !!comp && typeof comp.id === 'string' && comp.id.length > 0;
     for (let attempt = 0; attempt < 10; attempt++) {
-      const { error } = comp
+      const { error } = isExistingComp
         ? await supabase.from('comps').update(current).eq('id', comp.id)
         : await supabase.from('comps').insert(current);
       if (!error) {
@@ -464,7 +475,7 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       toast.error(`Save failed: ${detail}`, { duration: 6000 });
       setLoading(false);
     } else {
-      toast.success(comp ? 'Comp updated!' : 'Comp added!');
+      toast.success(isExistingComp ? 'Comp updated!' : 'Comp added!');
       onSave();
     }
   };
