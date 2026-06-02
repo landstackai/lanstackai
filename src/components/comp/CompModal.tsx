@@ -360,6 +360,12 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     // the payload and retry. Up to 10 retries — covers the case where a
     // payload references several columns from un-run migrations.
     let current: Record<string, any> = { ...payload };
+
+    // PRE-SAVE PAYLOAD LOG — proves what bundle is live + lets us
+    // diagnose UUID/type errors that name no column. Picked up if
+    // the broker reports a save failure: ask for this line from
+    // their console and we know the exact field with the bad value.
+    console.info('[CompModal] save payload (post-scrub):', JSON.parse(JSON.stringify(current)));
     let lastError: any = null;
     let success = false;
     for (let attempt = 0; attempt < 10; attempt++) {
