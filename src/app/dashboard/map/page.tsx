@@ -6303,6 +6303,15 @@ export default function MapPage() {
                       </p>
                     </div>
 
+                    {/* ─── INPUTS GATED BY PRESENTATION MODE ───────────
+                        Each mode shows ONLY the inputs that matter for it.
+                        Confirmed → Lump Sum or Breakdown inputs + Suggested
+                        List Price card. Range → low/high band. Let's Discuss
+                        → explanation panel, no inputs to fill. Previously
+                        every section was visible at once which is why
+                        brokers said "I have no idea what to fill in." */}
+                    {opinionPresentation === 'confirmed' && (
+                      <>
                     {/* Mode toggle — Lump Sum vs Land + Improvements */}
                     <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
                       <button
@@ -6330,69 +6339,28 @@ export default function MapPage() {
                     </div>
 
                     {bovMode === 'lump_sum' ? (
-                      opinionPresentation === 'range' ? (
-                        // ─── RANGE mode input: two pairs (Low + High) ───
-                        // Each pair $/Ac ↔ Total auto-syncs via subject acres.
-                        // Saved to opinion_range_low_total / opinion_range_high_total
-                        // (migration 035). Falls back to comp-derived range on
-                        // the client report when either field is left blank.
-                        <>
-                          <div className="space-y-2">
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range Low</p>
-                              <div className="grid grid-cols-2 gap-2">
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                  <input type="number" placeholder="$/Acre" value={bovRangeLowPpaInput} onChange={(e) => onRangeLowPpaChange(e.target.value)} className={inputCls} title="Low end of the range, per acre" />
-                                </div>
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                  <input type="number" placeholder="Total" value={bovRangeLowTotalInput} onChange={(e) => onRangeLowTotalChange(e.target.value)} className={inputCls} title="Low end of the range, total dollars" />
-                                </div>
-                              </div>
-                            </div>
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range High</p>
-                              <div className="grid grid-cols-2 gap-2">
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                  <input type="number" placeholder="$/Acre" value={bovRangeHighPpaInput} onChange={(e) => onRangeHighPpaChange(e.target.value)} className={inputCls} title="High end of the range, per acre" />
-                                </div>
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                  <input type="number" placeholder="Total" value={bovRangeHighTotalInput} onChange={(e) => onRangeHighTotalChange(e.target.value)} className={inputCls} title="High end of the range, total dollars" />
-                                </div>
-                              </div>
+                      // ─── CONFIRMED mode + Lump Sum: single $/Ac + Total pair ───
+                      <>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
                             </div>
                           </div>
-                          <p className="text-[10px] text-ink-3 leading-relaxed">
-                            Edit any field — its pair auto-calculates from {formatAcres(subjAcres)}. Leave blank to fall back to the comp-derived range on the client report.
-                          </p>
-                        </>
-                      ) : (
-                        // ─── CONFIRMED / DISCUSS mode input: single pair ───
-                        <>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
-                              <div className="relative">
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
-                              </div>
-                            </div>
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
-                              <div className="relative">
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
-                              </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
                             </div>
                           </div>
-                          <p className="text-[10px] text-ink-3 leading-relaxed">
-                            Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
-                          </p>
-                        </>
-                      )
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
+                        </p>
+                      </>
                     ) : (
                       <>
                         {/* Land Value group */}
@@ -6519,6 +6487,67 @@ export default function MapPage() {
                       </>
                     )}
 
+                      </>
+                    )}
+
+                    {/* ─── RANGE mode inputs (top-level, independent of bovMode) ───
+                        Two pairs (Low + High). Each pair $/Ac ↔ Total auto-syncs
+                        via × subject acres. Saved to opinion_range_low_total /
+                        opinion_range_high_total (migration 035). Empty fields
+                        fall back to the comp-derived range on the client. */}
+                    {opinionPresentation === 'range' && (
+                      <>
+                        <div className="space-y-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range Low</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="$/Acre" value={bovRangeLowPpaInput} onChange={(e) => onRangeLowPpaChange(e.target.value)} className={inputCls} title="Low end of the range, per acre" />
+                              </div>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="Total" value={bovRangeLowTotalInput} onChange={(e) => onRangeLowTotalChange(e.target.value)} className={inputCls} title="Low end of the range, total dollars" />
+                              </div>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range High</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="$/Acre" value={bovRangeHighPpaInput} onChange={(e) => onRangeHighPpaChange(e.target.value)} className={inputCls} title="High end of the range, per acre" />
+                              </div>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="Total" value={bovRangeHighTotalInput} onChange={(e) => onRangeHighTotalChange(e.target.value)} className={inputCls} title="High end of the range, total dollars" />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit any field — its pair auto-calculates from {formatAcres(subjAcres)}. Leave blank to fall back to the comp-derived range on the client report.
+                        </p>
+                      </>
+                    )}
+
+                    {/* ─── LET'S DISCUSS mode — no inputs, just guidance ───
+                        Replaces the inputs with a brief explanation. The
+                        broker doesn't fill anything; client sees "Let's
+                        discuss" instead of a number, with comp data still
+                        visible below. Reduces cognitive load — no inputs
+                        means no questions about what to fill in. */}
+                    {opinionPresentation === 'discuss' && (
+                      <div className="bg-cream/60 border border-beige rounded-lg p-3 space-y-1.5">
+                        <p className="text-[11px] font-semibold text-ink leading-snug">
+                          Nothing to fill in here.
+                        </p>
+                        <p className="text-[10px] text-ink-2 leading-relaxed">
+                          The client report will show <span className="font-mono text-ink italic">&quot;Let&apos;s discuss&quot;</span> instead of a number. Comp data and your valuation notes still appear — they just won&apos;t see a hard valuation. Use Valuation Notes below to leave them a sentence inviting the conversation.
+                        </p>
+                      </div>
+                    )}
+
                     {/* Valuation Notes — broker's WHY paragraph. Appears
                         on the client report below the Opinion of Value.
                         Especially useful in 'discuss' or 'range' mode
@@ -6570,8 +6599,14 @@ export default function MapPage() {
                       on the aspirational number first.
 
                       Lives inside the BOV editor IIFE so it has direct
-                      access to saveBov + bov*Input locals. */}
-                  {(() => {
+                      access to saveBov + bov*Input locals.
+
+                      Gated to Confirmed-mode only: in Range mode the broker
+                      is showing a band (no single list price); in Discuss
+                      mode the whole point is to skip numbers. Hiding the
+                      card in those modes prevents brokers from filling
+                      something the client never sees. */}
+                  {opinionPresentation === 'confirmed' && (() => {
                     // Suggested List Price now ALWAYS renders (no BOV gate).
                     // Rationale: list price is a by-product of the comps, not
                     // of the broker's separate BOV input. We compute a sensible
