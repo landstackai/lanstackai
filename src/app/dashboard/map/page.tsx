@@ -6293,131 +6293,218 @@ export default function MapPage() {
                 return (
                   <>
 
-                  {/* ─── Subject Overview ───────────────────────────────
-                      Two-textarea section that feeds the marketing PDF's
-                      Subject Property page (Page 2). Broker types
-                      bullets/shorthand in "Your Notes" (private, never
-                      appears in the report), clicks Generate to get a
-                      polished prose draft from GPT-4o-mini via
-                      /api/cma/[id]/generate-overview, then edits +
-                      saves. Both fields persist via saveBov. See
-                      migration 032 + design discussion (May 26 2026). */}
-                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Subject Overview</p>
-                      <p className="text-[9px] text-ink-3">for marketing PDF</p>
-                    </div>
+                  {/* ─── Suggested List Price ──────────────────────────
+                      The HEADLINE number on the client report. Defaults
+                      to BOV total × 1.10 (10% negotiation cushion —
+                      typical for TX ranch land); broker can override.
 
-                    {/* PRIVATE NOTES — never appears in any client-
-                        facing surface. Just feeds the AI generator. */}
-                    <div className="space-y-1">
-                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
-                        Your notes <span className="normal-case tracking-normal text-ink-3">· private, just for the AI</span>
-                      </p>
-                      <textarea
-                        placeholder={"551ac, Willow City\nNative Hill Country, ag valuation\nModest improvements: 570sf cabin built 2009, garage/shop, HVAC\nValue is the land — terrain, water, location"}
-                        value={subjectOverviewNotes}
-                        onChange={(e) => setSubjectOverviewNotes(e.target.value)}
-                        onBlur={() => {
-                          saveBov({
-                            mode: bovMode,
-                            total: Number(bovTotalInput) || null,
-                            landValue: Number(bovLandTotalInput) || null,
-                            improvementValue: Number(bovImprovementInput) || null,
-                            subjectOverviewNotes: subjectOverviewNotes.trim() === '' ? null : subjectOverviewNotes,
-                          });
-                        }}
-                        rows={4}
-                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed font-mono"
-                      />
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          disabled={subjectOverviewGenerating || !subjectOverviewNotes.trim() || !viewingCMA?.id}
-                          onClick={async () => {
-                            const cmaId = viewingCMA?.id;
-                            if (!cmaId) return;
-                            const notes = subjectOverviewNotes.trim();
-                            if (!notes) {
-                              toast.error('Add some notes first');
-                              return;
-                            }
-                            setSubjectOverviewGenerating(true);
-                            try {
-                              const res = await fetch(`/api/cma/${cmaId}/generate-overview`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ notes }),
-                              });
-                              const data = await res.json();
-                              if (!res.ok || !data?.ok || typeof data?.prose !== 'string') {
-                                toast.error(data?.error || 'Generation failed');
-                                return;
-                              }
-                              // Confirm before clobbering existing prose
-                              // — if the broker hand-edited the polished
-                              // version, regenerating wipes that work.
-                              // Small UX safety net via window.confirm;
-                              // the textarea also supports Cmd+Z undo
-                              // for inline recovery.
-                              if (subjectOverviewProse.trim().length > 0) {
-                                const ok = window.confirm(
-                                  'Replace your current draft with a new AI version? Your current text will be overwritten (you can Cmd+Z to undo).'
-                                );
-                                if (!ok) return;
-                              }
-                              setSubjectOverviewProse(data.prose);
-                              // Persist the new draft immediately so a
-                              // reload picks it up — saveBov is the
-                              // existing schema-cache-retry path.
-                              saveBov({
-                                mode: bovMode,
-                                total: Number(bovTotalInput) || null,
-                                landValue: Number(bovLandTotalInput) || null,
-                                improvementValue: Number(bovImprovementInput) || null,
-                                subjectOverviewNotes: notes,
-                                subjectOverviewProse: data.prose,
-                              });
-                              toast.success('Draft generated — review + edit below');
-                            } catch (e: any) {
-                              toast.error(e?.message || 'Generation failed');
-                            } finally {
-                              setSubjectOverviewGenerating(false);
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-blue hover:bg-slate-blue-2 text-white text-[11px] font-semibold rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <Sparkles size={11} />
-                          {subjectOverviewGenerating ? 'Generating…' : 'Generate'}
-                        </button>
+                      Why a separate concept from BOV: BOV is "what I
+                      think it'll close at." List price is "what we put
+                      on the sign so the seller has room to negotiate
+                      down." Leading with the list price on the client
+                      report prevents sticker shock — the seller anchors
+                      on the aspirational number first.
+
+                      Lives inside the BOV editor IIFE so it has direct
+                      access to saveBov + bov*Input locals.
+
+                      Gated to Confirmed-mode only: in Range mode the broker
+                      is showing a band (no single list price); in Discuss
+                      mode the whole point is to skip numbers. Hiding the
+                      card in those modes prevents brokers from filling
+                      something the client never sees. */}
+                  {opinionPresentation === 'confirmed' && (() => {
+                    // Suggested List Price now ALWAYS renders (no BOV gate).
+                    // Rationale: list price is a by-product of the comps, not
+                    // of the broker's separate BOV input. We compute a sensible
+                    // default by anchoring on whatever is most authoritative:
+                    //   1. Saved broker override (suggested_list_price)
+                    //   2. BOV × 1.10 (when broker has entered BOV)
+                    //   3. Comp average $/ac × subject acres × 1.10
+                    //      (fall-back when BOV is blank — the comp set IS the
+                    //       valuation)
+                    //   4. Blank with placeholder when neither comps nor BOV
+                    //      are set yet (broker just opened a fresh CMA)
+                    const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
+                    const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
+                    const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
+                    const effectiveBov = bovT > 0 ? bovT : landV + impV;
+
+                    // Comp-derived anchor: prefer adjusted (broker overrides
+                    // applied), fall back to land-only, then total. Each
+                    // averages helper has an .n sample-size so empty sets
+                    // are safely skipped.
+                    const compMid =
+                      (cmaAverages.adjusted.n > 0 ? cmaAverages.adjusted.mid : null)
+                      ?? (cmaAverages.landOnly.n > 0 ? cmaAverages.landOnly.mid : null)
+                      ?? (cmaAverages.total.n > 0 ? cmaAverages.total.mid : null)
+                      ?? 0;
+                    const compDerivedAnchor = compMid > 0 && subjAcres > 0 ? compMid * subjAcres : 0;
+
+                    // Pick the strongest anchor available for the default
+                    // suggestion. Cushion % comes from the broker's profile
+                    // (listPriceCushionPct state, loaded from
+                    // profiles.default_list_price_cushion_pct via migration
+                    // 034). Defaults to 10% for brokers who haven't set it.
+                    const anchor = effectiveBov > 0 ? effectiveBov : compDerivedAnchor;
+                    const cushionMultiplier = 1 + (listPriceCushionPct / 100);
+                    const defaultListPrice = anchor > 0 ? Math.round(anchor * cushionMultiplier) : 0;
+                    const savedOverride = viewingCMA?.suggested_list_price;
+                    const currentList = bovListPriceInput
+                      ? Number(bovListPriceInput)
+                      : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
+                    const cushion = anchor > 0 && currentList > 0
+                      ? ((currentList - anchor) / anchor) * 100
+                      : 10;
+                    const anchorLabel = effectiveBov > 0 ? 'BOV' : compDerivedAnchor > 0 ? 'comp avg' : '';
+                    const expectedSaleHint = effectiveBov > 0
+                      ? formatCurrency(effectiveBov)
+                      : compDerivedAnchor > 0
+                      ? formatCurrency(compDerivedAnchor)
+                      : null;
+                    return (
+                      <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
+                          {/* Inline cushion editor — broker types their preferred
+                              percentage above the anchor (BOV or comp avg).
+                              When changed, recomputes defaultListPrice AND
+                              persists to profiles.default_list_price_cushion_pct
+                              so the same broker's next CMA inherits it. The
+                              per-CMA dollar override below still wins. */}
+                          <div className="flex items-center gap-1 text-[10px] text-ink-3 font-mono">
+                            <span>+</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={50}
+                              step={1}
+                              value={listPriceCushionPct}
+                              onChange={(e) => {
+                                const n = Number(e.target.value);
+                                if (Number.isFinite(n)) setListPriceCushionPct(Math.max(0, Math.min(50, n)));
+                              }}
+                              onBlur={async () => {
+                                if (!currentUserId) return;
+                                setSavingCushionPct(true);
+                                try {
+                                  await supabase
+                                    .from('profiles')
+                                    .update({ default_list_price_cushion_pct: listPriceCushionPct })
+                                    .eq('id', currentUserId);
+                                } catch { /* silent — non-critical preference */ }
+                                setSavingCushionPct(false);
+                              }}
+                              className="w-9 text-right bg-cream border border-beige focus:border-olive rounded px-1 py-0.5 text-ink font-mono outline-none"
+                              title="Your default list-price cushion. Saves to your profile."
+                            />
+                            <span>% above {anchorLabel || 'BOV'}</span>
+                            {savingCushionPct && <span className="text-olive-2">·</span>}
+                          </div>
+                        </div>
+                        {/* Two-input grid: $/Acre + Total auto-sync via subj
+                            acres. Same pattern as the Opinion of Value
+                            inputs above — edit either, the other recomputes
+                            instantly. Only the TOTAL is persisted to the DB
+                            (suggested_list_price); per-acre derives on load. */}
+                        {(() => {
+                          const defaultListPpa = subjAcres > 0 && defaultListPrice > 0
+                            ? Math.round(defaultListPrice / subjAcres)
+                            : 0;
+                          const persistTotal = () => {
+                            const raw = bovListPriceInput.trim();
+                            const n = raw === '' ? null : Number(raw);
+                            saveBov({
+                              mode: bovMode,
+                              total: Number(bovTotalInput) || null,
+                              landValue: Number(bovLandTotalInput) || null,
+                              improvementValue: Number(bovImprovementInput) || null,
+                              suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
+                            });
+                          };
+                          return (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPpa > 0 ? String(defaultListPpa) : 'auto'}
+                                    value={bovListPpaInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPpaInput(raw);
+                                      const ppa = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(ppa) && ppa > 0 && subjAcres > 0) {
+                                        setBovListPriceInput(String(Math.round(ppa * subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPriceInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV…'}
+                                    value={bovListPriceInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPriceInput(raw);
+                                      const total = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(total) && total > 0 && subjAcres > 0) {
+                                        setBovListPpaInput(String(Math.round(total / subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPpaInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          {expectedSaleHint ? (
+                            <>Headline on the client report. Negotiation cushion baked in — expected sale lands around {expectedSaleHint}.</>
+                          ) : (
+                            <>Headline on the client report. Add comps or enter a BOV and we&apos;ll suggest a default with negotiation cushion baked in.</>
+                          )}
+                          {savedOverride != null && (
+                            <>
+                              {' '}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBovListPriceInput('');
+                                  setBovListPpaInput('');
+                                  saveBov({
+                                    mode: bovMode,
+                                    total: Number(bovTotalInput) || null,
+                                    landValue: Number(bovLandTotalInput) || null,
+                                    improvementValue: Number(bovImprovementInput) || null,
+                                    suggestedListPrice: null,
+                                  });
+                                }}
+                                className="text-olive-2 hover:text-olive underline decoration-olive-2/40 underline-offset-2"
+                              >
+                                Reset to default
+                              </button>
+                            </>
+                          )}
+                        </p>
                       </div>
-                    </div>
-
-                    {/* POLISHED PROSE — appears in PDF + share report.
-                        Broker can edit after AI generation or type it
-                        themselves from scratch. */}
-                    <div className="space-y-1 border-t border-beige pt-2">
-                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
-                        Polished overview <span className="normal-case tracking-normal text-ink-3">· appears in PDF</span>
-                      </p>
-                      <textarea
-                        placeholder="Click Generate above to draft, or type your own 2-3 paragraph overview here."
-                        value={subjectOverviewProse}
-                        onChange={(e) => setSubjectOverviewProse(e.target.value)}
-                        onBlur={() => {
-                          saveBov({
-                            mode: bovMode,
-                            total: Number(bovTotalInput) || null,
-                            landValue: Number(bovLandTotalInput) || null,
-                            improvementValue: Number(bovImprovementInput) || null,
-                            subjectOverviewProse: subjectOverviewProse.trim() === '' ? null : subjectOverviewProse,
-                          });
-                        }}
-                        rows={8}
-                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink outline-none transition-all resize-none leading-relaxed"
-                      />
-                    </div>
-                  </div>
+                    );
+                  })()}
 
                   <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
@@ -6771,218 +6858,132 @@ export default function MapPage() {
                     </div>
                   </div>
 
-                  {/* ─── Suggested List Price ──────────────────────────
-                      The HEADLINE number on the client report. Defaults
-                      to BOV total × 1.10 (10% negotiation cushion —
-                      typical for TX ranch land); broker can override.
+                  {/* ─── Subject Overview ───────────────────────────────
+                      Two-textarea section that feeds the marketing PDF's
+                      Subject Property page (Page 2). Broker types
+                      bullets/shorthand in "Your Notes" (private, never
+                      appears in the report), clicks Generate to get a
+                      polished prose draft from GPT-4o-mini via
+                      /api/cma/[id]/generate-overview, then edits +
+                      saves. Both fields persist via saveBov. See
+                      migration 032 + design discussion (May 26 2026). */}
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Subject Overview</p>
+                      <p className="text-[9px] text-ink-3">for marketing PDF</p>
+                    </div>
 
-                      Why a separate concept from BOV: BOV is "what I
-                      think it'll close at." List price is "what we put
-                      on the sign so the seller has room to negotiate
-                      down." Leading with the list price on the client
-                      report prevents sticker shock — the seller anchors
-                      on the aspirational number first.
-
-                      Lives inside the BOV editor IIFE so it has direct
-                      access to saveBov + bov*Input locals.
-
-                      Gated to Confirmed-mode only: in Range mode the broker
-                      is showing a band (no single list price); in Discuss
-                      mode the whole point is to skip numbers. Hiding the
-                      card in those modes prevents brokers from filling
-                      something the client never sees. */}
-                  {opinionPresentation === 'confirmed' && (() => {
-                    // Suggested List Price now ALWAYS renders (no BOV gate).
-                    // Rationale: list price is a by-product of the comps, not
-                    // of the broker's separate BOV input. We compute a sensible
-                    // default by anchoring on whatever is most authoritative:
-                    //   1. Saved broker override (suggested_list_price)
-                    //   2. BOV × 1.10 (when broker has entered BOV)
-                    //   3. Comp average $/ac × subject acres × 1.10
-                    //      (fall-back when BOV is blank — the comp set IS the
-                    //       valuation)
-                    //   4. Blank with placeholder when neither comps nor BOV
-                    //      are set yet (broker just opened a fresh CMA)
-                    const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
-                    const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
-                    const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
-                    const effectiveBov = bovT > 0 ? bovT : landV + impV;
-
-                    // Comp-derived anchor: prefer adjusted (broker overrides
-                    // applied), fall back to land-only, then total. Each
-                    // averages helper has an .n sample-size so empty sets
-                    // are safely skipped.
-                    const compMid =
-                      (cmaAverages.adjusted.n > 0 ? cmaAverages.adjusted.mid : null)
-                      ?? (cmaAverages.landOnly.n > 0 ? cmaAverages.landOnly.mid : null)
-                      ?? (cmaAverages.total.n > 0 ? cmaAverages.total.mid : null)
-                      ?? 0;
-                    const compDerivedAnchor = compMid > 0 && subjAcres > 0 ? compMid * subjAcres : 0;
-
-                    // Pick the strongest anchor available for the default
-                    // suggestion. Cushion % comes from the broker's profile
-                    // (listPriceCushionPct state, loaded from
-                    // profiles.default_list_price_cushion_pct via migration
-                    // 034). Defaults to 10% for brokers who haven't set it.
-                    const anchor = effectiveBov > 0 ? effectiveBov : compDerivedAnchor;
-                    const cushionMultiplier = 1 + (listPriceCushionPct / 100);
-                    const defaultListPrice = anchor > 0 ? Math.round(anchor * cushionMultiplier) : 0;
-                    const savedOverride = viewingCMA?.suggested_list_price;
-                    const currentList = bovListPriceInput
-                      ? Number(bovListPriceInput)
-                      : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
-                    const cushion = anchor > 0 && currentList > 0
-                      ? ((currentList - anchor) / anchor) * 100
-                      : 10;
-                    const anchorLabel = effectiveBov > 0 ? 'BOV' : compDerivedAnchor > 0 ? 'comp avg' : '';
-                    const expectedSaleHint = effectiveBov > 0
-                      ? formatCurrency(effectiveBov)
-                      : compDerivedAnchor > 0
-                      ? formatCurrency(compDerivedAnchor)
-                      : null;
-                    return (
-                      <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
-                        <div className="flex items-baseline justify-between gap-2">
-                          <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
-                          {/* Inline cushion editor — broker types their preferred
-                              percentage above the anchor (BOV or comp avg).
-                              When changed, recomputes defaultListPrice AND
-                              persists to profiles.default_list_price_cushion_pct
-                              so the same broker's next CMA inherits it. The
-                              per-CMA dollar override below still wins. */}
-                          <div className="flex items-center gap-1 text-[10px] text-ink-3 font-mono">
-                            <span>+</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={50}
-                              step={1}
-                              value={listPriceCushionPct}
-                              onChange={(e) => {
-                                const n = Number(e.target.value);
-                                if (Number.isFinite(n)) setListPriceCushionPct(Math.max(0, Math.min(50, n)));
-                              }}
-                              onBlur={async () => {
-                                if (!currentUserId) return;
-                                setSavingCushionPct(true);
-                                try {
-                                  await supabase
-                                    .from('profiles')
-                                    .update({ default_list_price_cushion_pct: listPriceCushionPct })
-                                    .eq('id', currentUserId);
-                                } catch { /* silent — non-critical preference */ }
-                                setSavingCushionPct(false);
-                              }}
-                              className="w-9 text-right bg-cream border border-beige focus:border-olive rounded px-1 py-0.5 text-ink font-mono outline-none"
-                              title="Your default list-price cushion. Saves to your profile."
-                            />
-                            <span>% above {anchorLabel || 'BOV'}</span>
-                            {savingCushionPct && <span className="text-olive-2">·</span>}
-                          </div>
-                        </div>
-                        {/* Two-input grid: $/Acre + Total auto-sync via subj
-                            acres. Same pattern as the Opinion of Value
-                            inputs above — edit either, the other recomputes
-                            instantly. Only the TOTAL is persisted to the DB
-                            (suggested_list_price); per-acre derives on load. */}
-                        {(() => {
-                          const defaultListPpa = subjAcres > 0 && defaultListPrice > 0
-                            ? Math.round(defaultListPrice / subjAcres)
-                            : 0;
-                          const persistTotal = () => {
-                            const raw = bovListPriceInput.trim();
-                            const n = raw === '' ? null : Number(raw);
-                            saveBov({
-                              mode: bovMode,
-                              total: Number(bovTotalInput) || null,
-                              landValue: Number(bovLandTotalInput) || null,
-                              improvementValue: Number(bovImprovementInput) || null,
-                              suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
-                            });
-                          };
-                          return (
-                            <div className="grid grid-cols-2 gap-2">
-                              <div>
-                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
-                                  <input
-                                    type="number"
-                                    placeholder={defaultListPpa > 0 ? String(defaultListPpa) : 'auto'}
-                                    value={bovListPpaInput}
-                                    onChange={(e) => {
-                                      const raw = e.target.value;
-                                      setBovListPpaInput(raw);
-                                      const ppa = raw === '' ? NaN : Number(raw);
-                                      if (Number.isFinite(ppa) && ppa > 0 && subjAcres > 0) {
-                                        setBovListPriceInput(String(Math.round(ppa * subjAcres)));
-                                      } else if (raw === '') {
-                                        setBovListPriceInput('');
-                                      }
-                                    }}
-                                    onBlur={persistTotal}
-                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
-                                  />
-                                </div>
-                              </div>
-                              <div>
-                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
-                                <div className="relative">
-                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
-                                  <input
-                                    type="number"
-                                    placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV…'}
-                                    value={bovListPriceInput}
-                                    onChange={(e) => {
-                                      const raw = e.target.value;
-                                      setBovListPriceInput(raw);
-                                      const total = raw === '' ? NaN : Number(raw);
-                                      if (Number.isFinite(total) && total > 0 && subjAcres > 0) {
-                                        setBovListPpaInput(String(Math.round(total / subjAcres)));
-                                      } else if (raw === '') {
-                                        setBovListPpaInput('');
-                                      }
-                                    }}
-                                    onBlur={persistTotal}
-                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })()}
-                        <p className="text-[10px] text-ink-3 leading-relaxed">
-                          {expectedSaleHint ? (
-                            <>Headline on the client report. Negotiation cushion baked in — expected sale lands around {expectedSaleHint}.</>
-                          ) : (
-                            <>Headline on the client report. Add comps or enter a BOV and we&apos;ll suggest a default with negotiation cushion baked in.</>
-                          )}
-                          {savedOverride != null && (
-                            <>
-                              {' '}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBovListPriceInput('');
-                                  setBovListPpaInput('');
-                                  saveBov({
-                                    mode: bovMode,
-                                    total: Number(bovTotalInput) || null,
-                                    landValue: Number(bovLandTotalInput) || null,
-                                    improvementValue: Number(bovImprovementInput) || null,
-                                    suggestedListPrice: null,
-                                  });
-                                }}
-                                className="text-olive-2 hover:text-olive underline decoration-olive-2/40 underline-offset-2"
-                              >
-                                Reset to default
-                              </button>
-                            </>
-                          )}
-                        </p>
+                    {/* PRIVATE NOTES — never appears in any client-
+                        facing surface. Just feeds the AI generator. */}
+                    <div className="space-y-1">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Your notes <span className="normal-case tracking-normal text-ink-3">· private, just for the AI</span>
+                      </p>
+                      <textarea
+                        placeholder={"551ac, Willow City\nNative Hill Country, ag valuation\nModest improvements: 570sf cabin built 2009, garage/shop, HVAC\nValue is the land — terrain, water, location"}
+                        value={subjectOverviewNotes}
+                        onChange={(e) => setSubjectOverviewNotes(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewNotes: subjectOverviewNotes.trim() === '' ? null : subjectOverviewNotes,
+                          });
+                        }}
+                        rows={4}
+                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed font-mono"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={subjectOverviewGenerating || !subjectOverviewNotes.trim() || !viewingCMA?.id}
+                          onClick={async () => {
+                            const cmaId = viewingCMA?.id;
+                            if (!cmaId) return;
+                            const notes = subjectOverviewNotes.trim();
+                            if (!notes) {
+                              toast.error('Add some notes first');
+                              return;
+                            }
+                            setSubjectOverviewGenerating(true);
+                            try {
+                              const res = await fetch(`/api/cma/${cmaId}/generate-overview`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ notes }),
+                              });
+                              const data = await res.json();
+                              if (!res.ok || !data?.ok || typeof data?.prose !== 'string') {
+                                toast.error(data?.error || 'Generation failed');
+                                return;
+                              }
+                              // Confirm before clobbering existing prose
+                              // — if the broker hand-edited the polished
+                              // version, regenerating wipes that work.
+                              // Small UX safety net via window.confirm;
+                              // the textarea also supports Cmd+Z undo
+                              // for inline recovery.
+                              if (subjectOverviewProse.trim().length > 0) {
+                                const ok = window.confirm(
+                                  'Replace your current draft with a new AI version? Your current text will be overwritten (you can Cmd+Z to undo).'
+                                );
+                                if (!ok) return;
+                              }
+                              setSubjectOverviewProse(data.prose);
+                              // Persist the new draft immediately so a
+                              // reload picks it up — saveBov is the
+                              // existing schema-cache-retry path.
+                              saveBov({
+                                mode: bovMode,
+                                total: Number(bovTotalInput) || null,
+                                landValue: Number(bovLandTotalInput) || null,
+                                improvementValue: Number(bovImprovementInput) || null,
+                                subjectOverviewNotes: notes,
+                                subjectOverviewProse: data.prose,
+                              });
+                              toast.success('Draft generated — review + edit below');
+                            } catch (e: any) {
+                              toast.error(e?.message || 'Generation failed');
+                            } finally {
+                              setSubjectOverviewGenerating(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-blue hover:bg-slate-blue-2 text-white text-[11px] font-semibold rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Sparkles size={11} />
+                          {subjectOverviewGenerating ? 'Generating…' : 'Generate'}
+                        </button>
                       </div>
-                    );
-                  })()}
+                    </div>
+
+                    {/* POLISHED PROSE — appears in PDF + share report.
+                        Broker can edit after AI generation or type it
+                        themselves from scratch. */}
+                    <div className="space-y-1 border-t border-beige pt-2">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Polished overview <span className="normal-case tracking-normal text-ink-3">· appears in PDF</span>
+                      </p>
+                      <textarea
+                        placeholder="Click Generate above to draft, or type your own 2-3 paragraph overview here."
+                        value={subjectOverviewProse}
+                        onChange={(e) => setSubjectOverviewProse(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewProse: subjectOverviewProse.trim() === '' ? null : subjectOverviewProse,
+                          });
+                        }}
+                        rows={8}
+                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink outline-none transition-all resize-none leading-relaxed"
+                      />
+                    </div>
+                  </div>
+
                   </>
                 );
               })()}
