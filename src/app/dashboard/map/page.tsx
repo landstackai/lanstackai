@@ -6404,32 +6404,66 @@ export default function MapPage() {
                       Lives inside the BOV editor IIFE so it has direct
                       access to saveBov + bov*Input locals. */}
                   {(() => {
+                    // Suggested List Price now ALWAYS renders (no BOV gate).
+                    // Rationale: list price is a by-product of the comps, not
+                    // of the broker's separate BOV input. We compute a sensible
+                    // default by anchoring on whatever is most authoritative:
+                    //   1. Saved broker override (suggested_list_price)
+                    //   2. BOV × 1.10 (when broker has entered BOV)
+                    //   3. Comp average $/ac × subject acres × 1.10
+                    //      (fall-back when BOV is blank — the comp set IS the
+                    //       valuation)
+                    //   4. Blank with placeholder when neither comps nor BOV
+                    //      are set yet (broker just opened a fresh CMA)
                     const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
                     const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
                     const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
                     const effectiveBov = bovT > 0 ? bovT : landV + impV;
-                    if (effectiveBov <= 0) return null;
-                    const defaultListPrice = Math.round(effectiveBov * 1.10);
+
+                    // Comp-derived anchor: prefer adjusted (broker overrides
+                    // applied), fall back to land-only, then total. Each
+                    // averages helper has an .n sample-size so empty sets
+                    // are safely skipped.
+                    const compMid =
+                      (cmaAverages.adjusted.n > 0 ? cmaAverages.adjusted.mid : null)
+                      ?? (cmaAverages.landOnly.n > 0 ? cmaAverages.landOnly.mid : null)
+                      ?? (cmaAverages.total.n > 0 ? cmaAverages.total.mid : null)
+                      ?? 0;
+                    const compDerivedAnchor = compMid > 0 && subjAcres > 0 ? compMid * subjAcres : 0;
+
+                    // Pick the strongest anchor available for the default
+                    // suggestion. 10% negotiation cushion is the typical
+                    // TX-ranch heuristic (broker can override anything).
+                    const anchor = effectiveBov > 0 ? effectiveBov : compDerivedAnchor;
+                    const defaultListPrice = anchor > 0 ? Math.round(anchor * 1.10) : 0;
                     const savedOverride = viewingCMA?.suggested_list_price;
                     const currentList = bovListPriceInput
                       ? Number(bovListPriceInput)
                       : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
-                    const cushion = effectiveBov > 0 && currentList > 0
-                      ? ((currentList - effectiveBov) / effectiveBov) * 100
+                    const cushion = anchor > 0 && currentList > 0
+                      ? ((currentList - anchor) / anchor) * 100
                       : 10;
+                    const anchorLabel = effectiveBov > 0 ? 'BOV' : compDerivedAnchor > 0 ? 'comp avg' : '';
+                    const expectedSaleHint = effectiveBov > 0
+                      ? formatCurrency(effectiveBov)
+                      : compDerivedAnchor > 0
+                      ? formatCurrency(compDerivedAnchor)
+                      : null;
                     return (
                       <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
                         <div className="flex items-baseline justify-between">
                           <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
-                          <p className="text-[10px] text-ink-3 font-mono">
-                            {cushion >= 0 ? '+' : ''}{cushion.toFixed(0)}% above BOV
-                          </p>
+                          {anchor > 0 && (
+                            <p className="text-[10px] text-ink-3 font-mono">
+                              {cushion >= 0 ? '+' : ''}{cushion.toFixed(0)}% above {anchorLabel}
+                            </p>
+                          )}
                         </div>
                         <div className="relative">
                           <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
                           <input
                             type="number"
-                            placeholder={String(defaultListPrice)}
+                            placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV to suggest…'}
                             value={bovListPriceInput}
                             onChange={(e) => setBovListPriceInput(e.target.value)}
                             onBlur={() => {
@@ -6447,7 +6481,11 @@ export default function MapPage() {
                           />
                         </div>
                         <p className="text-[10px] text-ink-3 leading-relaxed">
-                          Headline on the client report. Negotiation cushion baked in — expected sale lands around {formatCurrency(effectiveBov)}.
+                          {expectedSaleHint ? (
+                            <>Headline on the client report. Negotiation cushion baked in — expected sale lands around {expectedSaleHint}.</>
+                          ) : (
+                            <>Headline on the client report. Add comps or enter a BOV and we&apos;ll suggest a default with negotiation cushion baked in.</>
+                          )}
                           {savedOverride != null && (
                             <>
                               {' '}
