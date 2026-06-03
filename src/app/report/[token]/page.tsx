@@ -590,9 +590,26 @@ export default function ClientReport({ params }: ClientReportProps) {
             const usingLandOnly = hasAnyAdjustedComp && landOnly.length > 0;
 
             // Active range = land-only when adjustments exist, else all-in.
-            const rngLow = usingLandOnly ? lLow : aLow;
-            const rngMid = usingLandOnly ? lMid : aMid;
-            const rngHigh = usingLandOnly ? lHigh : aHigh;
+            //
+            // Broker override (migration 035): if the broker explicitly set
+            // opinion_range_low_total / opinion_range_high_total on the CMA
+            // (via the Range-mode input pair in the workspace), those values
+            // win — both for display in Range mode and for the per-acre
+            // derivation (total ÷ subject acres). NULL on either column
+            // falls back to the comp-derived range. Self-healing on missing
+            // migration: column reads as undefined, treated as null.
+            const compRngLow = usingLandOnly ? lLow : aLow;
+            const compRngMid = usingLandOnly ? lMid : aMid;
+            const compRngHigh = usingLandOnly ? lHigh : aHigh;
+            const brokerRangeLowTotal = Number((cma as any).opinion_range_low_total) || 0;
+            const brokerRangeHighTotal = Number((cma as any).opinion_range_high_total) || 0;
+            const rngLow = brokerRangeLowTotal > 0 && subjAcres > 0
+              ? brokerRangeLowTotal / subjAcres
+              : compRngLow;
+            const rngHigh = brokerRangeHighTotal > 0 && subjAcres > 0
+              ? brokerRangeHighTotal / subjAcres
+              : compRngHigh;
+            const rngMid = (rngLow + rngHigh) / 2 || compRngMid;
 
             // Compute the total broker opinion + components
             const opinionLand = Number.isFinite(landNum) && landNum > 0 ? landNum : 0;

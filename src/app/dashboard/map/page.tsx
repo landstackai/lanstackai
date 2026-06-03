@@ -230,6 +230,14 @@ export default function MapPage() {
   // Lump-sum mode inputs (legacy fields, kept for that mode)
   const [bovPpaInput, setBovPpaInput] = useState<string>('');
   const [bovTotalInput, setBovTotalInput] = useState<string>('');
+  // Range-mode inputs — broker-set Low/High band. Each pair ($/Acre +
+  // Total) auto-syncs via × subject_acres. Stored as TOTAL only on
+  // cmas.opinion_range_low_total / opinion_range_high_total; per-acre
+  // derives on display. Only rendered when opinionPresentation === 'range'.
+  const [bovRangeLowPpaInput, setBovRangeLowPpaInput] = useState<string>('');
+  const [bovRangeLowTotalInput, setBovRangeLowTotalInput] = useState<string>('');
+  const [bovRangeHighPpaInput, setBovRangeHighPpaInput] = useState<string>('');
+  const [bovRangeHighTotalInput, setBovRangeHighTotalInput] = useState<string>('');
   // Breakdown-mode inputs
   const [bovLandPpaInput, setBovLandPpaInput] = useState<string>('');
   const [bovLandTotalInput, setBovLandTotalInput] = useState<string>('');
@@ -2322,6 +2330,27 @@ export default function MapPage() {
       } else {
         setBovListPriceInput('');
       }
+    }
+
+    // Range-mode inputs — broker-set Low/High band (migration 035).
+    // Loaded as TOTAL; per-acre is derived for display via × acres.
+    const savedRangeLow = cma?.opinion_range_low_total;
+    const savedRangeHigh = cma?.opinion_range_high_total;
+    const rangeLowNum = savedRangeLow != null ? Number(savedRangeLow) : NaN;
+    const rangeHighNum = savedRangeHigh != null ? Number(savedRangeHigh) : NaN;
+    if (Number.isFinite(rangeLowNum) && rangeLowNum > 0) {
+      setBovRangeLowTotalInput(String(Math.round(rangeLowNum)));
+      setBovRangeLowPpaInput(acres > 0 ? String(Math.round(rangeLowNum / acres)) : '');
+    } else {
+      setBovRangeLowTotalInput('');
+      setBovRangeLowPpaInput('');
+    }
+    if (Number.isFinite(rangeHighNum) && rangeHighNum > 0) {
+      setBovRangeHighTotalInput(String(Math.round(rangeHighNum)));
+      setBovRangeHighPpaInput(acres > 0 ? String(Math.round(rangeHighNum / acres)) : '');
+    } else {
+      setBovRangeHighTotalInput('');
+      setBovRangeHighPpaInput('');
     }
 
     // Opinion presentation mode + valuation notes — both nullable on
@@ -5730,6 +5759,13 @@ export default function MapPage() {
                   // appears in the PDF + (optionally) share report.
                   subjectOverviewNotes?: string | null;
                   subjectOverviewProse?: string | null;
+                  // Range-mode totals (migration 035). Per-acre is derived
+                  // on display from the TOTAL ÷ subject acres. Both
+                  // nullable — when null, client report falls back to the
+                  // comp-derived range. Omitting the key preserves the
+                  // existing DB value; passing null explicitly clears it.
+                  rangeLowTotal?: number | null;
+                  rangeHighTotal?: number | null;
                 }) => {
                   const fields: any = {
                     broker_opinion_mode: patch.mode,
@@ -5748,6 +5784,8 @@ export default function MapPage() {
                   if ('valuationNotes' in patch) fields.valuation_notes = patch.valuationNotes;
                   if ('subjectOverviewNotes' in patch) fields.subject_overview_notes = patch.subjectOverviewNotes;
                   if ('subjectOverviewProse' in patch) fields.subject_overview_prose = patch.subjectOverviewProse;
+                  if ('rangeLowTotal' in patch) fields.opinion_range_low_total = patch.rangeLowTotal;
+                  if ('rangeHighTotal' in patch) fields.opinion_range_high_total = patch.rangeHighTotal;
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
 
@@ -5823,6 +5861,69 @@ export default function MapPage() {
                     setBovPpaInput(String(Math.round(ppa)));
                   }
                   saveBov({ ...lumpClear, total });
+                };
+
+                // ─── RANGE handlers (Low + High, each pair $/Ac ↔ Total) ───
+                // Mirror the lump-sum sync pattern but operate on the four
+                // range fields. Each pair (Low or High) auto-syncs across
+                // $/Acre and Total via subj acres. Writes to migration 035
+                // columns opinion_range_low_total / opinion_range_high_total.
+                // Empty / invalid input clears the corresponding pair AND
+                // writes null to the DB so the comp-derived range falls
+                // through again on the client report.
+                const onRangeLowPpaChange = (raw: string) => {
+                  setBovRangeLowPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovRangeLowTotalInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovRangeLowTotalInput(String(Math.round(total)));
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: Math.round(total) });
+                  }
+                };
+                const onRangeLowTotalChange = (raw: string) => {
+                  setBovRangeLowTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovRangeLowPpaInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    setBovRangeLowPpaInput(String(Math.round(total / subjAcres)));
+                  }
+                  saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: Math.round(total) });
+                };
+                const onRangeHighPpaChange = (raw: string) => {
+                  setBovRangeHighPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovRangeHighTotalInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovRangeHighTotalInput(String(Math.round(total)));
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: Math.round(total) });
+                  }
+                };
+                const onRangeHighTotalChange = (raw: string) => {
+                  setBovRangeHighTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovRangeHighPpaInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    setBovRangeHighPpaInput(String(Math.round(total / subjAcres)));
+                  }
+                  saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: Math.round(total) });
                 };
 
                 // ─── BREAKDOWN handlers ───
@@ -6229,27 +6330,69 @@ export default function MapPage() {
                     </div>
 
                     {bovMode === 'lump_sum' ? (
-                      <>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
-                            <div className="relative">
-                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
+                      opinionPresentation === 'range' ? (
+                        // ─── RANGE mode input: two pairs (Low + High) ───
+                        // Each pair $/Ac ↔ Total auto-syncs via subject acres.
+                        // Saved to opinion_range_low_total / opinion_range_high_total
+                        // (migration 035). Falls back to comp-derived range on
+                        // the client report when either field is left blank.
+                        <>
+                          <div className="space-y-2">
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range Low</p>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input type="number" placeholder="$/Acre" value={bovRangeLowPpaInput} onChange={(e) => onRangeLowPpaChange(e.target.value)} className={inputCls} title="Low end of the range, per acre" />
+                                </div>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input type="number" placeholder="Total" value={bovRangeLowTotalInput} onChange={(e) => onRangeLowTotalChange(e.target.value)} className={inputCls} title="Low end of the range, total dollars" />
+                                </div>
+                              </div>
+                            </div>
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range High</p>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input type="number" placeholder="$/Acre" value={bovRangeHighPpaInput} onChange={(e) => onRangeHighPpaChange(e.target.value)} className={inputCls} title="High end of the range, per acre" />
+                                </div>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input type="number" placeholder="Total" value={bovRangeHighTotalInput} onChange={(e) => onRangeHighTotalChange(e.target.value)} className={inputCls} title="High end of the range, total dollars" />
+                                </div>
+                              </div>
                             </div>
                           </div>
-                          <div>
-                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
-                            <div className="relative">
-                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
+                          <p className="text-[10px] text-ink-3 leading-relaxed">
+                            Edit any field — its pair auto-calculates from {formatAcres(subjAcres)}. Leave blank to fall back to the comp-derived range on the client report.
+                          </p>
+                        </>
+                      ) : (
+                        // ─── CONFIRMED / DISCUSS mode input: single pair ───
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <p className="text-[10px] text-ink-3 leading-relaxed">
-                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
-                        </p>
-                      </>
+                          <p className="text-[10px] text-ink-3 leading-relaxed">
+                            Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
+                          </p>
+                        </>
+                      )
                     ) : (
                       <>
                         {/* Land Value group */}
