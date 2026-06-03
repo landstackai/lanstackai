@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { renderToBuffer } from '@react-pdf/renderer';
 import React from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { createClient as createAnonClient } from '@supabase/supabase-js';
+import { createClient as createServerClient } from '@/lib/supabase/server';
 import { MarketingCMAPdf } from '@/lib/pdf/MarketingCMAPdf';
 import { buildPdfData } from '@/lib/pdf/buildPdfData';
 import type { CmaPdfBroker } from '@/lib/pdf/types';
@@ -50,22 +51,43 @@ export async function GET(
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
 
-  // Anonymous client. RLS (migrations 008 + 009) gates everything:
-  //   - cmas SELECT is allowed only when share_token matches AND
-  //     share_expires_at hasn't passed
-  //   - comps SELECT is allowed only when the comp id appears in
-  //     any non-expired shared CMA's selected_comp_ids
-  //   - profiles SELECT is column-restricted to (id, full_name,
-  //     brokerage_name) for anon
-  const supabase = createClient(supabaseUrl, anonKey);
-
-  // 1. Fetch CMA by share_token. If RLS blocks it (expired share, or
-  // token doesn't exist), .single() returns null + error.
-  const { data: cma, error: cmaErr } = await supabase
+  // 1. Fetch CMA by share_token. We try the COOKIE-AWARE server client
+  //    first — this handles the broker-tests-their-own-share-URL case,
+  //    where the broker is logged in as themselves and reads via owner
+  //    RLS. If the cookie path returns no row (the request came from a
+  //    real anon visitor with no auth cookie, OR the broker isn't the
+  //    owner of this CMA), fall back to the pure-anon client which reads
+  //    via the share_token RLS policy (migration 008).
+  //
+  // .maybeSingle() avoids the "Cannot coerce to a single JSON object"
+  // error when RLS blocks the read (0 rows). We then explicitly fall
+  // back to anon if the first read returned null.
+  // Track which client successfully read the CMA — use the same one
+  // for the downstream comps + profile reads so the auth context stays
+  // consistent. (RLS for those tables follows the same pattern: owner
+  // can read their own; anon can read via the share_token relationship.)
+  const cookieClient = createServerClient();
+  let supabase: any = cookieClient;
+  let { data: cma, error: cmaErr } = await cookieClient
     .from('cmas')
     .select('*')
     .eq('share_token', token)
-    .single();
+    .maybeSingle();
+
+  if (!cma) {
+    // Fall back to anon. Real anon visitors (no auth cookie) land
+    // here. RLS (migration 008) gates the read on share_token +
+    // share_expires_at.
+    const anonClient = createAnonClient(supabaseUrl, anonKey);
+    const fallback = await anonClient
+      .from('cmas')
+      .select('*')
+      .eq('share_token', token)
+      .maybeSingle();
+    cma = fallback.data;
+    cmaErr = fallback.error;
+    supabase = anonClient;
+  }
 
   if (cmaErr || !cma) {
     return NextResponse.json(
