@@ -3829,16 +3829,35 @@ export default function MapPage() {
     const total = parcels.reduce((sum, p) => sum + (p.acres || 0), 0);
     setMergedAcres(total);
 
+    // Union the parcel geometries into a single Feature and stash in
+    // React state. Without this, the "Add as New Comp" button on the
+    // boundary_created sheet can't find a polygon — drawRef is empty,
+    // selectedParcels is empty (cleared right after this), and the
+    // merged-boundary Mapbox source isn't a React state, so the handler
+    // would bail with "Draw a polygon or select parcels first."
+    //
+    // Same union pattern combineAll uses, just operating on the
+    // ParcelFeature[] argument instead of drawRef + selectedParcels.
+    const parcelFeatures = parcels
+      .filter((p) => p.geometry)
+      .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry as any }));
+    if (parcelFeatures.length > 0) {
+      let merged: any = parcelFeatures[0];
+      for (let i = 1; i < parcelFeatures.length; i++) {
+        try {
+          const u = turf.union(merged as any, parcelFeatures[i] as any);
+          if (u) merged = u;
+        } catch {}
+      }
+      setMergedGeometry(merged?.geometry || merged);
+    }
+
     if (map.current && mapLoaded) {
       const src = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
       if (src) {
         src.setData({
           type: 'FeatureCollection',
-          features: parcels.filter(p => p.geometry).map(p => ({
-            type: 'Feature' as const,
-            properties: {},
-            geometry: p.geometry,
-          })),
+          features: parcelFeatures,
         });
       }
       // Clear selection layer
