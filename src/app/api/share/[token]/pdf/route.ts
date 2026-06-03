@@ -99,13 +99,25 @@ export async function GET(
     );
   }
 
-  // 2. Fetch the selected comps
+  // 2. Fetch the selected comps via ANON client regardless of which
+  //    client read the CMA. Rationale: migration 008's anon RLS is
+  //    designed for the sharing use case — anon can read any comp that
+  //    appears in any non-expired shared CMA's selected_comp_ids. The
+  //    broker's owner RLS, by contrast, only returns comps the broker
+  //    PERSONALLY owns. When a CMA contains team-shared or imported
+  //    comps owned by other accounts, owner RLS silently drops them.
+  //    That was causing the PDF map to show only 3 of 6 comps even
+  //    though the share view's auth chain happened to surface them all.
+  //
+  //    Using anon here keeps the share PDF self-consistent: every comp
+  //    visible on the share page is also visible in the PDF.
   const selectedIds: string[] = Array.isArray(cma.selected_comp_ids)
     ? cma.selected_comp_ids
     : [];
   let comps: any[] = [];
   if (selectedIds.length > 0) {
-    const { data: compData } = await supabase
+    const compClient = createAnonClient(supabaseUrl, anonKey);
+    const { data: compData } = await compClient
       .from('comps')
       .select('*')
       .in('id', selectedIds);
