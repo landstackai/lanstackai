@@ -5116,15 +5116,96 @@ export default function MapPage() {
                   Subject name pretty-printed (CARAWAY PARTNERS LTD →
                   Caraway Partners LTD) so the workspace doesn't read
                   like a CAD parcel record. */}
-              <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
-                <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
-                </div>
-                <p className="text-sm font-semibold text-ink">{properCase(viewingCMA.subject_name)}</p>
-                <p className="text-xs text-ink-2 font-mono tabular-nums">
-                  {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
-                </p>
+              <div className="bg-white border border-beige rounded-xl p-3">
+                {/* Subject + headline pricing display. Mirrors the client
+                    share view's Subject strip — broker opens a CMA and
+                    immediately sees the recommendation on the same card as
+                    the property info. Read-only display; the editable
+                    Suggested List Price + Opinion of Value inputs live in
+                    their own cards below.
+
+                    Headline auto-picks based on what's filled:
+                      • presentation === 'discuss'   → "Let's discuss"
+                      • presentation === 'range' + range set → "$LO–$HI"
+                      • suggested_list_price set → that
+                      • opinion_of_value (lump or breakdown) set → that
+                      • nothing set → blank right side (no clutter) */}
+                {(() => {
+                  const v: any = viewingCMA;
+                  const presentation = (v?.opinion_presentation as 'confirmed' | 'range' | 'discuss' | null) || 'confirmed';
+                  const isDiscuss = presentation === 'discuss';
+                  const isRange = presentation === 'range';
+                  const rangeLow = Number(v?.opinion_range_low_total) || 0;
+                  const rangeHigh = Number(v?.opinion_range_high_total) || 0;
+                  const listPrice = Number(v?.suggested_list_price) || 0;
+                  const bovLump = Number(v?.broker_opinion_value) || 0;
+                  const bovLand = Number(v?.broker_opinion_land_value) || 0;
+                  const bovImp = Number(v?.broker_opinion_improvement_value) || 0;
+                  const bovBreakdown = bovLand + bovImp;
+                  const oovTotal = bovLump > 0 ? bovLump : (bovBreakdown > 0 ? bovBreakdown : 0);
+                  const headlineKind: 'discuss' | 'range' | 'list' | 'oov' | 'none' =
+                    isDiscuss ? 'discuss'
+                    : isRange && rangeHigh > rangeLow && rangeLow > 0 ? 'range'
+                    : listPrice > 0 ? 'list'
+                    : oovTotal > 0 ? 'oov'
+                    : 'none';
+                  const headlineValue =
+                    headlineKind === 'list' ? listPrice
+                    : headlineKind === 'oov' ? oovTotal
+                    : 0;
+                  const headlinePpa = subjAcres > 0 && headlineValue > 0 ? headlineValue / subjAcres : 0;
+                  return (
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1 min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
+                        </div>
+                        <p className="text-sm font-semibold text-ink truncate">{properCase(viewingCMA.subject_name)}</p>
+                        <p className="text-xs text-ink-2 font-mono tabular-nums">
+                          {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
+                        </p>
+                      </div>
+                      {headlineKind !== 'none' && (
+                        <div className="text-right flex-shrink-0 max-w-[10rem]">
+                          <p className="text-[9px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                            {headlineKind === 'discuss' ? 'Valuation'
+                              : headlineKind === 'range' ? 'Range'
+                              : headlineKind === 'list' ? 'Suggested List'
+                              : 'Opinion of Value'}
+                          </p>
+                          {headlineKind === 'discuss' ? (
+                            <p className="text-sm font-semibold text-ink italic font-mono leading-tight mt-0.5">
+                              Let&apos;s discuss
+                            </p>
+                          ) : headlineKind === 'range' ? (
+                            <>
+                              <p className="text-sm font-semibold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                {formatCurrency(rangeLow)}–{formatCurrency(rangeHigh)}
+                              </p>
+                              {subjAcres > 0 && (
+                                <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                  {formatPPA(rangeLow / subjAcres)}–{formatPPA(rangeHigh / subjAcres)}
+                                </p>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-base font-bold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                {formatCurrency(headlineValue)}
+                              </p>
+                              {headlinePpa > 0 && (
+                                <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                  {formatPPA(headlinePpa)}
+                                </p>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* ─── SUBJECT-RELATED ACTIONS ───────────────────────
