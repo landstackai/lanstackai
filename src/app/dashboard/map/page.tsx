@@ -318,6 +318,14 @@ export default function MapPage() {
   // only that CMA's subject + selected comps and shows a workspace banner.
   const [viewingCMA, setViewingCMA] = useState<any | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Broker's preferred List Price cushion % (above BOV / comp avg).
+  // Persisted on profiles.default_list_price_cushion_pct via migration 034.
+  // Default 10% matches the previous hardcoded behavior so existing brokers
+  // see no change until they explicitly edit. Editable INLINE on each CMA's
+  // Suggested List Price card — change it once, it saves to your profile
+  // and becomes the default for every CMA going forward.
+  const [listPriceCushionPct, setListPriceCushionPct] = useState<number>(10);
+  const [savingCushionPct, setSavingCushionPct] = useState(false);
   // Reset expansion whenever a different comp is selected
   useEffect(() => { setDescriptionExpanded(false); }, [selectedComp?.id]);
 
@@ -450,6 +458,23 @@ export default function MapPage() {
     let cancelled = false;
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!cancelled) setCurrentUserId(user?.id ?? null);
+      // Load the broker's preferred List Price cushion. Self-healing: if
+      // the column doesn't exist yet (migration 034 not applied), select
+      // errors silently and we keep the 10% default.
+      if (user?.id) {
+        supabase
+          .from('profiles')
+          .select('default_list_price_cushion_pct')
+          .eq('id', user.id)
+          .maybeSingle()
+          .then(({ data }) => {
+            if (cancelled || !data) return;
+            const v = (data as any).default_list_price_cushion_pct;
+            if (v != null && Number.isFinite(Number(v))) {
+              setListPriceCushionPct(Number(v));
+            }
+          });
+      }
     });
     return () => { cancelled = true; };
   }, [supabase]);
@@ -6432,10 +6457,13 @@ export default function MapPage() {
                     const compDerivedAnchor = compMid > 0 && subjAcres > 0 ? compMid * subjAcres : 0;
 
                     // Pick the strongest anchor available for the default
-                    // suggestion. 10% negotiation cushion is the typical
-                    // TX-ranch heuristic (broker can override anything).
+                    // suggestion. Cushion % comes from the broker's profile
+                    // (listPriceCushionPct state, loaded from
+                    // profiles.default_list_price_cushion_pct via migration
+                    // 034). Defaults to 10% for brokers who haven't set it.
                     const anchor = effectiveBov > 0 ? effectiveBov : compDerivedAnchor;
-                    const defaultListPrice = anchor > 0 ? Math.round(anchor * 1.10) : 0;
+                    const cushionMultiplier = 1 + (listPriceCushionPct / 100);
+                    const defaultListPrice = anchor > 0 ? Math.round(anchor * cushionMultiplier) : 0;
                     const savedOverride = viewingCMA?.suggested_list_price;
                     const currentList = bovListPriceInput
                       ? Number(bovListPriceInput)
@@ -6451,13 +6479,43 @@ export default function MapPage() {
                       : null;
                     return (
                       <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
-                        <div className="flex items-baseline justify-between">
+                        <div className="flex items-baseline justify-between gap-2">
                           <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
-                          {anchor > 0 && (
-                            <p className="text-[10px] text-ink-3 font-mono">
-                              {cushion >= 0 ? '+' : ''}{cushion.toFixed(0)}% above {anchorLabel}
-                            </p>
-                          )}
+                          {/* Inline cushion editor — broker types their preferred
+                              percentage above the anchor (BOV or comp avg).
+                              When changed, recomputes defaultListPrice AND
+                              persists to profiles.default_list_price_cushion_pct
+                              so the same broker's next CMA inherits it. The
+                              per-CMA dollar override below still wins. */}
+                          <div className="flex items-center gap-1 text-[10px] text-ink-3 font-mono">
+                            <span>+</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={50}
+                              step={1}
+                              value={listPriceCushionPct}
+                              onChange={(e) => {
+                                const n = Number(e.target.value);
+                                if (Number.isFinite(n)) setListPriceCushionPct(Math.max(0, Math.min(50, n)));
+                              }}
+                              onBlur={async () => {
+                                if (!currentUserId) return;
+                                setSavingCushionPct(true);
+                                try {
+                                  await supabase
+                                    .from('profiles')
+                                    .update({ default_list_price_cushion_pct: listPriceCushionPct })
+                                    .eq('id', currentUserId);
+                                } catch { /* silent — non-critical preference */ }
+                                setSavingCushionPct(false);
+                              }}
+                              className="w-9 text-right bg-cream border border-beige focus:border-olive rounded px-1 py-0.5 text-ink font-mono outline-none"
+                              title="Your default list-price cushion. Saves to your profile."
+                            />
+                            <span>% above {anchorLabel || 'BOV'}</span>
+                            {savingCushionPct && <span className="text-olive-2">·</span>}
+                          </div>
                         </div>
                         <div className="relative">
                           <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
