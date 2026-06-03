@@ -3595,8 +3595,16 @@ export default function MapPage() {
       // markers via translate). Setting transform: scale() wipes Mapbox's
       // translate and the pin jumps to (0,0) for a frame. Hover affordance
       // comes from border-color + box-shadow only.
+      // IMPORTANT: do NOT set `position` here. Mapbox applies the
+      // .mapboxgl-marker class which sets `position: absolute` so the
+      // marker translates to its lat/lng. Setting position:relative
+      // via inline style WINS over the class (inline > class) and
+      // strips the marker's positioning — causing pins to stretch to
+      // their container's full width. The number-badge child uses
+      // `position: absolute` and is positioned relative to the pin
+      // anyway, because Mapbox's `position: absolute` on the marker
+      // counts as a "positioned ancestor."
       el.style.cssText = `
-        position:relative;
         background:${isCmaSelected ? '#332E29' : '#1A1815'};
         border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
         border-radius:20px;
