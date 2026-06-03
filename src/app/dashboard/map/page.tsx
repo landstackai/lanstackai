@@ -3586,6 +3586,7 @@ export default function MapPage() {
       // translate and the pin jumps to (0,0) for a frame. Hover affordance
       // comes from border-color + box-shadow only.
       el.style.cssText = `
+        position:relative;
         background:${isCmaSelected ? '#332E29' : '#1A1815'};
         border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
         border-radius:20px;
@@ -3601,7 +3602,51 @@ export default function MapPage() {
         if (n >= 1_000) return `$${Math.round(n / 1_000)}k`;
         return `$${Math.round(n)}`;
       };
-      el.textContent = pinLabelMode === 'total' ? formatPinAmount(total) : formatPinAmount(ppa);
+      const pinAmount = pinLabelMode === 'total' ? formatPinAmount(total) : formatPinAmount(ppa);
+
+      // Comp number — only renders when this comp is part of an active
+      // CMA (broker is viewing the workspace OR building a new CMA).
+      // Position in the cmaComps / cmaCompIds array drives the number.
+      // Shown as a small olive circle badge in the corner of the pin
+      // (Option C from broker spec — number badge in corner, price
+      // stays in the middle so it's still glanceable). Matches the
+      // numbered badge on each comp row in the right panel.
+      const cmaIdsForNumbering: string[] = (viewingCMA?.selected_comp_ids as string[] | undefined)
+        ?? (cmaMode ? cmaCompIds : []);
+      const numIdx = cmaIdsForNumbering.indexOf(comp.id);
+      const compNumber = numIdx >= 0 ? numIdx + 1 : 0;
+      if (compNumber > 0) {
+        // Build pin content with corner badge. innerHTML (vs textContent)
+        // because we need a positioned child element. Pin amount escaped
+        // as it comes from formatPinAmount which produces safe strings,
+        // not user input.
+        el.innerHTML = `
+          <span style="
+            position:absolute;
+            top:-7px;
+            left:-7px;
+            min-width:18px;
+            height:18px;
+            padding:0 4px;
+            border-radius:9px;
+            background:#A8B57A;
+            border:1.5px solid #1A1815;
+            color:#1A1815;
+            font-family:'DM Mono',monospace;
+            font-size:10px;
+            font-weight:700;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            line-height:1;
+            box-shadow:0 1px 4px rgba(0,0,0,0.4);
+            z-index:2;
+          ">${compNumber}</span>
+          <span>${pinAmount}</span>
+        `;
+      } else {
+        el.textContent = pinAmount;
+      }
 
       // Build a hover preview popup that mirrors the collapsed comp card from
       // the CMA workspace right panel — same header (name + badges) and same
@@ -3702,7 +3747,11 @@ export default function MapPage() {
       markerElsRef.current.set(comp.id, el);
       compPopupsRef.current.set(comp.id, popup);
     });
-  }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode]);
+  }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode, viewingCMA?.selected_comp_ids]);
+  // ⬆ viewingCMA?.selected_comp_ids drives the corner-badge numbering on
+  // each pin (so pins renumber when comps are added/removed/reordered in
+  // the active CMA). React's shallow-eq on the array reference triggers
+  // a re-render only when the list actually changes.
 
   // Imperative styling: applies hover-highlight + AI-search dim/highlight to
   // the existing marker DOM elements without rebuilding them.
@@ -5071,7 +5120,7 @@ export default function MapPage() {
                     </div>
                   );
                 })()}
-                {cmaComps.map((c) => {
+                {cmaComps.map((c, idx) => {
                   const expanded = expandedCompIds.has(c.id);
                   const adj = compAdjustmentsDraft[c.id] || {};
                   const allIn = allInPpa(c);
@@ -5081,6 +5130,12 @@ export default function MapPage() {
                   const isAdjusted = adj.improvement_value != null;
                   const isBrokerEstimated = effSrc === 'broker_estimate';
                   const editorOpen = adjustmentEditorOpen.has(c.id);
+                  // Comp number = position in the cmaComps array (1-indexed).
+                  // Same number is rendered on the matching map pin as a
+                  // corner badge, so the broker can say "look at comp 3" and
+                  // both surfaces line up. Re-orders dynamically when the
+                  // list re-sorts (handled at the cmaComps source level).
+                  const compNumber = idx + 1;
                   return (
                     <div
                       key={c.id}
@@ -5096,6 +5151,15 @@ export default function MapPage() {
                       >
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
+                            {/* Numbered badge — matches the corner badge on
+                                the comp's map pin so the broker can cross-
+                                reference list ↔ map at a glance. */}
+                            <span
+                              className="text-[10px] font-bold w-5 h-5 rounded-full bg-ink text-cream-1 flex items-center justify-center flex-shrink-0 leading-none"
+                              title={`Comp ${compNumber} — matches pin #${compNumber} on the map`}
+                            >
+                              {compNumber}
+                            </span>
                             <span className="truncate">{c.property_name || `${c.county} County`}</span>
                             {c.has_improvements && (
                               <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
