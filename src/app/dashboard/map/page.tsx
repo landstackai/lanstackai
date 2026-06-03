@@ -258,6 +258,12 @@ export default function MapPage() {
   // cmas.suggested_list_price; falls back to compute on display.
   // See docs/DESIGN_DECISIONS.md (sticker-shock framing).
   const [bovListPriceInput, setBovListPriceInput] = useState<string>('');
+  // Per-acre mirror of the Suggested List Price input. Auto-syncs with
+  // bovListPriceInput via subj acres: edit either, the other recomputes.
+  // Only the TOTAL writes to the DB (suggested_list_price column);
+  // per-acre derives on every load via total ÷ acres so there's one
+  // source of truth.
+  const [bovListPpaInput, setBovListPpaInput] = useState<string>('');
   // Opinion of Value presentation mode — controls how the BOV is
   // displayed on the client report. Independent of breakdown style
   // (lump_sum vs breakdown). 'confirmed' shows a hard number,
@@ -2325,6 +2331,7 @@ export default function MapPage() {
     const listNum = savedListPrice != null ? Number(savedListPrice) : NaN;
     if (Number.isFinite(listNum) && listNum > 0) {
       setBovListPriceInput(String(Math.round(listNum)));
+      setBovListPpaInput(acres > 0 ? String(Math.round(listNum / acres)) : '');
     } else {
       // No saved override → seed with BOV × 1.10 when BOV is set,
       // else empty.
@@ -2333,9 +2340,12 @@ export default function MapPage() {
           ? lumpNum
           : ((Number.isFinite(landNum) ? landNum : 0) + (Number.isFinite(impNum) ? impNum : 0));
       if (bovForList > 0) {
-        setBovListPriceInput(String(Math.round(bovForList * 1.10)));
+        const seededTotal = Math.round(bovForList * 1.10);
+        setBovListPriceInput(String(seededTotal));
+        setBovListPpaInput(acres > 0 ? String(Math.round(seededTotal / acres)) : '');
       } else {
         setBovListPriceInput('');
+        setBovListPpaInput('');
       }
     }
 
@@ -6804,27 +6814,77 @@ export default function MapPage() {
                             {savingCushionPct && <span className="text-olive-2">·</span>}
                           </div>
                         </div>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
-                          <input
-                            type="number"
-                            placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV to suggest…'}
-                            value={bovListPriceInput}
-                            onChange={(e) => setBovListPriceInput(e.target.value)}
-                            onBlur={() => {
-                              const raw = bovListPriceInput.trim();
-                              const n = raw === '' ? null : Number(raw);
-                              saveBov({
-                                mode: bovMode,
-                                total: Number(bovTotalInput) || null,
-                                landValue: Number(bovLandTotalInput) || null,
-                                improvementValue: Number(bovImprovementInput) || null,
-                                suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
-                              });
-                            }}
-                            className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
-                          />
-                        </div>
+                        {/* Two-input grid: $/Acre + Total auto-sync via subj
+                            acres. Same pattern as the Opinion of Value
+                            inputs above — edit either, the other recomputes
+                            instantly. Only the TOTAL is persisted to the DB
+                            (suggested_list_price); per-acre derives on load. */}
+                        {(() => {
+                          const defaultListPpa = subjAcres > 0 && defaultListPrice > 0
+                            ? Math.round(defaultListPrice / subjAcres)
+                            : 0;
+                          const persistTotal = () => {
+                            const raw = bovListPriceInput.trim();
+                            const n = raw === '' ? null : Number(raw);
+                            saveBov({
+                              mode: bovMode,
+                              total: Number(bovTotalInput) || null,
+                              landValue: Number(bovLandTotalInput) || null,
+                              improvementValue: Number(bovImprovementInput) || null,
+                              suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
+                            });
+                          };
+                          return (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPpa > 0 ? String(defaultListPpa) : 'auto'}
+                                    value={bovListPpaInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPpaInput(raw);
+                                      const ppa = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(ppa) && ppa > 0 && subjAcres > 0) {
+                                        setBovListPriceInput(String(Math.round(ppa * subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPriceInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV…'}
+                                    value={bovListPriceInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPriceInput(raw);
+                                      const total = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(total) && total > 0 && subjAcres > 0) {
+                                        setBovListPpaInput(String(Math.round(total / subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPpaInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                         <p className="text-[10px] text-ink-3 leading-relaxed">
                           {expectedSaleHint ? (
                             <>Headline on the client report. Negotiation cushion baked in — expected sale lands around {expectedSaleHint}.</>
@@ -6838,6 +6898,7 @@ export default function MapPage() {
                                 type="button"
                                 onClick={() => {
                                   setBovListPriceInput('');
+                                  setBovListPpaInput('');
                                   saveBov({
                                     mode: bovMode,
                                     total: Number(bovTotalInput) || null,
