@@ -668,33 +668,98 @@ export default function ClientReport({ params }: ClientReportProps) {
 
             return (
               <>
-                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============
-                    Warm brick red dot + label matches the subject pin on the
-                    map. Calm white card on cream, vault-style restraint —
-                    color identity comes from the small red dot, not a tinted
-                    background. */}
-                <div className="p-4 border-b border-beige space-y-3">
-                  <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
-                    </div>
-                    {/* Subject name pretty-printed so the report doesn't
-                        look like a CAD parcel printout when the source
-                        record is ALL CAPS ("CARAWAY PARTNERS LTD"). */}
-                    <p className="text-sm font-semibold text-ink">{properCase(cma.subject_name)}</p>
-                    <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
-                      <MapPin size={10} className="text-ink-3" />
-                      {properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}
-                    </p>
-                  </div>
+                {/* ============ SECTION 1 — STICKY SUBJECT + HEADLINE PRICE ============
+                    Sticky at the top of the scrolling report so the
+                    seller / buyer never loses sight of WHICH PROPERTY
+                    and WHAT NUMBER they're reading about, no matter how
+                    far they scroll into the comps. The headline number
+                    on the right shifts based on what's filled out:
+                      • Discuss mode → "Let's discuss"
+                      • Range mode   → "$X–$Y"
+                      • Otherwise    → Opinion of Value (suggested $)
+                    Falls back to subject-only display if no valuation
+                    is set yet (showPrice gate). */}
+                <div className="sticky top-0 z-20 bg-cream border-b border-beige p-4">
+                  <div className="bg-white border border-beige rounded-xl p-3">
+                    {(() => {
+                      // Inline presentation flags so this section can show
+                      // the appropriate headline price without depending on
+                      // Section 4's later computation. Duplicates the logic
+                      // at line ~774 — kept local to avoid hoisting state
+                      // that might affect Section 4's existing render.
+                      const presentation = ((cma as any).opinion_presentation as 'confirmed' | 'range' | 'discuss' | null) || 'confirmed';
+                      const isDiscuss = presentation === 'discuss';
+                      const isRange = presentation === 'range';
+                      const rangeLowDollar = rngLow * subjAcres;
+                      const rangeHighDollar = rngHigh * subjAcres;
+                      const showPrice =
+                        isDiscuss
+                        || (isRange && rngHigh > rngLow && subjAcres > 0)
+                        || suggestedValue > 0;
 
-                  {/* Download Marketing PDF — the client can grab the
-                      printable six-page CMA. Gold accent matches the
-                      PDF's brand palette so the visual handshake feels
-                      intentional when they open the file. Same content
-                      as the broker's PDF, minus the broker's
-                      email/phone (anon profiles RLS). */}
+                      return (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-1 min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
+                            </div>
+                            {/* Subject name pretty-printed so the report doesn't
+                                look like a CAD parcel printout when the source
+                                record is ALL CAPS ("CARAWAY PARTNERS LTD"). */}
+                            <p className="text-sm font-semibold text-ink truncate">{properCase(cma.subject_name)}</p>
+                            <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
+                              <MapPin size={10} className="text-ink-3 flex-shrink-0" />
+                              <span className="truncate">{properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}</span>
+                            </p>
+                          </div>
+                          {showPrice && (
+                            <div className="text-right flex-shrink-0 max-w-[10rem]">
+                              <p className="text-[9px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                                {isDiscuss ? 'Valuation' : isRange ? 'Range' : 'Opinion of Value'}
+                              </p>
+                              {isDiscuss ? (
+                                <p className="text-sm font-semibold text-ink italic font-mono leading-tight mt-0.5">
+                                  Let&apos;s discuss
+                                </p>
+                              ) : isRange ? (
+                                <>
+                                  <p className="text-sm font-semibold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                    {formatCurrency(rangeLowDollar)}–{formatCurrency(rangeHighDollar)}
+                                  </p>
+                                  {subjAcres > 0 && (
+                                    <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                      {formatPPA(rngLow)}–{formatPPA(rngHigh)}
+                                    </p>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-base font-bold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                    {formatCurrency(suggestedValue)}
+                                  </p>
+                                  {subjAcres > 0 && (
+                                    <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                      {formatPPA(suggestedPpa)}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Download Marketing PDF — moved OUT of the sticky strip
+                    so the sticky region stays compact. The button still
+                    sits right under the subject card on initial scroll,
+                    so the client encounters it immediately. Gold accent
+                    matches the PDF's brand palette so the visual
+                    handshake feels intentional when they open the file. */}
+                <div className="p-4 border-b border-beige">
                   <button
                     onClick={downloadMarketingPdf}
                     disabled={pdfDownloading}
