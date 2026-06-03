@@ -4979,6 +4979,495 @@ export default function MapPage() {
                 </p>
               </div>
 
+              {/* ─── PHASE 1: COMPS-FIRST WORKSPACE ──────────────────
+                  The Comps list moved to directly under the Subject
+                  card, ABOVE the action row / averages / BOV. Rationale:
+                  the comps tell the story; averages and the broker's
+                  opinion are by-products of comp selection. Putting
+                  comps first frames the workspace around the actual
+                  work (comp curation), not the conclusion. */}
+              {/* Comps list */}
+              <div className="space-y-2">
+                {(() => {
+                  // Listings completeness — surfaces "X of Y comps have
+                  // listings" so the broker sees what's missing at a
+                  // glance before sharing. The number of comps without
+                  // a saved source_url is the explicit count of work
+                  // remaining; flagging it here turns "client opens the
+                  // share link and there are no links" into "broker
+                  // sees the gap and fixes it pre-share."
+                  const withListing = cmaComps.filter((c) => (c as any).source_url).length;
+                  const total = cmaComps.length;
+                  const allDone = withListing === total;
+                  return (
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Comparable Sales</p>
+                      {total > 0 && (
+                        <p className={`text-[9px] font-mono ${allDone ? 'text-olive-2' : 'text-amber-800'}`} title={allDone ? 'All comps have listing links' : 'Add listings on the missing comps before sharing'}>
+                          {allDone ? '✓ Listings: ' : '⚠ Listings: '}{withListing} of {total}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+                {cmaComps.map((c) => {
+                  const expanded = expandedCompIds.has(c.id);
+                  const adj = compAdjustmentsDraft[c.id] || {};
+                  const allIn = allInPpa(c);
+                  const landOnly = landOnlyPpa(c);
+                  const { value: effImp, source: effSrc } = effectiveImprovement(c);
+                  const isHovered = hoveredCompId === c.id;
+                  const isAdjusted = adj.improvement_value != null;
+                  const isBrokerEstimated = effSrc === 'broker_estimate';
+                  const editorOpen = adjustmentEditorOpen.has(c.id);
+                  return (
+                    <div
+                      key={c.id}
+                      onMouseEnter={() => setHoveredCompId(c.id)}
+                      onMouseLeave={() => setHoveredCompId(prev => prev === c.id ? null : prev)}
+                      className={`bg-cream border rounded-xl overflow-hidden transition-colors ${
+                        isHovered ? 'border-slate-blue ring-2 ring-blue-400/30' : 'border-beige'
+                      }`}
+                    >
+                      <button
+                        onClick={() => toggleExpanded(c.id)}
+                        className="w-full px-3 py-2 text-left"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
+                            <span className="truncate">{c.property_name || `${c.county} County`}</span>
+                            {c.has_improvements && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
+                                IMPROVED
+                              </span>
+                            )}
+                            {(c as any).irrigation === 'Strong' && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
+                                IRRIGATION
+                              </span>
+                            )}
+                            {isAdjusted && <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>}
+                            {effSrc === 'agent_verified' && (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
+                                title="An agent involved in this transaction verified the improvement value."
+                              >
+                                Agent-Verified
+                              </span>
+                            )}
+                            {isBrokerEstimated && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-bold flex-shrink-0">
+                                Broker-estimated
+                              </span>
+                            )}
+                            {/* Listing-state indicator. Olive pill when a
+                                URL is saved (will appear on the client
+                                report); amber pill when missing. Clicking
+                                expands the card so the broker can paste
+                                or run Find inline. */}
+                            {(c as any).source_url ? (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0 inline-flex items-center gap-0.5"
+                                title="Listing link saved — visible on client share report"
+                              >
+                                <ExternalLink size={8} />
+                                Listing
+                              </span>
+                            ) : (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded flex-shrink-0"
+                                title="No listing link saved — click to expand and add one"
+                              >
+                                + Link
+                              </span>
+                            )}
+                          </p>
+                          {expanded ? <ChevronUp size={12} className="text-ink-3 flex-shrink-0" /> : <ChevronDown size={12} className="text-ink-3 flex-shrink-0" />}
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 mt-1.5 text-[10px] font-mono">
+                          <div>
+                            <p className="text-ink-3">Acres</p>
+                            <p className="text-ink font-bold">{formatAcres(c.acres)}</p>
+                          </div>
+                          <div>
+                            <p className="text-ink-3">Total</p>
+                            <p className="text-ink font-bold">{formatCurrency(c.sale_price)}</p>
+                          </div>
+                          <div>
+                            <p className="text-ink-3">Total $/Ac</p>
+                            <p className="text-olive-2 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
+                          </div>
+                          <div>
+                            <p className="text-ink-3">Adjusted $/Ac</p>
+                            <p className={`font-bold ${effImp != null ? 'text-amber-800' : 'text-amber-700/60'}`}>
+                              {landOnly != null ? formatPPA(landOnly) : '—'}
+                            </p>
+                          </div>
+                        </div>
+                      </button>
+                      {expanded && (
+                        <div className="border-t border-beige bg-cream/30 px-3 py-2 space-y-1.5 text-[11px]">
+                          {/* Per-comp broker note — editable textarea at the
+                              top of expanded content so the broker drafts the
+                              client-facing reasoning first. Mirrors the share
+                              report's placement (read-only there). */}
+                          <div className="pb-2 border-b border-beige/60 space-y-1">
+                            <p className="text-[10px] font-bold text-slate-blue-2 uppercase tracking-wider">
+                              Your Note on This Comp
+                            </p>
+                            <textarea
+                              value={adj.broker_note ?? ''}
+                              onChange={(e) => updateAdjustment(c.id, { broker_note: e.target.value })}
+                              onClick={(e) => e.stopPropagation()}
+                              placeholder="e.g. Most direct comparison — same river frontage and similar improvements."
+                              rows={2}
+                              className="w-full bg-cream border border-beige focus:border-slate-blue rounded px-2 py-1.5 text-[12px] text-ink outline-none resize-none"
+                            />
+                            <p className="text-[9px] text-ink-3">Shown to the client in the expanded comp on the share report.</p>
+                          </div>
+
+                          {/* Key facts — Sale date · Address · Improvements (+notes).
+                              Same order as share report + standalone Comp Detail. */}
+                          {c.sale_date && (
+                            <div className="flex justify-between">
+                              <span className="text-ink-3">Sale date</span>
+                              <span className="text-ink-2 font-mono">{c.sale_date}</span>
+                            </div>
+                          )}
+                          {c.address && (
+                            <div className="flex justify-between gap-2">
+                              <span className="text-ink-3 flex-shrink-0">Address</span>
+                              <span className="text-ink-2 text-right truncate">{c.address}</span>
+                            </div>
+                          )}
+                          {c.has_improvements && c.improvements_value != null && (
+                            <div className="flex justify-between">
+                              <span className="text-ink-3">Improvements</span>
+                              <span className="text-slate-blue-2 font-mono">{formatCurrency(c.improvements_value)} ECV</span>
+                            </div>
+                          )}
+                          {c.improvements_notes && (
+                            <div className="pt-1">
+                              <p className="text-ink-3 mb-0.5">Improvements notes</p>
+                              <p className="text-ink-2 leading-relaxed">{c.improvements_notes}</p>
+                            </div>
+                          )}
+
+                          {/* Land-character chips — sit below key facts so the
+                              order reads facts → character → narrative across
+                              every comp surface. */}
+                          {(() => {
+                            const irrigationVal = (c as any).irrigation as string | null;
+                            return (
+                              <div className="grid grid-cols-2 gap-2 pt-1">
+                                <FeatureChip label="Water" value={c.water} strong={isStrongFeature('water', c.water)} />
+                                <FeatureChip label="Road" value={c.road_frontage} strong={isStrongFeature('road', c.road_frontage)} />
+                                <FeatureChip label="Dev" value={c.dev_potential} strong={isStrongFeature('dev', c.dev_potential)} />
+                                <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
+                              </div>
+                            );
+                          })()}
+                          {c.description && (() => {
+                            const desc = c.description;
+                            const sentences = desc
+                              .split(/(?<=[.!?])\s+(?=[A-Z])/)
+                              .map(s => s.trim())
+                              .filter(Boolean);
+                            const previewLen = 220;
+                            const isExpanded = expandedDescriptionIds.has(c.id);
+                            const previewBySentences = sentences.slice(0, 3).join(' ');
+                            const preview = previewBySentences.length > 0 && previewBySentences.length < desc.length - 10
+                              ? previewBySentences
+                              : (desc.length > previewLen ? desc.slice(0, previewLen) + '…' : desc);
+                            const hasMore = preview !== desc && desc.length > preview.length;
+                            return (
+                              <div className="pt-1.5 border-t border-beige/60">
+                                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description</p>
+                                <p className="text-[11px] text-ink-2 leading-relaxed whitespace-pre-wrap">
+                                  {isExpanded ? desc : preview}
+                                </p>
+                                {hasMore && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setExpandedDescriptionIds(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-olive-2 hover:text-olive-2 transition-colors"
+                                  >
+                                    {isExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Improvement adjustment editor */}
+                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider">Improvement Adjustment</p>
+                              {!editorOpen && effImp == null && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
+                                  }}
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
+                                >
+                                  + Add adjustment
+                                </button>
+                              )}
+                              {!editorOpen && effImp != null && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
+                                  }}
+                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
+                                >
+                                  Edit
+                                </button>
+                              )}
+                            </div>
+                            {effImp != null && !editorOpen && (
+                              <p className="text-[11px] text-ink-2 font-mono">
+                                {formatCurrency(effImp)} <span className="text-ink-3">·</span>{' '}
+                                <span className="text-ink-3">{effSrc === 'broker_estimate' ? 'Broker Estimate' : effSrc === 'appraiser' ? 'Appraiser' : '—'}</span>
+                              </p>
+                            )}
+                            {effImp == null && !editorOpen && (
+                              <p className="text-[11px] text-ink-3 italic">No improvement value set.</p>
+                            )}
+                            {editorOpen && (
+                              <div className="space-y-2 bg-cream/40 border border-beige/60 rounded-lg p-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div>
+                                  <p className="text-[9px] text-ink-3 mb-0.5">Improvement Value ($)</p>
+                                  <input
+                                    type="number"
+                                    placeholder="e.g. 350000"
+                                    value={adj.improvement_value ?? (c.improvement_value ?? '')}
+                                    onChange={(e) => {
+                                      const v = e.target.value === '' ? null : Number(e.target.value);
+                                      updateAdjustment(c.id, { improvement_value: v });
+                                    }}
+                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink font-mono outline-none"
+                                  />
+                                </div>
+                                <div>
+                                  <p className="text-[9px] text-ink-3 mb-0.5">Source</p>
+                                  <select
+                                    value={(adj.improvement_source ?? c.improvement_source ?? '') as string}
+                                    onChange={async (e) => {
+                                      const v = e.target.value === '' ? null : (e.target.value as 'appraiser' | 'agent_verified' | 'broker_estimate');
+                                      updateAdjustment(c.id, { improvement_source: v });
+                                      // Agent-Verified auto-tags the verifier and timestamp on the
+                                      // comp itself (back-end audit trail — never shown publicly).
+                                      // Skipped silently if there's no signed-in user.
+                                      if (v === 'agent_verified' && currentUserId) {
+                                        await supabase
+                                          .from('comps')
+                                          .update({
+                                            improvement_verified_by: currentUserId,
+                                            improvement_verified_at: new Date().toISOString(),
+                                          })
+                                          .eq('id', c.id);
+                                      }
+                                    }}
+                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink outline-none"
+                                  >
+                                    <option value="">Select…</option>
+                                    <option value="appraiser">Appraiser Report</option>
+                                    <option value="agent_verified">Agent-Verified (listing/buyer's agent)</option>
+                                    <option value="broker_estimate">Broker Estimate</option>
+                                  </select>
+                                </div>
+                                <div className="flex gap-2 pt-1">
+                                  <button
+                                    onClick={async () => {
+                                      // Close the editor and flush immediately so the value
+                                      // persists even if the user exits within debounce window.
+                                      setAdjustmentEditorOpen(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(c.id);
+                                        return next;
+                                      });
+                                      if (viewingCMA?.id) {
+                                        const ok = await flushAdjustments(viewingCMA.id, compAdjustmentsDraft);
+                                        if (ok) toast.success('Adjustment saved');
+                                      }
+                                    }}
+                                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded text-[11px] font-bold text-amber-800 transition-colors"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      updateAdjustment(c.id, { improvement_value: null, improvement_source: null });
+                                      setAdjustmentEditorOpen(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(c.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="px-3 py-1.5 border border-beige hover:border-red-400 rounded text-[11px] font-bold text-ink-2 hover:text-red-500 transition-colors"
+                                  >
+                                    Clear
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Listing URL editor — drives what shows on
+                              the client share report. Three paths:
+                                1. Saved URL is shown read-only at top
+                                   with a Remove affordance.
+                                2. Paste-and-save row for the common case
+                                   (broker has the URL in hand).
+                                3. AI Find as a fallback when the broker
+                                   doesn't have a URL handy.
+                              Each comp's status is also surfaced on the
+                              COLLAPSED card header so the broker can scan
+                              the batch and see what's missing. */}
+                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
+                            <p className="text-[10px] font-bold text-olive uppercase tracking-wider">Listing on Client Report</p>
+                            {/* Currently-saved URL → show + Remove */}
+                            {(c as any).source_url && (
+                              <div className="flex items-center gap-1.5 px-2 py-1.5 bg-olive-tint border border-olive-border rounded">
+                                <ExternalLink size={11} className="text-olive-2 flex-shrink-0" />
+                                <a
+                                  href={(c as any).source_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-[11px] text-olive-2 hover:text-olive truncate flex-1 min-w-0"
+                                  title={(c as any).source_url}
+                                >
+                                  {String((c as any).source_url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 50)}
+                                </a>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); clearListingForComp(c.id); }}
+                                  disabled={savingListingFor.has(c.id)}
+                                  className="text-[10px] text-ink-3 hover:text-red-500 font-semibold disabled:opacity-50 flex-shrink-0"
+                                  title="Remove listing — won't appear on share report"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Manual paste row — broker has the URL,
+                                just wants it on the report. Common path. */}
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="url"
+                                placeholder={(c as any).source_url ? 'Paste a different URL to replace…' : 'Paste listing URL (Zillow, MLS, brokerage…)'}
+                                value={manualListingDraft[c.id] || ''}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  const v = e.target.value;
+                                  setManualListingDraft(prev => ({ ...prev, [c.id]: v }));
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    saveManualListingForComp(c.id);
+                                  }
+                                }}
+                                className="flex-1 min-w-0 bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1 text-ink outline-none transition-all"
+                              />
+                              <button
+                                onClick={(e) => { e.stopPropagation(); saveManualListingForComp(c.id); }}
+                                disabled={savingListingFor.has(c.id) || !(manualListingDraft[c.id] || '').trim()}
+                                className="text-[10px] px-2 py-1 bg-olive hover:bg-olive-2 text-white rounded font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                              >
+                                {savingListingFor.has(c.id) ? '…' : 'Save'}
+                              </button>
+                            </div>
+
+                            {/* AI Find — secondary path when broker doesn't have a URL */}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); findListingForComp(c.id); }}
+                              disabled={findingListingFor.has(c.id)}
+                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-cream hover:bg-cream-2 border border-beige hover:border-olive-border rounded text-ink-2 font-bold transition-colors disabled:opacity-50"
+                            >
+                              <Globe size={10} />
+                              {findingListingFor.has(c.id)
+                                ? 'Searching live…'
+                                : liveListings[c.id]
+                                ? 'Re-search online'
+                                : 'Or find online'}
+                            </button>
+                            {liveListings[c.id]?.url && (() => {
+                              const isSaved = savedListingFor.has(c.id);
+                              const isSaving = savingListingFor.has(c.id);
+                              const isAlreadyPersisted = (c as any).source_url === liveListings[c.id]?.url;
+                              return (
+                                <div className="space-y-1">
+                                  <a
+                                    href={liveListings[c.id]!.url!}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="inline-flex items-center gap-1.5 text-[11px] text-olive hover:text-ink-2 underline break-all"
+                                  >
+                                    <ExternalLink size={11} />
+                                    {liveListings[c.id]!.url!.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)}
+                                    {liveListings[c.id]!.url!.length > 70 ? '…' : ''}
+                                  </a>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); saveListingForComp(c.id); }}
+                                    disabled={isSaving}
+                                    className={`text-[10px] px-2 py-0.5 rounded font-bold transition-colors disabled:opacity-50 ${
+                                      isSaved || isAlreadyPersisted
+                                        ? 'bg-olive-tint border border-olive-border text-olive-2'
+                                        : 'bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive text-ink-2'
+                                    }`}
+                                  >
+                                    {isSaving
+                                      ? 'Saving…'
+                                      : isSaved || isAlreadyPersisted
+                                      ? '✓ Saved to comp'
+                                      : 'Save to comp (show on share)'}
+                                  </button>
+                                </div>
+                              );
+                            })()}
+                            {liveListings[c.id] && !liveListings[c.id]?.url && (
+                              <p className="text-[11px] text-ink-3 italic">{liveListings[c.id]!.reason || 'No matching listing found'}</p>
+                            )}
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (c.latitude != null && c.longitude != null) {
+                                map.current?.flyTo({ center: [c.longitude, c.latitude], zoom: 14, duration: 800 });
+                              }
+                            }}
+                            className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold mt-1"
+                          >
+                            Fly to →
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {cmaComps.length === 0 && (
+                  <p className="text-xs text-ink-3 italic text-center py-4">
+                    No comps in this CMA yet. Use Edit / Add Comps in the banner.
+                  </p>
+                )}
+              </div>
+
               {/* Action row */}
               <div className="grid grid-cols-2 gap-2">
                 {/* Subject tract editing — two modes available at all
@@ -5981,487 +6470,6 @@ export default function MapPage() {
                 );
               })()}
 
-              {/* Comps list */}
-              <div className="space-y-2">
-                {(() => {
-                  // Listings completeness — surfaces "X of Y comps have
-                  // listings" so the broker sees what's missing at a
-                  // glance before sharing. The number of comps without
-                  // a saved source_url is the explicit count of work
-                  // remaining; flagging it here turns "client opens the
-                  // share link and there are no links" into "broker
-                  // sees the gap and fixes it pre-share."
-                  const withListing = cmaComps.filter((c) => (c as any).source_url).length;
-                  const total = cmaComps.length;
-                  const allDone = withListing === total;
-                  return (
-                    <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider">Comparable Sales</p>
-                      {total > 0 && (
-                        <p className={`text-[9px] font-mono ${allDone ? 'text-olive-2' : 'text-amber-800'}`} title={allDone ? 'All comps have listing links' : 'Add listings on the missing comps before sharing'}>
-                          {allDone ? '✓ Listings: ' : '⚠ Listings: '}{withListing} of {total}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })()}
-                {cmaComps.map((c) => {
-                  const expanded = expandedCompIds.has(c.id);
-                  const adj = compAdjustmentsDraft[c.id] || {};
-                  const allIn = allInPpa(c);
-                  const landOnly = landOnlyPpa(c);
-                  const { value: effImp, source: effSrc } = effectiveImprovement(c);
-                  const isHovered = hoveredCompId === c.id;
-                  const isAdjusted = adj.improvement_value != null;
-                  const isBrokerEstimated = effSrc === 'broker_estimate';
-                  const editorOpen = adjustmentEditorOpen.has(c.id);
-                  return (
-                    <div
-                      key={c.id}
-                      onMouseEnter={() => setHoveredCompId(c.id)}
-                      onMouseLeave={() => setHoveredCompId(prev => prev === c.id ? null : prev)}
-                      className={`bg-cream border rounded-xl overflow-hidden transition-colors ${
-                        isHovered ? 'border-slate-blue ring-2 ring-blue-400/30' : 'border-beige'
-                      }`}
-                    >
-                      <button
-                        onClick={() => toggleExpanded(c.id)}
-                        className="w-full px-3 py-2 text-left"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
-                            <span className="truncate">{c.property_name || `${c.county} County`}</span>
-                            {c.has_improvements && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
-                                IMPROVED
-                              </span>
-                            )}
-                            {(c as any).irrigation === 'Strong' && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
-                                IRRIGATION
-                              </span>
-                            )}
-                            {isAdjusted && <span className="text-[9px] text-amber-600 font-mono flex-shrink-0">ADJ</span>}
-                            {effSrc === 'agent_verified' && (
-                              <span
-                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0"
-                                title="An agent involved in this transaction verified the improvement value."
-                              >
-                                Agent-Verified
-                              </span>
-                            )}
-                            {isBrokerEstimated && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-bold flex-shrink-0">
-                                Broker-estimated
-                              </span>
-                            )}
-                            {/* Listing-state indicator. Olive pill when a
-                                URL is saved (will appear on the client
-                                report); amber pill when missing. Clicking
-                                expands the card so the broker can paste
-                                or run Find inline. */}
-                            {(c as any).source_url ? (
-                              <span
-                                className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint border border-olive-border text-olive-2 rounded flex-shrink-0 inline-flex items-center gap-0.5"
-                                title="Listing link saved — visible on client share report"
-                              >
-                                <ExternalLink size={8} />
-                                Listing
-                              </span>
-                            ) : (
-                              <span
-                                className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-50 border border-amber-200 text-amber-800 rounded flex-shrink-0"
-                                title="No listing link saved — click to expand and add one"
-                              >
-                                + Link
-                              </span>
-                            )}
-                          </p>
-                          {expanded ? <ChevronUp size={12} className="text-ink-3 flex-shrink-0" /> : <ChevronDown size={12} className="text-ink-3 flex-shrink-0" />}
-                        </div>
-                        <div className="grid grid-cols-4 gap-2 mt-1.5 text-[10px] font-mono">
-                          <div>
-                            <p className="text-ink-3">Acres</p>
-                            <p className="text-ink font-bold">{formatAcres(c.acres)}</p>
-                          </div>
-                          <div>
-                            <p className="text-ink-3">Total</p>
-                            <p className="text-ink font-bold">{formatCurrency(c.sale_price)}</p>
-                          </div>
-                          <div>
-                            <p className="text-ink-3">Total $/Ac</p>
-                            <p className="text-olive-2 font-bold">{allIn > 0 ? formatPPA(allIn) : '—'}</p>
-                          </div>
-                          <div>
-                            <p className="text-ink-3">Adjusted $/Ac</p>
-                            <p className={`font-bold ${effImp != null ? 'text-amber-800' : 'text-amber-700/60'}`}>
-                              {landOnly != null ? formatPPA(landOnly) : '—'}
-                            </p>
-                          </div>
-                        </div>
-                      </button>
-                      {expanded && (
-                        <div className="border-t border-beige bg-cream/30 px-3 py-2 space-y-1.5 text-[11px]">
-                          {/* Per-comp broker note — editable textarea at the
-                              top of expanded content so the broker drafts the
-                              client-facing reasoning first. Mirrors the share
-                              report's placement (read-only there). */}
-                          <div className="pb-2 border-b border-beige/60 space-y-1">
-                            <p className="text-[10px] font-bold text-slate-blue-2 uppercase tracking-wider">
-                              Your Note on This Comp
-                            </p>
-                            <textarea
-                              value={adj.broker_note ?? ''}
-                              onChange={(e) => updateAdjustment(c.id, { broker_note: e.target.value })}
-                              onClick={(e) => e.stopPropagation()}
-                              placeholder="e.g. Most direct comparison — same river frontage and similar improvements."
-                              rows={2}
-                              className="w-full bg-cream border border-beige focus:border-slate-blue rounded px-2 py-1.5 text-[12px] text-ink outline-none resize-none"
-                            />
-                            <p className="text-[9px] text-ink-3">Shown to the client in the expanded comp on the share report.</p>
-                          </div>
-
-                          {/* Key facts — Sale date · Address · Improvements (+notes).
-                              Same order as share report + standalone Comp Detail. */}
-                          {c.sale_date && (
-                            <div className="flex justify-between">
-                              <span className="text-ink-3">Sale date</span>
-                              <span className="text-ink-2 font-mono">{c.sale_date}</span>
-                            </div>
-                          )}
-                          {c.address && (
-                            <div className="flex justify-between gap-2">
-                              <span className="text-ink-3 flex-shrink-0">Address</span>
-                              <span className="text-ink-2 text-right truncate">{c.address}</span>
-                            </div>
-                          )}
-                          {c.has_improvements && c.improvements_value != null && (
-                            <div className="flex justify-between">
-                              <span className="text-ink-3">Improvements</span>
-                              <span className="text-slate-blue-2 font-mono">{formatCurrency(c.improvements_value)} ECV</span>
-                            </div>
-                          )}
-                          {c.improvements_notes && (
-                            <div className="pt-1">
-                              <p className="text-ink-3 mb-0.5">Improvements notes</p>
-                              <p className="text-ink-2 leading-relaxed">{c.improvements_notes}</p>
-                            </div>
-                          )}
-
-                          {/* Land-character chips — sit below key facts so the
-                              order reads facts → character → narrative across
-                              every comp surface. */}
-                          {(() => {
-                            const irrigationVal = (c as any).irrigation as string | null;
-                            return (
-                              <div className="grid grid-cols-2 gap-2 pt-1">
-                                <FeatureChip label="Water" value={c.water} strong={isStrongFeature('water', c.water)} />
-                                <FeatureChip label="Road" value={c.road_frontage} strong={isStrongFeature('road', c.road_frontage)} />
-                                <FeatureChip label="Dev" value={c.dev_potential} strong={isStrongFeature('dev', c.dev_potential)} />
-                                <FeatureChip label="Irrigation" value={irrigationVal} strong={isStrongFeature('irrigation', irrigationVal)} />
-                              </div>
-                            );
-                          })()}
-                          {c.description && (() => {
-                            const desc = c.description;
-                            const sentences = desc
-                              .split(/(?<=[.!?])\s+(?=[A-Z])/)
-                              .map(s => s.trim())
-                              .filter(Boolean);
-                            const previewLen = 220;
-                            const isExpanded = expandedDescriptionIds.has(c.id);
-                            const previewBySentences = sentences.slice(0, 3).join(' ');
-                            const preview = previewBySentences.length > 0 && previewBySentences.length < desc.length - 10
-                              ? previewBySentences
-                              : (desc.length > previewLen ? desc.slice(0, previewLen) + '…' : desc);
-                            const hasMore = preview !== desc && desc.length > preview.length;
-                            return (
-                              <div className="pt-1.5 border-t border-beige/60">
-                                <p className="text-[10px] font-bold text-ink-3 uppercase tracking-wider mb-1">Description</p>
-                                <p className="text-[11px] text-ink-2 leading-relaxed whitespace-pre-wrap">
-                                  {isExpanded ? desc : preview}
-                                </p>
-                                {hasMore && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setExpandedDescriptionIds(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
-                                        return next;
-                                      });
-                                    }}
-                                    className="mt-1 flex items-center gap-1 text-[10px] font-bold text-olive-2 hover:text-olive-2 transition-colors"
-                                  >
-                                    {isExpanded ? (<><ChevronUp size={11} /> Show less</>) : (<><ChevronDown size={11} /> Read more</>)}
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })()}
-
-                          {/* Improvement adjustment editor */}
-                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
-                            <div className="flex items-center justify-between">
-                              <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider">Improvement Adjustment</p>
-                              {!editorOpen && effImp == null && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
-                                  }}
-                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
-                                >
-                                  + Add adjustment
-                                </button>
-                              )}
-                              {!editorOpen && effImp != null && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setAdjustmentEditorOpen(prev => new Set(prev).add(c.id));
-                                  }}
-                                  className="text-[10px] text-amber-800 hover:text-amber-900 font-bold underline"
-                                >
-                                  Edit
-                                </button>
-                              )}
-                            </div>
-                            {effImp != null && !editorOpen && (
-                              <p className="text-[11px] text-ink-2 font-mono">
-                                {formatCurrency(effImp)} <span className="text-ink-3">·</span>{' '}
-                                <span className="text-ink-3">{effSrc === 'broker_estimate' ? 'Broker Estimate' : effSrc === 'appraiser' ? 'Appraiser' : '—'}</span>
-                              </p>
-                            )}
-                            {effImp == null && !editorOpen && (
-                              <p className="text-[11px] text-ink-3 italic">No improvement value set.</p>
-                            )}
-                            {editorOpen && (
-                              <div className="space-y-2 bg-cream/40 border border-beige/60 rounded-lg p-2"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <div>
-                                  <p className="text-[9px] text-ink-3 mb-0.5">Improvement Value ($)</p>
-                                  <input
-                                    type="number"
-                                    placeholder="e.g. 350000"
-                                    value={adj.improvement_value ?? (c.improvement_value ?? '')}
-                                    onChange={(e) => {
-                                      const v = e.target.value === '' ? null : Number(e.target.value);
-                                      updateAdjustment(c.id, { improvement_value: v });
-                                    }}
-                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink font-mono outline-none"
-                                  />
-                                </div>
-                                <div>
-                                  <p className="text-[9px] text-ink-3 mb-0.5">Source</p>
-                                  <select
-                                    value={(adj.improvement_source ?? c.improvement_source ?? '') as string}
-                                    onChange={async (e) => {
-                                      const v = e.target.value === '' ? null : (e.target.value as 'appraiser' | 'agent_verified' | 'broker_estimate');
-                                      updateAdjustment(c.id, { improvement_source: v });
-                                      // Agent-Verified auto-tags the verifier and timestamp on the
-                                      // comp itself (back-end audit trail — never shown publicly).
-                                      // Skipped silently if there's no signed-in user.
-                                      if (v === 'agent_verified' && currentUserId) {
-                                        await supabase
-                                          .from('comps')
-                                          .update({
-                                            improvement_verified_by: currentUserId,
-                                            improvement_verified_at: new Date().toISOString(),
-                                          })
-                                          .eq('id', c.id);
-                                      }
-                                    }}
-                                    className="w-full bg-cream border border-beige focus:border-amber-500/60 rounded px-2 py-1 text-[12px] text-ink outline-none"
-                                  >
-                                    <option value="">Select…</option>
-                                    <option value="appraiser">Appraiser Report</option>
-                                    <option value="agent_verified">Agent-Verified (listing/buyer's agent)</option>
-                                    <option value="broker_estimate">Broker Estimate</option>
-                                  </select>
-                                </div>
-                                <div className="flex gap-2 pt-1">
-                                  <button
-                                    onClick={async () => {
-                                      // Close the editor and flush immediately so the value
-                                      // persists even if the user exits within debounce window.
-                                      setAdjustmentEditorOpen(prev => {
-                                        const next = new Set(prev);
-                                        next.delete(c.id);
-                                        return next;
-                                      });
-                                      if (viewingCMA?.id) {
-                                        const ok = await flushAdjustments(viewingCMA.id, compAdjustmentsDraft);
-                                        if (ok) toast.success('Adjustment saved');
-                                      }
-                                    }}
-                                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded text-[11px] font-bold text-amber-800 transition-colors"
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      updateAdjustment(c.id, { improvement_value: null, improvement_source: null });
-                                      setAdjustmentEditorOpen(prev => {
-                                        const next = new Set(prev);
-                                        next.delete(c.id);
-                                        return next;
-                                      });
-                                    }}
-                                    className="px-3 py-1.5 border border-beige hover:border-red-400 rounded text-[11px] font-bold text-ink-2 hover:text-red-500 transition-colors"
-                                  >
-                                    Clear
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Listing URL editor — drives what shows on
-                              the client share report. Three paths:
-                                1. Saved URL is shown read-only at top
-                                   with a Remove affordance.
-                                2. Paste-and-save row for the common case
-                                   (broker has the URL in hand).
-                                3. AI Find as a fallback when the broker
-                                   doesn't have a URL handy.
-                              Each comp's status is also surfaced on the
-                              COLLAPSED card header so the broker can scan
-                              the batch and see what's missing. */}
-                          <div className="pt-2 border-t border-beige/60 space-y-1.5">
-                            <p className="text-[10px] font-bold text-olive uppercase tracking-wider">Listing on Client Report</p>
-                            {/* Currently-saved URL → show + Remove */}
-                            {(c as any).source_url && (
-                              <div className="flex items-center gap-1.5 px-2 py-1.5 bg-olive-tint border border-olive-border rounded">
-                                <ExternalLink size={11} className="text-olive-2 flex-shrink-0" />
-                                <a
-                                  href={(c as any).source_url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="text-[11px] text-olive-2 hover:text-olive truncate flex-1 min-w-0"
-                                  title={(c as any).source_url}
-                                >
-                                  {String((c as any).source_url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 50)}
-                                </a>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); clearListingForComp(c.id); }}
-                                  disabled={savingListingFor.has(c.id)}
-                                  className="text-[10px] text-ink-3 hover:text-red-500 font-semibold disabled:opacity-50 flex-shrink-0"
-                                  title="Remove listing — won't appear on share report"
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            )}
-
-                            {/* Manual paste row — broker has the URL,
-                                just wants it on the report. Common path. */}
-                            <div className="flex items-center gap-1">
-                              <input
-                                type="url"
-                                placeholder={(c as any).source_url ? 'Paste a different URL to replace…' : 'Paste listing URL (Zillow, MLS, brokerage…)'}
-                                value={manualListingDraft[c.id] || ''}
-                                onChange={(e) => {
-                                  e.stopPropagation();
-                                  const v = e.target.value;
-                                  setManualListingDraft(prev => ({ ...prev, [c.id]: v }));
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    saveManualListingForComp(c.id);
-                                  }
-                                }}
-                                className="flex-1 min-w-0 bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1 text-ink outline-none transition-all"
-                              />
-                              <button
-                                onClick={(e) => { e.stopPropagation(); saveManualListingForComp(c.id); }}
-                                disabled={savingListingFor.has(c.id) || !(manualListingDraft[c.id] || '').trim()}
-                                className="text-[10px] px-2 py-1 bg-olive hover:bg-olive-2 text-white rounded font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
-                              >
-                                {savingListingFor.has(c.id) ? '…' : 'Save'}
-                              </button>
-                            </div>
-
-                            {/* AI Find — secondary path when broker doesn't have a URL */}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); findListingForComp(c.id); }}
-                              disabled={findingListingFor.has(c.id)}
-                              className="text-[10px] flex items-center gap-1 px-2 py-1 bg-cream hover:bg-cream-2 border border-beige hover:border-olive-border rounded text-ink-2 font-bold transition-colors disabled:opacity-50"
-                            >
-                              <Globe size={10} />
-                              {findingListingFor.has(c.id)
-                                ? 'Searching live…'
-                                : liveListings[c.id]
-                                ? 'Re-search online'
-                                : 'Or find online'}
-                            </button>
-                            {liveListings[c.id]?.url && (() => {
-                              const isSaved = savedListingFor.has(c.id);
-                              const isSaving = savingListingFor.has(c.id);
-                              const isAlreadyPersisted = (c as any).source_url === liveListings[c.id]?.url;
-                              return (
-                                <div className="space-y-1">
-                                  <a
-                                    href={liveListings[c.id]!.url!}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="inline-flex items-center gap-1.5 text-[11px] text-olive hover:text-ink-2 underline break-all"
-                                  >
-                                    <ExternalLink size={11} />
-                                    {liveListings[c.id]!.url!.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)}
-                                    {liveListings[c.id]!.url!.length > 70 ? '…' : ''}
-                                  </a>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); saveListingForComp(c.id); }}
-                                    disabled={isSaving}
-                                    className={`text-[10px] px-2 py-0.5 rounded font-bold transition-colors disabled:opacity-50 ${
-                                      isSaved || isAlreadyPersisted
-                                        ? 'bg-olive-tint border border-olive-border text-olive-2'
-                                        : 'bg-olive-tint hover:bg-olive-tint border border-olive-border hover:border-olive text-ink-2'
-                                    }`}
-                                  >
-                                    {isSaving
-                                      ? 'Saving…'
-                                      : isSaved || isAlreadyPersisted
-                                      ? '✓ Saved to comp'
-                                      : 'Save to comp (show on share)'}
-                                  </button>
-                                </div>
-                              );
-                            })()}
-                            {liveListings[c.id] && !liveListings[c.id]?.url && (
-                              <p className="text-[11px] text-ink-3 italic">{liveListings[c.id]!.reason || 'No matching listing found'}</p>
-                            )}
-                          </div>
-
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (c.latitude != null && c.longitude != null) {
-                                map.current?.flyTo({ center: [c.longitude, c.latitude], zoom: 14, duration: 800 });
-                              }
-                            }}
-                            className="text-[10px] text-slate-blue-2 hover:text-slate-blue-2 font-bold mt-1"
-                          >
-                            Fly to →
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                {cmaComps.length === 0 && (
-                  <p className="text-xs text-ink-3 italic text-center py-4">
-                    No comps in this CMA yet. Use Edit / Add Comps in the banner.
-                  </p>
-                )}
-              </div>
             </div>
           </div>
         );
