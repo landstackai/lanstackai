@@ -280,6 +280,13 @@ export default function MapPage() {
   const [subjectOverviewNotes, setSubjectOverviewNotes] = useState<string>('');
   const [subjectOverviewProse, setSubjectOverviewProse] = useState<string>('');
   const [subjectOverviewGenerating, setSubjectOverviewGenerating] = useState(false);
+  // Visible save status for the BOV section. Brokers were entering values
+  // and asking "where's the save button?" — there ISN'T one (auto-saves
+  // on every change) but without visual feedback they had no way to
+  // confirm it worked. This state drives a small inline badge next to
+  // the section header that reads "Saving…" → "Saved ✓" → fades. On
+  // failure it stays as "Save failed" so the broker can act.
+  const [bovSaveStatus, setBovSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Marketing PDF download — when the broker clicks Download Marketing PDF,
   // we flip this on so the button shows a spinner while react-pdf
@@ -5789,6 +5796,10 @@ export default function MapPage() {
 
                   setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
 
+                  // Flip to "Saving…" — the BOV-card header indicator picks
+                  // this up. Reset to "Saved" on success, "error" on failure.
+                  setBovSaveStatus('saving');
+
                   let current = { ...fields };
                   const droppedCols: string[] = [];
                   const MAX_RETRIES = 8;
@@ -5803,6 +5814,22 @@ export default function MapPage() {
                           `[saveBov] saved without columns missing from schema cache: ${droppedCols.join(', ')}. ` +
                           `Run NOTIFY pgrst, 'reload schema'; in Supabase SQL editor, or apply pending migrations.`
                         );
+                        // Partial save — some fields the broker entered
+                        // weren't persisted. Surface this with an error
+                        // toast so they know to apply migrations.
+                        toast.error(
+                          `Some fields couldn't save (DB missing: ${droppedCols.join(', ')}). Apply pending migrations.`,
+                          { duration: 6000, id: 'bov-partial-save' }
+                        );
+                        setBovSaveStatus('error');
+                      } else {
+                        setBovSaveStatus('saved');
+                        // Auto-reset the visible "Saved ✓" badge after a
+                        // moment so it doesn't linger forever — confirms the
+                        // save and then gets out of the way.
+                        setTimeout(() => {
+                          setBovSaveStatus((s) => s === 'saved' ? 'idle' : s);
+                        }, 1500);
                       }
                       return;
                     }
@@ -5810,17 +5837,20 @@ export default function MapPage() {
                     const m = msg.match(/Could not find the '([\w_]+)' column/);
                     if (!m) {
                       toast.error(msg);
+                      setBovSaveStatus('error');
                       return;
                     }
                     const missingCol = m[1];
                     if (!(missingCol in current)) {
                       toast.error(msg);
+                      setBovSaveStatus('error');
                       return;
                     }
                     delete current[missingCol];
                     droppedCols.push(missingCol);
                   }
                   toast.error('Save failed after stripping unknown columns. Reload Supabase schema cache.');
+                  setBovSaveStatus('error');
                 };
 
                 // ─── LUMP SUM handlers ───
@@ -6252,7 +6282,22 @@ export default function MapPage() {
                   <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
-                      <p className="text-[9px] text-ink-3">optional</p>
+                      {/* Save status indicator. Brokers were entering values
+                          without any visual confirmation they saved (auto-save
+                          on change, no Save button). This badge flashes:
+                            • Saving…    (mid-write)
+                            • Saved ✓    (success, fades after 1.5s)
+                            • Save failed (sticks until next save attempt)
+                            • idle       (default — shows "optional") */}
+                      {bovSaveStatus === 'saving' ? (
+                        <p className="text-[9px] text-ink-3 font-mono">Saving…</p>
+                      ) : bovSaveStatus === 'saved' ? (
+                        <p className="text-[9px] text-olive-2 font-mono font-semibold">Saved ✓</p>
+                      ) : bovSaveStatus === 'error' ? (
+                        <p className="text-[9px] text-red-600 font-mono font-semibold">Save failed</p>
+                      ) : (
+                        <p className="text-[9px] text-ink-3">optional · auto-saves</p>
+                      )}
                     </div>
 
                     {/* Presentation mode — Confirmed / Range / Discuss.
