@@ -5468,6 +5468,71 @@ export default function MapPage() {
                 )}
               </div>
 
+              {/* ─── PHASE 1: AVERAGES BELOW COMPS ───────────────────
+                  Averages moved to sit DIRECTLY under the Comps list.
+                  The numbers fall out of comp selection — once the
+                  broker has chosen the comp set, the averages are the
+                  next thing they want to see, before any utilities or
+                  broker-opinion editing. */}
+              {/* CMA averages — three stacked cards, each a different
+                  read on the comp set:
+                    1. TOTAL      headline market signal
+                    2. LAND-ONLY  what raw dirt is worth (strict subset)
+                    3. ADJUSTED   broker's market read with overrides
+
+                  Color cues on the Mid numeral only — olive for total
+                  (the headline), slate-blue for land-only (the dirt
+                  story), amber for adjusted (the broker's analysis).
+                  Sample size per card surfaces when a particular
+                  flavor has fewer comps contributing than the others. */}
+              {cmaAverages.total.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.total.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.total, cmaSubjectTotals.total, 'text-olive-2')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {cmaAverages.landOnly.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Land-Only Price Per Acre
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.landOnly.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.landOnly, cmaSubjectTotals.landOnly, 'text-slate-blue-2')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {cmaAverages.adjusted.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Adjusted Price Per Acre
+                      <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.adjusted.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.adjusted, cmaSubjectTotals.adjusted, 'text-amber-800')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+
               {/* Action row */}
               <div className="grid grid-cols-2 gap-2">
                 {/* Subject tract editing — two modes available at all
@@ -5582,64 +5647,6 @@ export default function MapPage() {
                   Exit Report
                 </button>
               </div>
-
-              {/* CMA averages — three stacked cards, each a different
-                  read on the comp set:
-                    1. TOTAL      headline market signal
-                    2. LAND-ONLY  what raw dirt is worth (strict subset)
-                    3. ADJUSTED   broker's market read with overrides
-
-                  Color cues on the Mid numeral only — olive for total
-                  (the headline), slate-blue for land-only (the dirt
-                  story), amber for adjusted (the broker's analysis).
-                  Sample size per card surfaces when a particular
-                  flavor has fewer comps contributing than the others. */}
-              {cmaAverages.total.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.total.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.total, cmaSubjectTotals.total, 'text-olive-2')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {cmaAverages.landOnly.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                      Average Land-Only Price Per Acre
-                    </p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.landOnly.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.landOnly, cmaSubjectTotals.landOnly, 'text-slate-blue-2')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {cmaAverages.adjusted.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                      Average Adjusted Price Per Acre
-                      <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
-                    </p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.adjusted.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.adjusted, cmaSubjectTotals.adjusted, 'text-amber-800')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
 
               {/* ─── Broker Opinion of Value ──────────────────────────
                   Two modes, broker picks which way they're thinking about
