@@ -5076,9 +5076,29 @@ export default function MapPage() {
                 <FileText size={14} className="text-slate-blue-2 flex-shrink-0" />
                 <span className="font-bold text-sm truncate">{properCase(viewingCMA.subject_name)}</span>
               </div>
-              <button onClick={exitCmaWorkspace} className="text-ink-3 hover:text-ink flex-shrink-0">
-                <X size={16} />
-              </button>
+              {/* Always-visible Share button in the panel header so the
+                  broker can copy the share URL from any scroll position
+                  without hunting for the Share Report button below. The
+                  full-width Share Report button still sits in the
+                  subject-actions group for clarity, but mid-scroll the
+                  header icon is a shortcut. */}
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <button
+                  onClick={copyShareLink}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    shareCopied
+                      ? 'text-olive-2 bg-olive-tint'
+                      : 'text-ink-3 hover:text-olive-2 hover:bg-olive-tint'
+                  }`}
+                  title={shareCopied ? 'Link copied' : 'Copy share link'}
+                  aria-label="Copy share link"
+                >
+                  {shareCopied ? <Check size={14} /> : <Share2 size={14} />}
+                </button>
+                <button onClick={exitCmaWorkspace} className="p-1.5 text-ink-3 hover:text-ink rounded-lg hover:bg-cream-2 transition-colors" title="Close CMA workspace" aria-label="Close">
+                  <X size={14} />
+                </button>
+              </div>
             </div>
 
             <div className="p-4 space-y-4">
@@ -5097,6 +5117,73 @@ export default function MapPage() {
                 <p className="text-xs text-ink-2 font-mono tabular-nums">
                   {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
                 </p>
+              </div>
+
+              {/* ─── SUBJECT-RELATED ACTIONS ───────────────────────
+                  Buttons that act on the subject (Reselect / Redraw),
+                  on the comp set (Edit/Add Comps), or on sharing the
+                  result (Share Report) sit DIRECTLY under the Subject
+                  card. Wrap-up actions (Download PDF, Collaborate,
+                  Exit) live at the very bottom of the panel. */}
+              <div className="grid grid-cols-2 gap-2">
+                {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
+                  <button
+                    onClick={startMapSubjectForCMA}
+                    className="col-span-2 py-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                    style={{ background: 'rgba(200,80,63,0.08)', borderColor: 'rgba(200,80,63,0.40)', color: '#C8503F' }}
+                  >
+                    <MapPin size={12} /> Map Subject Tract
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={startMapSubjectForCMA}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Re-select TxGIO parcels for the subject"
+                    >
+                      <Pencil size={12} /> Reselect Parcels
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!viewingCMA || !drawRef.current) return;
+                        setSettingSubjectForCma(viewingCMA.id);
+                        setSelectedParcels([]);
+                        setSelectedComp(null);
+                        setTappedParcel(null);
+                        drawRef.current.deleteAll();
+                        setDrawnCount(0);
+                        try {
+                          (drawRef.current as any).changeMode('draw_polygon');
+                        } catch {}
+                        setDrawingActive(true);
+                        toast(
+                          `Draw a freehand boundary for "${viewingCMA.subject_name || 'CMA'}". Combine to save.`,
+                          { icon: '✏️', duration: 4500 }
+                        );
+                      }}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Draw a freehand boundary — handles carve-outs and partial-parcel sales"
+                    >
+                      <Pencil size={12} /> Redraw Boundary
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={editCmaComps}
+                  className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Pencil size={12} /> Edit / Add Comps
+                </button>
+                <button
+                  onClick={copyShareLink}
+                  className={`py-2 border text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
+                    shareCopied
+                      ? 'border-olive bg-olive-tint text-olive-2'
+                      : 'border-olive-border bg-olive-tint hover:bg-olive-tint text-olive-2'
+                  }`}
+                >
+                  {shareCopied ? <><Check size={12} /> Copied</> : <><Share2 size={12} /> Share Report</>}
+                </button>
               </div>
 
               {/* ─── PHASE 1: COMPS-FIRST WORKSPACE ──────────────────
@@ -5668,120 +5755,10 @@ export default function MapPage() {
               )}
 
 
-              {/* Action row */}
-              <div className="grid grid-cols-2 gap-2">
-                {/* Subject tract editing — two modes available at all
-                    times once a CMA exists:
-                      • Reselect Parcels — re-tap TxGIO parcels to
-                        rebuild the subject from parcel data
-                      • Redraw Boundary — freehand polygon (handles
-                        carve-outs that don't align with parcel borders,
-                        partial-parcel sales, hand-traced from a survey)
-                    First-time setup (no subject yet) prefers Reselect
-                    since most subjects ARE parcel-based — the prominent
-                    brick-red CTA. Once a subject exists, both options
-                    show as peer buttons. */}
-                {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
-                  <button
-                    onClick={startMapSubjectForCMA}
-                    className="col-span-2 py-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
-                    style={{ background: 'rgba(200,80,63,0.08)', borderColor: 'rgba(200,80,63,0.40)', color: '#C8503F' }}
-                  >
-                    <MapPin size={12} /> Map Subject Tract
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      onClick={startMapSubjectForCMA}
-                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                      title="Re-select TxGIO parcels for the subject"
-                    >
-                      <Pencil size={12} /> Reselect Parcels
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (!viewingCMA || !drawRef.current) return;
-                        setSettingSubjectForCma(viewingCMA.id);
-                        setSelectedParcels([]);
-                        setSelectedComp(null);
-                        setTappedParcel(null);
-                        // Clear any existing drawn polygons so the broker
-                        // starts with a clean canvas.
-                        drawRef.current.deleteAll();
-                        setDrawnCount(0);
-                        // Enter MapboxDraw's polygon-drawing mode. The
-                        // existing combineAll → saveSubjectFromGeometry
-                        // path handles save when the broker hits Combine.
-                        try {
-                          (drawRef.current as any).changeMode('draw_polygon');
-                        } catch {}
-                        setDrawingActive(true);
-                        toast(
-                          `Draw a freehand boundary for "${viewingCMA.subject_name || 'CMA'}". Combine to save.`,
-                          { icon: '✏️', duration: 4500 }
-                        );
-                      }}
-                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                      title="Draw a freehand boundary — handles carve-outs and partial-parcel sales"
-                    >
-                      <Pencil size={12} /> Redraw Boundary
-                    </button>
-                  </>
-                )}
-                <button
-                  onClick={editCmaComps}
-                  className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Pencil size={12} /> Edit / Add Comps
-                </button>
-                <button
-                  onClick={copyShareLink}
-                  className={`py-2 border text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 ${
-                    shareCopied
-                      ? 'border-olive bg-olive-tint text-olive-2'
-                      : 'border-olive-border bg-olive-tint hover:bg-olive-tint text-olive-2'
-                  }`}
-                >
-                  {shareCopied ? <><Check size={12} /> Copied</> : <><Share2 size={12} /> Share Report</>}
-                </button>
-                <button
-                  onClick={openCollaboratorModal}
-                  className="py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-xs font-bold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Users size={12} />
-                  Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
-                </button>
-                {/* Marketing-grade printable PDF — server-rendered via
-                    @react-pdf/renderer (/api/cma/[id]/pdf). Renders the
-                    six-page Borgelt-style CMA: cover + subject overview +
-                    comp table + annotated comp map + opinion of value
-                    + methodology. ~5-15s on cold start, hence the
-                    explicit spinner state. */}
-                <button
-                  onClick={downloadMarketingPdf}
-                  disabled={pdfDownloading || !viewingCMA?.id}
-                  className="col-span-2 py-2 border border-gold/40 bg-gold/10 hover:bg-gold/15 text-xs font-bold text-gold-2 rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ borderColor: 'rgba(182,138,53,0.4)', backgroundColor: 'rgba(182,138,53,0.10)', color: '#8C6A29' }}
-                >
-                  {pdfDownloading ? (
-                    <>
-                      <Loader2 size={12} className="animate-spin" />
-                      Building PDF…
-                    </>
-                  ) : (
-                    <>
-                      <Download size={12} />
-                      Download Marketing PDF
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={exitCmaWorkspace}
-                  className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 text-xs font-bold text-ink-2 rounded-lg transition-colors"
-                >
-                  Exit Report
-                </button>
-              </div>
+              {/* (Action row removed — subject-related buttons moved to
+                  directly under the Subject card above; wrap-up buttons
+                  Download/Collaborate/Exit moved to the very bottom of
+                  the panel after the BOV section.) */}
 
               {/* ─── Broker Opinion of Value ──────────────────────────
                   Two modes, broker picks which way they're thinking about
@@ -6920,6 +6897,45 @@ export default function MapPage() {
                   </>
                 );
               })()}
+
+              {/* ─── WRAP-UP ACTIONS (END OF PANEL) ────────────────────
+                  Download / Collaborate / Exit live at the very bottom
+                  of the panel so they don't compete with the analysis
+                  work above. Each takes a full row for tap-friendliness
+                  on touchscreens + visual separation. */}
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-beige">
+                <button
+                  onClick={downloadMarketingPdf}
+                  disabled={pdfDownloading || !viewingCMA?.id}
+                  className="col-span-2 py-2 border rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ borderColor: 'rgba(182,138,53,0.4)', backgroundColor: 'rgba(182,138,53,0.10)', color: '#8C6A29' }}
+                >
+                  {pdfDownloading ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      Building PDF…
+                    </>
+                  ) : (
+                    <>
+                      <Download size={12} />
+                      Download Marketing PDF
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={openCollaboratorModal}
+                  className="col-span-2 py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-xs font-bold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Users size={12} />
+                  Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
+                </button>
+                <button
+                  onClick={exitCmaWorkspace}
+                  className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 text-xs font-bold text-ink-2 rounded-lg transition-colors"
+                >
+                  Exit Report
+                </button>
+              </div>
 
             </div>
           </div>
