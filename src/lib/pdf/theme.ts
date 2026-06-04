@@ -15,7 +15,17 @@
 // on the built-in Helvetica family for body copy (no font fetch on
 // cold start, no risk of "font not found" failures in serverless).
 
-import { StyleSheet } from '@react-pdf/renderer';
+import { StyleSheet, Font } from '@react-pdf/renderer';
+
+// Disable react-pdf's automatic mid-word hyphenation. By default,
+// react-pdf hyphenates long words to fit them on a line ("CYNTHIA"
+// becomes "CYN-THIA"), which looks unprofessional on a marketing
+// report — especially for property owner names. The callback returns
+// the word unchanged, so when a word doesn't fit on the current line
+// it wraps as a whole to the next line. Side effect at module load
+// so it runs once before any PDF render. Safe to register multiple
+// times (idempotent in react-pdf).
+Font.registerHyphenationCallback((word: string) => [word]);
 
 // Palette — drawn from /tailwind.config.js. Hex values inlined so
 // the PDF render path doesn't depend on the Tailwind config import.
