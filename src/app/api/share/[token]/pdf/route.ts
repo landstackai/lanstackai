@@ -153,6 +153,31 @@ export async function GET(
   // 4. Assemble CmaPdfData via shared helper.
   const pdfData = buildPdfData({ cmaId: cma.id, cma, comps, broker });
 
+  // Debug bypass: hit /api/share/{token}/pdf?debug=1 to get a JSON
+  // dump of what the renderer is actually receiving (comp count,
+  // pin coords, generated Mapbox URL, etc.) instead of the PDF
+  // binary. Strictly diagnostic — remove once pin-loss issue is
+  // tracked down.
+  const url = new URL(_req.url);
+  if (url.searchParams.get('debug') === '1') {
+    return NextResponse.json({
+      cma_id: cma.id,
+      selected_comp_ids_count: selectedIds.length,
+      comps_returned_by_fetch: comps.length,
+      comps_in_pdf_data: pdfData.comps.length,
+      comp_map_url: pdfData.comp_map_url,
+      pin_coords: pdfData.comps.map((c: any, i: number) => ({
+        position: i + 1,
+        property_name: c.property_name,
+        county: c.county,
+        latitude: c.latitude,
+        longitude: c.longitude,
+        latitude_isFinite: Number.isFinite(c.latitude),
+        longitude_isFinite: Number.isFinite(c.longitude),
+      })),
+    }, { status: 200 });
+  }
+
   // 5. Render to buffer
   try {
     const element = React.createElement(MarketingCMAPdf, { data: pdfData });
