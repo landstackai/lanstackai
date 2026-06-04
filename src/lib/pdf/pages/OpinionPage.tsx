@@ -270,6 +270,7 @@ function ConfirmedHero({
   data: CmaPdfData;
 }) {
   const opinion = data.opinion;
+  const subjectAcres = data.subject.acres ?? 0;
 
   // When the broker hasn't entered an explicit Suggested List Price,
   // the SLP defaults to the BOV — meaning both numbers are equal.
@@ -281,15 +282,35 @@ function ConfirmedHero({
   const showExpectedSale =
     presentation === 'range' || (slpExplicit && suggestedListPrice !== brokerTotal);
 
+  // Per-acre derivations. Brokers + clients both think in $/ac for
+  // land — keeping the totals as the headline but always showing the
+  // implied per-acre alongside (mirrors the workspace + share view).
+  const slpPerAcre =
+    suggestedListPrice != null && subjectAcres > 0
+      ? suggestedListPrice / subjectAcres
+      : null;
+  const expectedPerAcre =
+    brokerTotal != null && subjectAcres > 0 ? brokerTotal / subjectAcres : null;
+  const rangeLowAbs =
+    presentation === 'range' && brokerTotal != null
+      ? (opinion.range_low ?? brokerTotal * 0.95)
+      : null;
+  const rangeHighAbs =
+    presentation === 'range' && brokerTotal != null
+      ? (opinion.range_high ?? brokerTotal * 1.05)
+      : null;
+  const rangeLowPpa =
+    rangeLowAbs != null && subjectAcres > 0 ? rangeLowAbs / subjectAcres : null;
+  const rangeHighPpa =
+    rangeHighAbs != null && subjectAcres > 0 ? rangeHighAbs / subjectAcres : null;
+
   // Range mode treatment for the supporting BOV line — show
   // "Expected Sale: $low — $high" instead of a single number.
   let expectedSaleLine: React.ReactNode = null;
-  if (presentation === 'range' && brokerTotal != null) {
-    const low = opinion.range_low ?? brokerTotal * 0.95;
-    const high = opinion.range_high ?? brokerTotal * 1.05;
+  if (presentation === 'range' && rangeLowAbs != null && rangeHighAbs != null) {
     expectedSaleLine = (
       <Text>
-        {fmtMoney(low)} <Text style={{ color: COLORS.gold }}>—</Text> {fmtMoney(high)}
+        {fmtMoney(rangeLowAbs)} <Text style={{ color: COLORS.gold }}>—</Text> {fmtMoney(rangeHighAbs)}
       </Text>
     );
   } else if (brokerTotal != null) {
@@ -322,6 +343,21 @@ function ConfirmedHero({
       >
         {suggestedListPrice != null ? fmtMoney(suggestedListPrice) : '—'}
       </Text>
+      {/* Per-acre line under the headline total. Light gold so it
+          reads as supporting context, not a separate number. */}
+      {slpPerAcre != null && (
+        <Text
+          style={{
+            fontSize: TYPE.small,
+            color: COLORS.gold,
+            fontFamily: 'Helvetica',
+            marginTop: 4,
+            letterSpacing: 0.4,
+          }}
+        >
+          {fmtPpa(slpPerAcre)} × {fmtAcres(subjectAcres)}
+        </Text>
+      )}
 
       {showExpectedSale ? (
         <>
@@ -359,6 +395,35 @@ function ConfirmedHero({
               {expectedSaleLine}
             </Text>
           </View>
+          {/* Per-acre line under the expected sale total. Same muted
+              gold treatment as the headline per-acre so they read as
+              a paired set. Handles both confirmed (single $/ac) and
+              range (low–high $/ac) modes. */}
+          {presentation === 'range' && rangeLowPpa != null && rangeHighPpa != null ? (
+            <Text
+              style={{
+                fontSize: TYPE.small,
+                color: COLORS.beige2,
+                fontFamily: 'Helvetica',
+                marginTop: 4,
+                letterSpacing: 0.4,
+              }}
+            >
+              {fmtPpa(rangeLowPpa)} — {fmtPpa(rangeHighPpa)} × {fmtAcres(subjectAcres)}
+            </Text>
+          ) : expectedPerAcre != null ? (
+            <Text
+              style={{
+                fontSize: TYPE.small,
+                color: COLORS.beige2,
+                fontFamily: 'Helvetica',
+                marginTop: 4,
+                letterSpacing: 0.4,
+              }}
+            >
+              {fmtPpa(expectedPerAcre)} × {fmtAcres(subjectAcres)}
+            </Text>
+          ) : null}
 
           <Text style={{ fontSize: TYPE.small, color: COLORS.beige2, marginTop: 6, lineHeight: 1.5 }}>
             List price leaves negotiating room above the broker's opinion of value while
