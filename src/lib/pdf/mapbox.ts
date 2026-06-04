@@ -127,11 +127,21 @@ export function buildCompMapUrl(subject: Subject, comps: CompCoord[]): string | 
   const W = 1200;
   const H = 900;
   const RETINA = '@2x';
+  // PADDING fix (June 2026): Mapbox's `auto` framing computes a
+  // bounding box from overlay TIPS only, with NO default padding.
+  // Pins whose tips landed at the bbox extremes had their bodies
+  // (the round head + label, ~40px above the tip) clipped off the
+  // image — they were technically "inside" the bbox but visually
+  // missing. Brokers reported PDF maps showing 4 of 6 comps even
+  // though all 6 coords were valid and in the URL. 80px padding
+  // gives every pin enough room for its full marker, plus a small
+  // visual breathing buffer for the satellite imagery context.
+  const PADDING = overlays.length >= 2 ? '&padding=80' : '';
 
   // Try with all overlays first
   let url =
     `${MAPBOX_BASE}/satellite-streets-v12/static/` +
-    `${overlays.join(',')}/${framing}/${W}x${H}${RETINA}?access_token=${token}`;
+    `${overlays.join(',')}/${framing}/${W}x${H}${RETINA}?access_token=${token}${PADDING}`;
 
   if (url.length <= MAX_URL_LENGTH) return url;
 
@@ -140,7 +150,7 @@ export function buildCompMapUrl(subject: Subject, comps: CompCoord[]): string | 
   const stripped = overlays.map((o) => o.replace(/^pin-l-\d/, 'pin-l'));
   url =
     `${MAPBOX_BASE}/satellite-streets-v12/static/` +
-    `${stripped.join(',')}/${framing}/${W}x${H}${RETINA}?access_token=${token}`;
+    `${stripped.join(',')}/${framing}/${W}x${H}${RETINA}?access_token=${token}${PADDING}`;
   if (url.length <= MAX_URL_LENGTH) return url;
 
   // Still too long (unlikely at typical comp counts) — give up.

@@ -4,10 +4,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Comp } from '@/types';
-import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
+import { formatPPA, formatAcres, formatCurrency, formatDate, TEXAS_COUNTIES } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
-import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download } from 'lucide-react';
+import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download, Plus } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 // @ts-expect-error — turf v6.5 .d.ts isn't exposed via package.json "exports"
@@ -115,6 +115,11 @@ export default function MapPage() {
   const [overlays, setOverlays] = useState<{ floodplain: boolean }>({
     floodplain: false,
   });
+  // Live zoom level, synced via map 'move' events. Used to surface a
+  // "zoom in to see this overlay" hint when the broker has toggled Flood
+  // (minzoom 8) or entered Select Parcels mode (minzoom 13) at a state-
+  // wide view. Without this, both features fail silently at low zoom.
+  const [currentZoom, setCurrentZoom] = useState<number>(6);
   // Advanced-filters popover (opens from the sliders icon next to the
   // search bar). Holds the owner-search input + scope filter so we can
   // collapse the two top-of-map search bars into one without losing the
@@ -127,6 +132,13 @@ export default function MapPage() {
   const [tappedParcel, setTappedParcel] = useState<ParcelFeature | null>(null);
   const [selectedParcels, setSelectedParcels] = useState<ParcelFeature[]>([]);
   const [mergedAcres, setMergedAcres] = useState(0);
+  // The unioned geometry produced by combineAll. Lives in React state
+  // (in addition to the merged-boundary Mapbox source) so downstream
+  // actions like "Add as New Comp" can use it AFTER combineAll has
+  // emptied drawRef + selectedParcels. Without this, the sheet's
+  // "Add as New Comp" would silently no-op because the polygon was
+  // already absorbed by the merged-boundary source on the map.
+  const [mergedGeometry, setMergedGeometry] = useState<any>(null);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [prefilledComp, setPrefilledComp] = useState<any>(null);
@@ -218,6 +230,14 @@ export default function MapPage() {
   // Lump-sum mode inputs (legacy fields, kept for that mode)
   const [bovPpaInput, setBovPpaInput] = useState<string>('');
   const [bovTotalInput, setBovTotalInput] = useState<string>('');
+  // Range-mode inputs — broker-set Low/High band. Each pair ($/Acre +
+  // Total) auto-syncs via × subject_acres. Stored as TOTAL only on
+  // cmas.opinion_range_low_total / opinion_range_high_total; per-acre
+  // derives on display. Only rendered when opinionPresentation === 'range'.
+  const [bovRangeLowPpaInput, setBovRangeLowPpaInput] = useState<string>('');
+  const [bovRangeLowTotalInput, setBovRangeLowTotalInput] = useState<string>('');
+  const [bovRangeHighPpaInput, setBovRangeHighPpaInput] = useState<string>('');
+  const [bovRangeHighTotalInput, setBovRangeHighTotalInput] = useState<string>('');
   // Breakdown-mode inputs
   const [bovLandPpaInput, setBovLandPpaInput] = useState<string>('');
   const [bovLandTotalInput, setBovLandTotalInput] = useState<string>('');
@@ -238,6 +258,12 @@ export default function MapPage() {
   // cmas.suggested_list_price; falls back to compute on display.
   // See docs/DESIGN_DECISIONS.md (sticker-shock framing).
   const [bovListPriceInput, setBovListPriceInput] = useState<string>('');
+  // Per-acre mirror of the Suggested List Price input. Auto-syncs with
+  // bovListPriceInput via subj acres: edit either, the other recomputes.
+  // Only the TOTAL writes to the DB (suggested_list_price column);
+  // per-acre derives on every load via total ÷ acres so there's one
+  // source of truth.
+  const [bovListPpaInput, setBovListPpaInput] = useState<string>('');
   // Opinion of Value presentation mode — controls how the BOV is
   // displayed on the client report. Independent of breakdown style
   // (lump_sum vs breakdown). 'confirmed' shows a hard number,
@@ -260,6 +286,13 @@ export default function MapPage() {
   const [subjectOverviewNotes, setSubjectOverviewNotes] = useState<string>('');
   const [subjectOverviewProse, setSubjectOverviewProse] = useState<string>('');
   const [subjectOverviewGenerating, setSubjectOverviewGenerating] = useState(false);
+  // Visible save status for the BOV section. Brokers were entering values
+  // and asking "where's the save button?" — there ISN'T one (auto-saves
+  // on every change) but without visual feedback they had no way to
+  // confirm it worked. This state drives a small inline badge next to
+  // the section header that reads "Saving…" → "Saved ✓" → fades. On
+  // failure it stays as "Save failed" so the broker can act.
+  const [bovSaveStatus, setBovSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Marketing PDF download — when the broker clicks Download Marketing PDF,
   // we flip this on so the button shows a spinner while react-pdf
@@ -306,6 +339,14 @@ export default function MapPage() {
   // only that CMA's subject + selected comps and shows a workspace banner.
   const [viewingCMA, setViewingCMA] = useState<any | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Broker's preferred List Price cushion % (above BOV / comp avg).
+  // Persisted on profiles.default_list_price_cushion_pct via migration 034.
+  // Default 10% matches the previous hardcoded behavior so existing brokers
+  // see no change until they explicitly edit. Editable INLINE on each CMA's
+  // Suggested List Price card — change it once, it saves to your profile
+  // and becomes the default for every CMA going forward.
+  const [listPriceCushionPct, setListPriceCushionPct] = useState<number>(10);
+  const [savingCushionPct, setSavingCushionPct] = useState(false);
   // Reset expansion whenever a different comp is selected
   useEffect(() => { setDescriptionExpanded(false); }, [selectedComp?.id]);
 
@@ -438,6 +479,23 @@ export default function MapPage() {
     let cancelled = false;
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!cancelled) setCurrentUserId(user?.id ?? null);
+      // Load the broker's preferred List Price cushion. Self-healing: if
+      // the column doesn't exist yet (migration 034 not applied), select
+      // errors silently and we keep the 10% default.
+      if (user?.id) {
+        supabase
+          .from('profiles')
+          .select('default_list_price_cushion_pct')
+          .eq('id', user.id)
+          .maybeSingle()
+          .then(({ data }) => {
+            if (cancelled || !data) return;
+            const v = (data as any).default_list_price_cushion_pct;
+            if (v != null && Number.isFinite(Number(v))) {
+              setListPriceCushionPct(Number(v));
+            }
+          });
+      }
     });
     return () => { cancelled = true; };
   }, [supabase]);
@@ -455,6 +513,7 @@ export default function MapPage() {
     setSelectedParcels([]);
     setTappedParcel(null);
     setMergedAcres(0);
+    setMergedGeometry(null);
     setMapMode('view');
     setReselectingComp(null);
     setSettingSubjectForCma(null);
@@ -834,10 +893,30 @@ export default function MapPage() {
       });
 
       setMapLoaded(true);
+
+      // Live zoom tracking — feeds the "zoom in to see this overlay" hint
+      // below the toolbar. Cheap: Mapbox fires 'move' at ~60fps during pan/
+      // zoom; we just write a number to React state. React batches the
+      // setState so we don't get one render per frame.
+      setCurrentZoom(map.current!.getZoom());
+      map.current!.on('move', () => {
+        if (map.current) setCurrentZoom(map.current.getZoom());
+      });
     });
 
     // Map click — try county CAD vector layers first, then TxGIO via /api/parcel
     map.current.on('click', async (e) => {
+      // Guard: when MapboxDraw is actively drawing a polygon (or editing
+      // an existing one's vertices), the user's clicks belong to THAT
+      // workflow, not parcel selection. Without this guard, every click
+      // to place a vertex was ALSO opening a parcel preview underneath.
+      // We check MapboxDraw's mode directly — more reliable than the
+      // React state which lags behind the actual mode by a render.
+      const drawMode = drawRef.current?.getMode();
+      if (drawMode === 'draw_polygon' || drawMode === 'direct_select') {
+        return;
+      }
+
       const { lng, lat } = e.lngLat;
       let parcel: ParcelFeature | null = null;
 
@@ -2252,6 +2331,7 @@ export default function MapPage() {
     const listNum = savedListPrice != null ? Number(savedListPrice) : NaN;
     if (Number.isFinite(listNum) && listNum > 0) {
       setBovListPriceInput(String(Math.round(listNum)));
+      setBovListPpaInput(acres > 0 ? String(Math.round(listNum / acres)) : '');
     } else {
       // No saved override → seed with BOV × 1.10 when BOV is set,
       // else empty.
@@ -2260,10 +2340,34 @@ export default function MapPage() {
           ? lumpNum
           : ((Number.isFinite(landNum) ? landNum : 0) + (Number.isFinite(impNum) ? impNum : 0));
       if (bovForList > 0) {
-        setBovListPriceInput(String(Math.round(bovForList * 1.10)));
+        const seededTotal = Math.round(bovForList * 1.10);
+        setBovListPriceInput(String(seededTotal));
+        setBovListPpaInput(acres > 0 ? String(Math.round(seededTotal / acres)) : '');
       } else {
         setBovListPriceInput('');
+        setBovListPpaInput('');
       }
+    }
+
+    // Range-mode inputs — broker-set Low/High band (migration 035).
+    // Loaded as TOTAL; per-acre is derived for display via × acres.
+    const savedRangeLow = cma?.opinion_range_low_total;
+    const savedRangeHigh = cma?.opinion_range_high_total;
+    const rangeLowNum = savedRangeLow != null ? Number(savedRangeLow) : NaN;
+    const rangeHighNum = savedRangeHigh != null ? Number(savedRangeHigh) : NaN;
+    if (Number.isFinite(rangeLowNum) && rangeLowNum > 0) {
+      setBovRangeLowTotalInput(String(Math.round(rangeLowNum)));
+      setBovRangeLowPpaInput(acres > 0 ? String(Math.round(rangeLowNum / acres)) : '');
+    } else {
+      setBovRangeLowTotalInput('');
+      setBovRangeLowPpaInput('');
+    }
+    if (Number.isFinite(rangeHighNum) && rangeHighNum > 0) {
+      setBovRangeHighTotalInput(String(Math.round(rangeHighNum)));
+      setBovRangeHighPpaInput(acres > 0 ? String(Math.round(rangeHighNum / acres)) : '');
+    } else {
+      setBovRangeHighTotalInput('');
+      setBovRangeHighPpaInput('');
     }
 
     // Opinion presentation mode + valuation notes — both nullable on
@@ -2349,6 +2453,49 @@ export default function MapPage() {
     );
   }, [viewingCMA]);
 
+  // Same write as saveSubjectFromParcels but accepts a raw geometry +
+  // total acres directly. Used by the Redraw Boundary path where the
+  // broker draws a freehand polygon (no parcel data to union from).
+  const saveSubjectFromGeometry = useCallback(
+    async (cmaId: string, geometry: any, totalAcres: number) => {
+      if (!geometry) {
+        toast.error('No boundary to save');
+        return;
+      }
+      // @ts-expect-error — turf v6.5 .d.ts not exposed
+      const turf = (await import('@turf/turf')) as any;
+      let lat: number | null = null;
+      let lng: number | null = null;
+      try {
+        const feat = geometry.type === 'Feature' ? geometry : { type: 'Feature', properties: {}, geometry };
+        const c = turf.centroid(feat);
+        lng = c.geometry.coordinates[0];
+        lat = c.geometry.coordinates[1];
+      } catch {}
+      const { error } = await supabase
+        .from('cmas')
+        .update({
+          subject_latitude: lat,
+          subject_longitude: lng,
+          subject_boundary_geojson: geometry.geometry || geometry,
+          ...(totalAcres > 0 ? { subject_acres: totalAcres } : {}),
+        })
+        .eq('id', cmaId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success(`Subject boundary updated — ${totalAcres.toFixed(1)} ac`);
+      setSettingSubjectForCma(null);
+      resetParcelState();
+      setSheetMode('none');
+      // Refresh the CMA so the map re-renders with the new subject.
+      const { data } = await supabase.from('cmas').select('*').eq('id', cmaId).single();
+      if (data) setViewingCMA(data);
+    },
+    [supabase, resetParcelState]
+  );
+
   const saveSubjectFromParcels = useCallback(
     async (cmaId: string, parcels: ParcelFeature[]) => {
       if (parcels.length === 0) {
@@ -2381,8 +2528,11 @@ export default function MapPage() {
           subject_latitude: lat,
           subject_longitude: lng,
           subject_boundary_geojson: merged?.geometry || merged,
-          // also keep subject_acres in sync
-          subject_acres: totalAcres > 0 ? totalAcres : undefined,
+          // also keep subject_acres in sync. When the union math gave
+          // us nothing (no parcels), omit the field by leaving it null
+          // rather than `undefined` — Supabase serialization of
+          // `undefined` is undefined-behavior across versions.
+          ...(totalAcres > 0 ? { subject_acres: totalAcres } : {}),
         })
         .eq('id', cmaId);
       if (error) {
@@ -2743,12 +2893,202 @@ export default function MapPage() {
     return false;
   };
 
+  // Parse a coordinate string. Returns { lat, lng } if the input is a valid
+  // lat/lng pair, null otherwise.
+  //
+  // Supports:
+  //   "30.2076, -98.824"    "30.2076,-98.824"     "30.2076 -98.824"
+  //   "30.2076N 98.824W"   "30.2076° N, 98.824° W"
+  //   "30°12'27\"N 98°49'27\"W"  (degrees-minutes-seconds)
+  //
+  // Validates lat ∈ [-90, 90] and lng ∈ [-180, 180]. Cardinal suffixes
+  // (N/S/E/W) flip the sign as expected (W → negative lng, S → negative lat).
+  const parseCoordinates = (raw: string): { lat: number; lng: number } | null => {
+    const s = raw.trim();
+    if (!s) return null;
+
+    // DMS form: 30°12'27"N 98°49'27"W
+    const dmsRe = /^\s*(\d{1,3})°\s*(\d{1,2})['′]\s*([\d.]+)["″]?\s*([NSns])\s*[, ]+\s*(\d{1,3})°\s*(\d{1,2})['′]\s*([\d.]+)["″]?\s*([EWew])\s*$/;
+    const dms = s.match(dmsRe);
+    if (dms) {
+      const lat = (Number(dms[1]) + Number(dms[2]) / 60 + Number(dms[3]) / 3600) * (dms[4].toUpperCase() === 'S' ? -1 : 1);
+      const lng = (Number(dms[5]) + Number(dms[6]) / 60 + Number(dms[7]) / 3600) * (dms[8].toUpperCase() === 'W' ? -1 : 1);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng };
+      return null;
+    }
+
+    // Decimal form with optional cardinal suffix: "30.2076N 98.824W" or "30.2076, -98.824"
+    // Two numbers separated by comma, whitespace, or both. Optional °, optional N/S/E/W.
+    const decRe = /^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([NSns])?\s*[, ]+\s*(-?\d+(?:\.\d+)?)\s*°?\s*([EWew])?\s*$/;
+    const dec = s.match(decRe);
+    if (dec) {
+      let lat = Number(dec[1]);
+      let lng = Number(dec[3]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      if (dec[2] && dec[2].toUpperCase() === 'S') lat = -Math.abs(lat);
+      if (dec[4] && dec[4].toUpperCase() === 'W') lng = -Math.abs(lng);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng };
+      return null;
+    }
+
+    return null;
+  };
+
+  // Detect whether a free-text query looks like an owner-name search, and
+  // (optionally) peel a TX county off the tail. Returns { owner, county }
+  // when the input is a plausible name query, null otherwise.
+  //
+  // Conservative — only fires when we're fairly sure it's a name:
+  //   - All tokens alphabetic (or hyphen / apostrophe — "O'Brien", "Smith-Jones")
+  //   - 2+ tokens (a single word is too ambiguous; let the AI handle it)
+  //   - No road / address keywords (those are handled by isLikelyAddressOrStreet)
+  //   - No filter-y keywords ("acres", "sold", "ranch", "comp", "in", "with")
+  //
+  // County peel-off: checks the trailing 1 or 2 tokens against the TX county
+  // list. Two-word counties first (so "Live Oak" / "Tom Green" don't get
+  // mis-split). Counties stripped from the owner portion.
+  const parseOwnerSearch = (raw: string): { owner: string; county: string | null } | null => {
+    const s = raw.trim();
+    if (!s) return null;
+
+    // Reject if it looks like a filter query — words the AI handles better
+    if (/\b(acre|acres|sold|ppa|price|listed|active|pending|with|in|under|over|less|greater|than|water|river|creek|cma|comp|comps|filter|show|find|all|top|recent|date)\b/i.test(s)) {
+      return null;
+    }
+
+    // Tokens — alphabetic, hyphen, apostrophe, ampersand (entity names)
+    const tokens = s.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2) return null;
+    const allLookLikeNames = tokens.every((t) => /^[A-Za-z][A-Za-z'’\-&\.]*$/.test(t));
+    if (!allLookLikeNames) return null;
+
+    // Try peeling a 2-word TX county off the tail first, then 1-word.
+    const lowerCounties = new Set(TEXAS_COUNTIES.map((c) => c.toLowerCase()));
+    let county: string | null = null;
+    let ownerTokens = tokens;
+
+    if (tokens.length >= 3) {
+      const tail2 = `${tokens[tokens.length - 2]} ${tokens[tokens.length - 1]}`;
+      if (lowerCounties.has(tail2.toLowerCase())) {
+        // Match — preserve canonical casing from TEXAS_COUNTIES
+        const canon = TEXAS_COUNTIES.find((c) => c.toLowerCase() === tail2.toLowerCase())!;
+        county = canon;
+        ownerTokens = tokens.slice(0, -2);
+      }
+    }
+    if (!county && tokens.length >= 2) {
+      const tail1 = tokens[tokens.length - 1];
+      if (lowerCounties.has(tail1.toLowerCase())) {
+        const canon = TEXAS_COUNTIES.find((c) => c.toLowerCase() === tail1.toLowerCase())!;
+        county = canon;
+        ownerTokens = tokens.slice(0, -1);
+      }
+    }
+
+    // Need at least one token left for the owner portion. And if the
+    // remaining owner is a single token, only proceed if we successfully
+    // pulled a county off — a bare surname statewide is too broad.
+    if (ownerTokens.length === 0) return null;
+    if (ownerTokens.length === 1 && !county) return null;
+
+    return { owner: ownerTokens.join(' '), county };
+  };
+
   const askAi = useCallback(async () => {
     const q = searchQuery.trim();
     if (!q) return;
     setAskingAi(true);
 
-    // Fast path: address / street / zip — skip the AI roundtrip, go straight
+    // ────────────────────────────────────────────────────────────────────
+    // Fast path 1: COORDINATES
+    // ────────────────────────────────────────────────────────────────────
+    // Accept any of:
+    //   "30.2076, -98.824"     ← canonical
+    //   "30.2076,-98.824"      ← no space
+    //   "30.2076 -98.824"      ← space separator
+    //   "30.2076N 98.824W"     ← cardinal suffix (W flips to negative)
+    //   "30°12'27\"N 98°49'27\"W"  ← DMS (rare but easy to support)
+    // Validates lat ∈ [-90, 90], lng ∈ [-180, 180]. Outside-TX coords
+    // still fly there but with a soft warning — brokers occasionally
+    // paste from listings elsewhere.
+    const coords = parseCoordinates(q);
+    if (coords) {
+      clearAiSearch();
+      if (map.current) {
+        map.current.flyTo({ center: [coords.lng, coords.lat], zoom: 14, duration: 1200 });
+      }
+      // Soft warning if outside the rough TX bounding box (lat 25.8–36.5,
+      // lng -106.7 to -93.5). Still flies — brokers may be inspecting
+      // out-of-state references.
+      const insideTx = coords.lat >= 25.5 && coords.lat <= 36.8 && coords.lng >= -107 && coords.lng <= -93;
+      toast.success(
+        `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}${insideTx ? '' : ' (outside TX)'}`,
+        { duration: 2500 }
+      );
+      setAskingAi(false);
+      return;
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Fast path 2: OWNER NAME (+ optional county)
+    // ────────────────────────────────────────────────────────────────────
+    // "Dale Crenwelge Gillespie" → owner="Dale Crenwelge", county="Gillespie"
+    // "Schwartz Family Trust"    → owner="Schwartz Family Trust", county=null
+    //
+    // We peel a TX county off the tail if present (single-word or two-word
+    // county names like "Tom Green" / "Live Oak"). Anything that doesn't
+    // look like a road / address / number is fair game for owner search —
+    // address detection already ran above, so we know we're not stepping
+    // on a street query.
+    const ownerQuery = parseOwnerSearch(q);
+    if (ownerQuery) {
+      try {
+        const params = new URLSearchParams({ q: ownerQuery.owner });
+        if (ownerQuery.county) params.set('county', ownerQuery.county);
+        const res = await fetch(`/api/parcels-by-owner?${params}`);
+        const data = await res.json();
+        if (res.ok) {
+          const features = Array.isArray(data?.features) ? data.features : [];
+          if (features.length > 0) {
+            // Render via the existing owner-search-results source so the
+            // golden highlight + count banner show up exactly like the
+            // secondary owner-search input does.
+            const src = map.current?.getSource('owner-search-results') as mapboxgl.GeoJSONSource | undefined;
+            if (src) src.setData({ type: 'FeatureCollection', features });
+            setOwnerSearchQuery(ownerQuery.county ? `${ownerQuery.owner} (${ownerQuery.county})` : ownerQuery.owner);
+            setOwnerSearchCount(features.length);
+            setOwnerSearchTruncated(Boolean(data?.truncated));
+
+            // Fit to bbox so the user can see all matches
+            try {
+              // @ts-expect-error — turf v6.5 .d.ts not exposed
+              const turfMod = (await import('@turf/turf')) as any;
+              const fc = { type: 'FeatureCollection', features };
+              const bbox = turfMod.bbox(fc) as [number, number, number, number];
+              if (bbox.every(Number.isFinite) && map.current) {
+                map.current.fitBounds(
+                  [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+                  { padding: 80, duration: 1200, maxZoom: 15 }
+                );
+              }
+            } catch {}
+
+            toast.success(
+              `${features.length} parcel${features.length === 1 ? '' : 's'} owned by ${ownerQuery.owner}${ownerQuery.county ? ` in ${ownerQuery.county}` : ''}${data?.truncated ? ' (first 200)' : ''}`,
+              { duration: 4000 }
+            );
+            setAskingAi(false);
+            return;
+          }
+          // No matches — fall through to AI in case it was actually a filter query
+        }
+        // If !res.ok, fall through silently — the AI fallback might still understand it
+      } catch {
+        // Network blip — fall through to AI
+      }
+    }
+
+    // Fast path 3: address / street / zip — skip the AI roundtrip, go straight
     // to Mapbox geocoding. Avoids 2s of AI latency and the occasional
     // misclassification when the AI thinks a road name is a filter keyword.
     if (isLikelyAddressOrStreet(q)) {
@@ -2898,6 +3238,9 @@ export default function MapPage() {
       setAskingAi(false);
     }
   }, [searchQuery, comps, clearAiSearch, flyToPlace]);
+  // ⬆ Dep array is intentionally tight — the owner-search + coord fast
+  // paths read state setters (stable across renders) and the imperative
+  // map ref, both of which are exempt from React's deps lint.
 
   // Normalize a county string for comparison — strips "County" suffix,
   // collapses whitespace, lowercases. So "Frio County" / "frio" / "FRIO"
@@ -3252,6 +3595,15 @@ export default function MapPage() {
       // markers via translate). Setting transform: scale() wipes Mapbox's
       // translate and the pin jumps to (0,0) for a frame. Hover affordance
       // comes from border-color + box-shadow only.
+      // IMPORTANT: do NOT set `position` here. Mapbox applies the
+      // .mapboxgl-marker class which sets `position: absolute` so the
+      // marker translates to its lat/lng. Setting position:relative
+      // via inline style WINS over the class (inline > class) and
+      // strips the marker's positioning — causing pins to stretch to
+      // their container's full width. The number-badge child uses
+      // `position: absolute` and is positioned relative to the pin
+      // anyway, because Mapbox's `position: absolute` on the marker
+      // counts as a "positioned ancestor."
       el.style.cssText = `
         background:${isCmaSelected ? '#332E29' : '#1A1815'};
         border:1.5px solid ${isCmaSelected ? '#C4CE96' : color};
@@ -3268,7 +3620,51 @@ export default function MapPage() {
         if (n >= 1_000) return `$${Math.round(n / 1_000)}k`;
         return `$${Math.round(n)}`;
       };
-      el.textContent = pinLabelMode === 'total' ? formatPinAmount(total) : formatPinAmount(ppa);
+      const pinAmount = pinLabelMode === 'total' ? formatPinAmount(total) : formatPinAmount(ppa);
+
+      // Comp number — only renders when this comp is part of an active
+      // CMA (broker is viewing the workspace OR building a new CMA).
+      // Position in the cmaComps / cmaCompIds array drives the number.
+      // Shown as a small olive circle badge in the corner of the pin
+      // (Option C from broker spec — number badge in corner, price
+      // stays in the middle so it's still glanceable). Matches the
+      // numbered badge on each comp row in the right panel.
+      const cmaIdsForNumbering: string[] = (viewingCMA?.selected_comp_ids as string[] | undefined)
+        ?? (cmaMode ? cmaCompIds : []);
+      const numIdx = cmaIdsForNumbering.indexOf(comp.id);
+      const compNumber = numIdx >= 0 ? numIdx + 1 : 0;
+      if (compNumber > 0) {
+        // Build pin content with corner badge. innerHTML (vs textContent)
+        // because we need a positioned child element. Pin amount escaped
+        // as it comes from formatPinAmount which produces safe strings,
+        // not user input.
+        el.innerHTML = `
+          <span style="
+            position:absolute;
+            top:-7px;
+            left:-7px;
+            min-width:18px;
+            height:18px;
+            padding:0 4px;
+            border-radius:9px;
+            background:#A8B57A;
+            border:1.5px solid #1A1815;
+            color:#1A1815;
+            font-family:'DM Mono',monospace;
+            font-size:10px;
+            font-weight:700;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            line-height:1;
+            box-shadow:0 1px 4px rgba(0,0,0,0.4);
+            z-index:2;
+          ">${compNumber}</span>
+          <span>${pinAmount}</span>
+        `;
+      } else {
+        el.textContent = pinAmount;
+      }
 
       // Build a hover preview popup that mirrors the collapsed comp card from
       // the CMA workspace right panel — same header (name + badges) and same
@@ -3369,7 +3765,11 @@ export default function MapPage() {
       markerElsRef.current.set(comp.id, el);
       compPopupsRef.current.set(comp.id, popup);
     });
-  }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode]);
+  }, [displayComps, mapLoaded, cmaMode, cmaCompIds, toggleCmaComp, pinLabelMode, viewingCMA?.selected_comp_ids]);
+  // ⬆ viewingCMA?.selected_comp_ids drives the corner-badge numbering on
+  // each pin (so pins renumber when comps are added/removed/reordered in
+  // the active CMA). React's shallow-eq on the array reference triggers
+  // a re-render only when the list actually changes.
 
   // Imperative styling: applies hover-highlight + AI-search dim/highlight to
   // the existing marker DOM elements without rebuilding them.
@@ -3429,16 +3829,35 @@ export default function MapPage() {
     const total = parcels.reduce((sum, p) => sum + (p.acres || 0), 0);
     setMergedAcres(total);
 
+    // Union the parcel geometries into a single Feature and stash in
+    // React state. Without this, the "Add as New Comp" button on the
+    // boundary_created sheet can't find a polygon — drawRef is empty,
+    // selectedParcels is empty (cleared right after this), and the
+    // merged-boundary Mapbox source isn't a React state, so the handler
+    // would bail with "Draw a polygon or select parcels first."
+    //
+    // Same union pattern combineAll uses, just operating on the
+    // ParcelFeature[] argument instead of drawRef + selectedParcels.
+    const parcelFeatures = parcels
+      .filter((p) => p.geometry)
+      .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry as any }));
+    if (parcelFeatures.length > 0) {
+      let merged: any = parcelFeatures[0];
+      for (let i = 1; i < parcelFeatures.length; i++) {
+        try {
+          const u = turf.union(merged as any, parcelFeatures[i] as any);
+          if (u) merged = u;
+        } catch {}
+      }
+      setMergedGeometry(merged?.geometry || merged);
+    }
+
     if (map.current && mapLoaded) {
       const src = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
       if (src) {
         src.setData({
           type: 'FeatureCollection',
-          features: parcels.filter(p => p.geometry).map(p => ({
-            type: 'Feature' as const,
-            properties: {},
-            geometry: p.geometry,
-          })),
+          features: parcelFeatures,
         });
       }
       // Clear selection layer
@@ -3465,6 +3884,7 @@ export default function MapPage() {
     }
     setSelectedParcels([]);
     setMergedAcres(0);
+    setMergedGeometry(null);
     drawRef.current.deleteAll();
     drawRef.current.changeMode('draw_polygon');
     setDrawingActive(true);
@@ -3515,6 +3935,7 @@ export default function MapPage() {
     setDrawVertexCount(0);
     setSelectedParcels([]);
     setMergedAcres(0);
+    setMergedGeometry(null);
     setSheetMode('none');
     if (map.current && mapLoaded) {
       try {
@@ -3552,6 +3973,12 @@ export default function MapPage() {
     let totalAcres = 0;
     try { totalAcres = turf.area(merged) / 4046.8564224; } catch {}
     setMergedAcres(totalAcres);
+    // Stash the unioned geometry in React state so downstream actions
+    // (Add as New Comp / Use as CMA Subject on the boundary_created
+    // sheet) can use it AFTER we delete drawRef and reset
+    // selectedParcels below. Without this, those actions had no
+    // polygon to read.
+    setMergedGeometry(merged?.geometry || merged);
 
     const src = map.current.getSource('merged-boundary') as mapboxgl.GeoJSONSource;
     if (src) {
@@ -3568,26 +3995,161 @@ export default function MapPage() {
     setDrawingActive(false);
 
     setMapMode('view');
+
+    // If the broker is in subject-edit mode for an existing CMA,
+    // skip the Boundary Created sheet entirely and save the unioned
+    // geometry directly as the CMA's new subject. Same shortcut
+    // handleCreateBoundary already takes for parcel-only flows —
+    // applied here so the DRAW path works too. Without this, a
+    // freehand redraw of a subject boundary would land on the sheet
+    // and force the broker to click "Use as CMA Subject" (which
+    // creates a NEW CMA, not updates the current one).
+    if (settingSubjectForCma) {
+      saveSubjectFromGeometry(
+        settingSubjectForCma,
+        merged?.geometry || merged,
+        totalAcres
+      );
+      return;
+    }
+
     setSheetMode('boundary_created');
     toast.success(`Combined into ${totalAcres.toFixed(1)} acres`);
-  }, [selectedParcels, mapLoaded]);
+  }, [selectedParcels, mapLoaded, settingSubjectForCma, saveSubjectFromGeometry]);
 
-  const handleAddAsNewComp = useCallback(() => {
-    const primary = selectedParcels[0] || tappedParcel;
-    if (!primary) return;
+  // Save the currently-drawn polygon + selected parcels as a brand-new
+  // comp. Mirrors combineAll's union math (so the broker doesn't have
+  // to hit Combine first), then opens the Add Comp modal pre-filled
+  // with boundary + acres + centroid + county. Closes the gap where
+  // the broker drew a parcel and had nowhere to "Create Comp" from
+  // that boundary.
+  const handleCreateCompFromBoundary = useCallback(async () => {
+    // DEBUG (delete once verified): visible breadcrumb so we can see
+    // when this helper runs vs. silently returns.
+    toast('handleCreateCompFromBoundary fired', { duration: 2000 });
+    console.log('[handleCreateCompFromBoundary] state:', {
+      mapReady: !!map.current && mapLoaded,
+      drawnFeatures: drawRef.current?.getAll().features.length || 0,
+      selectedParcelsCount: selectedParcels.length,
+      mergedGeometryPresent: !!mergedGeometry,
+    });
+    if (!map.current || !mapLoaded) {
+      toast.error('Map not ready');
+      return;
+    }
 
+    const drawn = (drawRef.current?.getAll().features || []).filter(
+      (f: any) => f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon'
+    );
+    const parcelFeatures = selectedParcels
+      .filter((p) => p.geometry)
+      .map((p) => ({ type: 'Feature' as const, properties: {}, geometry: p.geometry }));
+    const all = [...drawn, ...parcelFeatures];
+
+    // Compute the unioned geometry. Three sources, checked in order:
+    //   1. drawRef + selectedParcels (broker hit Create Comp BEFORE Combine)
+    //   2. mergedGeometry React state (broker hit Combine first → polygon
+    //      lives in merged-boundary source + this state)
+    //   3. Bail with an error if nothing
+    // Without #2 the sheet's "Add as New Comp" silently no-ops because
+    // combineAll empties drawRef.deleteAll() and resetParcelState() before
+    // the broker clicks anything.
+    let merged: any = null;
+    if (all.length > 0) {
+      merged = all[0];
+      for (let i = 1; i < all.length; i++) {
+        try {
+          const u = turf.union(merged as any, all[i] as any);
+          if (u) merged = u;
+        } catch {}
+      }
+    } else if (mergedGeometry) {
+      // Wrap raw geometry into a Feature so downstream turf calls work.
+      merged = { type: 'Feature', properties: {}, geometry: mergedGeometry };
+    } else {
+      toast.error('Draw a polygon or select parcels first');
+      return;
+    }
+
+    // Acres + centroid from the unioned geometry.
+    let totalAcres = 0;
+    try { totalAcres = turf.area(merged) / 4046.8564224; } catch {}
+    let lat: number | null = null;
+    let lng: number | null = null;
+    try {
+      const c = turf.centroid(merged as any);
+      lng = c.geometry.coordinates[0];
+      lat = c.geometry.coordinates[1];
+    } catch {}
+
+    // Derive county. Prefer first selected parcel's county (TxGIO data
+    // is authoritative). For drawn-only polygons, fall back to a
+    // reverse-geocode of the centroid. Safe because we're asking
+    // "what county is this point in," not "what address." Centroid-
+    // based reverse-geocode is fundamentally different from the
+    // hallucinated-from-prose pattern that the Pearsall fix banned.
+    let county = (selectedParcels[0] as any)?.county || '';
+    if (!county && lat != null && lng != null) {
+      try {
+        const { reverseGeocodeCity } = await import('@/lib/utils/reverseGeocode');
+        const result: any = await reverseGeocodeCity(lat, lng);
+        if (result?.county) county = result.county;
+      } catch {}
+    }
+
+    const parcelIds = selectedParcels
+      .map((p) => p.parcel_id)
+      .filter(Boolean)
+      .join(',');
+
+    const finalBoundary = merged?.geometry || merged;
+    // DEBUG: surface whether the boundary actually made it into the
+    // prefill object. Several users reported comps saving without a
+    // boundary even though they drew/selected parcels first. This
+    // toast tells us if the boundary is being lost at THIS step or
+    // later (in CompModal's save handler).
+    console.log('[handleCreateCompFromBoundary] prefill boundary check:', {
+      mergedExists: !!merged,
+      mergedGeometryType: merged?.geometry?.type || merged?.type || 'unknown',
+      finalBoundaryExists: !!finalBoundary,
+      finalBoundaryType: finalBoundary?.type || 'unknown',
+      coordinateCount: finalBoundary?.coordinates?.length || 0,
+    });
+    toast(`Boundary captured: ${finalBoundary ? finalBoundary.type || 'present' : 'MISSING'}`, { duration: 3000 });
     setPrefilledComp({
-      county: primary.county || '',
-      state: primary.state || 'TX',
-      acres: mergedAcres || primary.acres || undefined,
-      latitude: primary.latitude,
-      longitude: primary.longitude,
-      parcel_id: primary.parcel_id,
+      county,
+      state: 'TX',
+      acres: totalAcres > 0 ? Math.round(totalAcres * 100) / 100 : undefined,
+      latitude: lat,
+      longitude: lng,
+      parcel_id: parcelIds || null,
+      boundary_geojson: finalBoundary,
     });
     setSheetMode('none');
     setShowAddModal(true);
+
+    // Clear the staged selection — the merged shape lives only on
+    // the new comp from here.
     resetParcelState();
-  }, [selectedParcels, tappedParcel, mergedAcres, resetParcelState]);
+    if (drawRef.current) drawRef.current.deleteAll();
+    setDrawnCount(0);
+    setDrawingActive(false);
+    setMergedAcres(0);
+    setMergedGeometry(null);
+
+    toast.success(`Boundary captured — ${totalAcres.toFixed(1)} ac. Fill in the sale details.`);
+  }, [selectedParcels, mapLoaded, resetParcelState, mergedGeometry]);
+
+  // Sheet's "Add as New Comp" button — delegates to the full
+  // handleCreateCompFromBoundary helper unconditionally. That helper
+  // handles all three input shapes (drawn-only, parcels-only, mixed)
+  // AND includes boundary_geojson in the prefill. The previous version
+  // forked on "primary parcel exists" and used a slimmer prefill path
+  // that silently dropped the boundary from the saved comp — that's
+  // why brokers were getting comps without their drawn boundaries.
+  const handleAddAsNewComp = useCallback(() => {
+    handleCreateCompFromBoundary();
+  }, [handleCreateCompFromBoundary]);
 
   // Switch between Satellite and Terrain views. Both use the same base
   // style URL — the only difference is whether the contour-line overlay
@@ -3657,7 +4219,7 @@ export default function MapPage() {
                   askAi();
                 }
               }}
-              placeholder="Ask: show me all 400+ acre comps in Real County"
+              placeholder="Ask, owner name (Dale Crenwelge Gillespie), coords (30.2076, -98.824), or address"
               className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10"
             />
             {searchQuery && (
@@ -3950,14 +4512,31 @@ export default function MapPage() {
             </button>
           </div>
 
-          {/* Flood toggle */}
+          {/* Flood toggle — auto-zooms in when toggled ON at low zoom.
+              FEMA NFHL has minzoom:8 (tiles return blank/error at state-
+              wide views). Before this auto-zoom, brokers would click
+              Flood at the default zoom, see nothing happen, and assume
+              the feature was broken. Now we zoom them to a usable scale
+              (z10) AND show a toast explaining what we did. */}
           <div className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 rounded-xl overflow-hidden w-[10rem] shadow-lg shadow-black/20">
             <button
-              onClick={() => setOverlays((o) => ({ ...o, floodplain: !o.floodplain }))}
+              onClick={() => {
+                const turningOn = !overlays.floodplain;
+                setOverlays((o) => ({ ...o, floodplain: !o.floodplain }));
+                if (turningOn && map.current) {
+                  const z = map.current.getZoom();
+                  if (z < 9) {
+                    map.current.easeTo({ zoom: 10, duration: 800 });
+                    toast('Zooming in — flood zones render at zoom 8+', { icon: '🌊', duration: 3000 });
+                  } else {
+                    toast('Loading flood zones (FEMA can take a few seconds)…', { icon: '🌊', duration: 2500 });
+                  }
+                }
+              }}
               className={`w-full py-2 px-2 text-xs font-semibold transition-colors text-center flex items-center justify-center gap-1.5 ${
                 overlays.floodplain ? 'bg-sky-400/20 text-sky-300' : 'text-cream-2-text hover:text-cream-1'
               }`}
-              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain'}
+              title={overlays.floodplain ? 'Hide FEMA floodplain' : 'Show FEMA floodplain (zoom 8+)'}
               aria-pressed={overlays.floodplain}
             >
               <Waves size={12} />
@@ -3984,11 +4563,27 @@ export default function MapPage() {
                   } catch {}
                 }
                 setMergedAcres(0);
+                setMergedGeometry(null);
                 setMapMode('parcel_select');
                 setSheetMode('selecting');
                 setSelectedComp(null);
                 setTappedParcel(null);
-                toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
+
+                // Auto-zoom if the user is too far out to see / hit parcels.
+                // The parcel raster + vector overlays are gated at minzoom 13;
+                // below that, clicking "Select Parcels" did nothing visible
+                // and brokers thought the feature was broken. Easing them
+                // into zoom 14 fires the parcel fetch and makes parcels
+                // immediately clickable.
+                if (map.current) {
+                  const z = map.current.getZoom();
+                  if (z < 13) {
+                    map.current.easeTo({ zoom: 14, duration: 900 });
+                    toast('Zooming in — parcels render at zoom 13+', { icon: '🗺️', duration: 3000 });
+                  } else {
+                    toast('Tap parcels on the map to select them', { icon: '🗺️', duration: 2500 });
+                  }
+                }
               }}
               className="bg-ink-deep/85 backdrop-blur-md border border-ink-line/70 hover:border-olive-light/40 rounded-xl px-3 py-2 text-xs font-semibold text-cream-2-text hover:text-olive-light transition-colors flex items-center gap-1.5 shadow-lg shadow-black/20"
             >
@@ -4005,6 +4600,24 @@ export default function MapPage() {
                 : reselectingComp
                 ? `Re-selecting: ${reselectingComp.property_name || reselectingComp.county || 'comp'}`
                 : 'Tap to select parcels'}
+            </div>
+          )}
+
+          {/* Zoom-gated overlay hints — appear when the broker has turned
+              on an overlay (flood) or entered a mode (Select Parcels) that
+              requires zooming in. Without this, both features fail silently
+              and brokers can't tell the difference between "broken" and
+              "not zoomed in enough yet." */}
+          {overlays.floodplain && currentZoom < 8 && (
+            <div className="bg-sky-400/15 border border-sky-400/40 backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold text-sky-300 flex items-center gap-1.5 shadow-lg shadow-black/20">
+              <Waves size={12} />
+              Zoom in for flood zones (currently {currentZoom.toFixed(1)} / need 8+)
+            </div>
+          )}
+          {mapMode === 'parcel_select' && currentZoom < 13 && (
+            <div className="bg-amber-warm/15 border border-amber-warm/40 backdrop-blur-md rounded-xl px-3 py-2 text-xs font-semibold text-amber-warm flex items-center gap-1.5 shadow-lg shadow-black/20">
+              <MousePointer size={12} />
+              Zoom in for parcels (currently {currentZoom.toFixed(1)} / need 13+)
             </div>
           )}
 
@@ -4084,7 +4697,7 @@ export default function MapPage() {
             </div>
           )}
 
-          {/* Combine + Discard (when something exists) */}
+          {/* Combine + Create Comp + Discard (when something exists) */}
           {(drawnCount > 0 || selectedParcels.length > 0) && !drawingActive && (
             <div className="flex gap-1.5">
               <button
@@ -4093,6 +4706,19 @@ export default function MapPage() {
               >
                 <Combine size={12} />
                 Combine ({drawnCount + selectedParcels.length})
+              </button>
+              {/* Create Comp — captures the drawn polygon (or union of
+                  selected parcels) and opens the Add Comp modal with
+                  boundary, acres, centroid, and county pre-filled.
+                  Closes the workflow gap where the broker had drawn a
+                  polygon and had nowhere to commit it to. */}
+              <button
+                onClick={handleCreateCompFromBoundary}
+                className="bg-slate-blue/10 backdrop-blur-sm border border-slate-blue/30 hover:border-slate-blue hover:bg-slate-blue/15 rounded-xl px-3 py-2 text-xs font-bold text-slate-blue-2 transition-colors flex items-center gap-1.5"
+                title="Save the current boundary as a new comp"
+              >
+                <Plus size={12} />
+                Create Comp
               </button>
               <button
                 onClick={clearDrawings}
@@ -4477,9 +5103,29 @@ export default function MapPage() {
                 <FileText size={14} className="text-slate-blue-2 flex-shrink-0" />
                 <span className="font-bold text-sm truncate">{properCase(viewingCMA.subject_name)}</span>
               </div>
-              <button onClick={exitCmaWorkspace} className="text-ink-3 hover:text-ink flex-shrink-0">
-                <X size={16} />
-              </button>
+              {/* Always-visible Share button in the panel header so the
+                  broker can copy the share URL from any scroll position
+                  without hunting for the Share Report button below. The
+                  full-width Share Report button still sits in the
+                  subject-actions group for clarity, but mid-scroll the
+                  header icon is a shortcut. */}
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <button
+                  onClick={copyShareLink}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    shareCopied
+                      ? 'text-olive-2 bg-olive-tint'
+                      : 'text-ink-3 hover:text-olive-2 hover:bg-olive-tint'
+                  }`}
+                  title={shareCopied ? 'Link copied' : 'Copy share link'}
+                  aria-label="Copy share link"
+                >
+                  {shareCopied ? <Check size={14} /> : <Share2 size={14} />}
+                </button>
+                <button onClick={exitCmaWorkspace} className="p-1.5 text-ink-3 hover:text-ink rounded-lg hover:bg-cream-2 transition-colors" title="Close CMA workspace" aria-label="Close">
+                  <X size={14} />
+                </button>
+              </div>
             </div>
 
             <div className="p-4 space-y-4">
@@ -4489,18 +5135,104 @@ export default function MapPage() {
                   Subject name pretty-printed (CARAWAY PARTNERS LTD →
                   Caraway Partners LTD) so the workspace doesn't read
                   like a CAD parcel record. */}
-              <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
-                <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
-                </div>
-                <p className="text-sm font-semibold text-ink">{properCase(viewingCMA.subject_name)}</p>
-                <p className="text-xs text-ink-2 font-mono tabular-nums">
-                  {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
-                </p>
+              <div className="bg-white border border-beige rounded-xl p-3">
+                {/* Subject + headline pricing display. Mirrors the client
+                    share view's Subject strip — broker opens a CMA and
+                    immediately sees the recommendation on the same card as
+                    the property info. Read-only display; the editable
+                    Suggested List Price + Opinion of Value inputs live in
+                    their own cards below.
+
+                    Headline auto-picks based on what's filled:
+                      • presentation === 'discuss'   → "Let's discuss"
+                      • presentation === 'range' + range set → "$LO–$HI"
+                      • suggested_list_price set → that
+                      • opinion_of_value (lump or breakdown) set → that
+                      • nothing set → blank right side (no clutter) */}
+                {(() => {
+                  const v: any = viewingCMA;
+                  const presentation = (v?.opinion_presentation as 'confirmed' | 'range' | 'discuss' | null) || 'confirmed';
+                  const isDiscuss = presentation === 'discuss';
+                  const isRange = presentation === 'range';
+                  const rangeLow = Number(v?.opinion_range_low_total) || 0;
+                  const rangeHigh = Number(v?.opinion_range_high_total) || 0;
+                  const listPrice = Number(v?.suggested_list_price) || 0;
+                  const bovLump = Number(v?.broker_opinion_value) || 0;
+                  const bovLand = Number(v?.broker_opinion_land_value) || 0;
+                  const bovImp = Number(v?.broker_opinion_improvement_value) || 0;
+                  const bovBreakdown = bovLand + bovImp;
+                  const oovTotal = bovLump > 0 ? bovLump : (bovBreakdown > 0 ? bovBreakdown : 0);
+                  const headlineKind: 'discuss' | 'range' | 'list' | 'oov' | 'none' =
+                    isDiscuss ? 'discuss'
+                    : isRange && rangeHigh > rangeLow && rangeLow > 0 ? 'range'
+                    : listPrice > 0 ? 'list'
+                    : oovTotal > 0 ? 'oov'
+                    : 'none';
+                  const headlineValue =
+                    headlineKind === 'list' ? listPrice
+                    : headlineKind === 'oov' ? oovTotal
+                    : 0;
+                  const headlinePpa = subjAcres > 0 && headlineValue > 0 ? headlineValue / subjAcres : 0;
+                  return (
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1 min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
+                        </div>
+                        <p className="text-sm font-semibold text-ink truncate">{properCase(viewingCMA.subject_name)}</p>
+                        <p className="text-xs text-ink-2 font-mono tabular-nums">
+                          {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
+                        </p>
+                      </div>
+                      {headlineKind !== 'none' && (
+                        <div className="text-right flex-shrink-0 max-w-[10rem]">
+                          <p className="text-[9px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                            {headlineKind === 'discuss' ? 'Valuation'
+                              : headlineKind === 'range' ? 'Range'
+                              : headlineKind === 'list' ? 'Suggested List'
+                              : 'Opinion of Value'}
+                          </p>
+                          {headlineKind === 'discuss' ? (
+                            <p className="text-sm font-semibold text-ink italic font-mono leading-tight mt-0.5">
+                              Let&apos;s discuss
+                            </p>
+                          ) : headlineKind === 'range' ? (
+                            <>
+                              <p className="text-sm font-semibold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                {formatCurrency(rangeLow)}–{formatCurrency(rangeHigh)}
+                              </p>
+                              {subjAcres > 0 && (
+                                <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                  {formatPPA(rangeLow / subjAcres)}–{formatPPA(rangeHigh / subjAcres)}
+                                </p>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-base font-bold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                {formatCurrency(headlineValue)}
+                              </p>
+                              {headlinePpa > 0 && (
+                                <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                  {formatPPA(headlinePpa)}
+                                </p>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
-              {/* Action row */}
+              {/* ─── SUBJECT-RELATED ACTIONS ───────────────────────
+                  Buttons that act on the subject (Reselect / Redraw),
+                  on the comp set (Edit/Add Comps), or on sharing the
+                  result (Share Report) sit DIRECTLY under the Subject
+                  card. Wrap-up actions (Download PDF, Collaborate,
+                  Exit) live at the very bottom of the panel. */}
               <div className="grid grid-cols-2 gap-2">
                 {(viewingCMA.subject_latitude == null || viewingCMA.subject_boundary_geojson == null) ? (
                   <button
@@ -4510,7 +5242,40 @@ export default function MapPage() {
                   >
                     <MapPin size={12} /> Map Subject Tract
                   </button>
-                ) : null}
+                ) : (
+                  <>
+                    <button
+                      onClick={startMapSubjectForCMA}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Re-select TxGIO parcels for the subject"
+                    >
+                      <Pencil size={12} /> Reselect Parcels
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!viewingCMA || !drawRef.current) return;
+                        setSettingSubjectForCma(viewingCMA.id);
+                        setSelectedParcels([]);
+                        setSelectedComp(null);
+                        setTappedParcel(null);
+                        drawRef.current.deleteAll();
+                        setDrawnCount(0);
+                        try {
+                          (drawRef.current as any).changeMode('draw_polygon');
+                        } catch {}
+                        setDrawingActive(true);
+                        toast(
+                          `Draw a freehand boundary for "${viewingCMA.subject_name || 'CMA'}". Combine to save.`,
+                          { icon: '✏️', duration: 4500 }
+                        );
+                      }}
+                      className="py-2 border border-beige bg-cream hover:border-beige-2 hover:bg-cream-2 text-xs font-semibold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                      title="Draw a freehand boundary — handles carve-outs and partial-parcel sales"
+                    >
+                      <Pencil size={12} /> Redraw Boundary
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={editCmaComps}
                   className="py-2 border border-slate-blue/30 bg-slate-blue/10 hover:bg-slate-blue/15 text-xs font-semibold text-slate-blue-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
@@ -4527,932 +5292,15 @@ export default function MapPage() {
                 >
                   {shareCopied ? <><Check size={12} /> Copied</> : <><Share2 size={12} /> Share Report</>}
                 </button>
-                <button
-                  onClick={openCollaboratorModal}
-                  className="py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-xs font-bold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Users size={12} />
-                  Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
-                </button>
-                {/* Marketing-grade printable PDF — server-rendered via
-                    @react-pdf/renderer (/api/cma/[id]/pdf). Renders the
-                    six-page Borgelt-style CMA: cover + subject overview +
-                    comp table + annotated comp map + opinion of value
-                    + methodology. ~5-15s on cold start, hence the
-                    explicit spinner state. */}
-                <button
-                  onClick={downloadMarketingPdf}
-                  disabled={pdfDownloading || !viewingCMA?.id}
-                  className="col-span-2 py-2 border border-gold/40 bg-gold/10 hover:bg-gold/15 text-xs font-bold text-gold-2 rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ borderColor: 'rgba(182,138,53,0.4)', backgroundColor: 'rgba(182,138,53,0.10)', color: '#8C6A29' }}
-                >
-                  {pdfDownloading ? (
-                    <>
-                      <Loader2 size={12} className="animate-spin" />
-                      Building PDF…
-                    </>
-                  ) : (
-                    <>
-                      <Download size={12} />
-                      Download Marketing PDF
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={exitCmaWorkspace}
-                  className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 text-xs font-bold text-ink-2 rounded-lg transition-colors"
-                >
-                  Exit Report
-                </button>
               </div>
 
-              {/* CMA averages — three stacked cards, each a different
-                  read on the comp set:
-                    1. TOTAL      headline market signal
-                    2. LAND-ONLY  what raw dirt is worth (strict subset)
-                    3. ADJUSTED   broker's market read with overrides
-
-                  Color cues on the Mid numeral only — olive for total
-                  (the headline), slate-blue for land-only (the dirt
-                  story), amber for adjusted (the broker's analysis).
-                  Sample size per card surfaces when a particular
-                  flavor has fewer comps contributing than the others. */}
-              {cmaAverages.total.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.total.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.total, cmaSubjectTotals.total, 'text-olive-2')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {cmaAverages.landOnly.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                      Average Land-Only Price Per Acre
-                    </p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.landOnly.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.landOnly, cmaSubjectTotals.landOnly, 'text-slate-blue-2')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {cmaAverages.adjusted.n > 0 && (
-                <div className="bg-white border border-beige rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
-                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                      Average Adjusted Price Per Acre
-                      <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
-                    </p>
-                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.adjusted.n} of {cmaComps.length} comps</p>
-                  </div>
-                  <table className="w-full text-xs">
-                    <tbody className="font-mono">
-                      {renderRowsForAvg(cmaAverages.adjusted, cmaSubjectTotals.adjusted, 'text-amber-800')}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {/* ─── Broker Opinion of Value ──────────────────────────
-                  Two modes, broker picks which way they're thinking about
-                  the property:
-
-                    Lump Sum (default):    single $/Acre OR Total number
-                    Land + Improvements:   Land $/Ac + Improvement lump
-
-                  Lump sum saves to broker_opinion_value (total $).
-                  Breakdown saves to broker_opinion_land_value +
-                  broker_opinion_improvement_value, plus
-                  broker_opinion_value as the computed sum (backwards
-                  compatibility for read paths). broker_opinion_mode
-                  stores the active mode so the share report knows
-                  which way to render. */}
-              {(() => {
-                // Save helper — writes all relevant columns for the active mode
-                // and clears the inactive-mode columns. Optimistic local update
-                // so the right-panel re-renders instantly. Now also handles the
-                // optional house-breakdown columns (sqft, ppsf, additional vertical).
-                //
-                // Self-healing on schema-cache misses: if Supabase's PostgREST
-                // cache is stale (a column exists in the DB but the API layer
-                // hasn't picked it up yet, OR a migration genuinely hasn't been
-                // applied), the update would otherwise fail with three toast
-                // errors like "Could not find the 'broker_opinion_value'
-                // column of 'cmas' in the schema cache". We parse that, strip
-                // the offending field, retry. The broker's opinion still
-                // saves with whatever columns ARE in the cache. Mirrors the
-                // pattern used for comp inserts in src/app/dashboard/import.
-                const saveBov = async (patch: {
-                  mode: BovMode | null;
-                  total: number | null;
-                  landValue: number | null;
-                  improvementValue: number | null;
-                  houseSqft?: number | null;
-                  housePpsf?: number | null;
-                  additionalVertical?: number | null;
-                  // suggestedListPrice: optional — only included when the
-                  // broker explicitly edits the list-price input. Omitted
-                  // keys preserve the existing DB value (vs null which
-                  // would clear it). Same pattern as houseSqft etc.
-                  suggestedListPrice?: number | null;
-                  // opinionPresentation: report-display mode for the
-                  // BOV — 'confirmed' / 'range' / 'discuss'. Omitting
-                  // preserves existing DB value; passing null clears
-                  // back to confirmed default on render.
-                  opinionPresentation?: OpinionPresentation | null;
-                  // valuationNotes: broker's WHY paragraph. Omitting
-                  // preserves; empty string clears. Render path treats
-                  // both as "no notes set."
-                  valuationNotes?: string | null;
-                  // Subject Overview for the marketing PDF. Notes are
-                  // the broker's private scratchpad; prose is the
-                  // polished version (AI-drafted or hand-written) that
-                  // appears in the PDF + (optionally) share report.
-                  subjectOverviewNotes?: string | null;
-                  subjectOverviewProse?: string | null;
-                }) => {
-                  const fields: any = {
-                    broker_opinion_mode: patch.mode,
-                    broker_opinion_value: patch.total,
-                    broker_opinion_land_value: patch.landValue,
-                    broker_opinion_improvement_value: patch.improvementValue,
-                  };
-                  // Only include house-breakdown columns if explicitly passed.
-                  // Lump-sum mode writes them as null; breakdown writes
-                  // whatever value the broker has typed.
-                  if ('houseSqft' in patch) fields.broker_opinion_house_sqft = patch.houseSqft;
-                  if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
-                  if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
-                  if ('suggestedListPrice' in patch) fields.suggested_list_price = patch.suggestedListPrice;
-                  if ('opinionPresentation' in patch) fields.opinion_presentation = patch.opinionPresentation;
-                  if ('valuationNotes' in patch) fields.valuation_notes = patch.valuationNotes;
-                  if ('subjectOverviewNotes' in patch) fields.subject_overview_notes = patch.subjectOverviewNotes;
-                  if ('subjectOverviewProse' in patch) fields.subject_overview_prose = patch.subjectOverviewProse;
-
-                  setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
-
-                  let current = { ...fields };
-                  const droppedCols: string[] = [];
-                  const MAX_RETRIES = 8;
-                  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-                    const { error } = await supabase
-                      .from('cmas')
-                      .update(current)
-                      .eq('id', viewingCMA.id);
-                    if (!error) {
-                      if (droppedCols.length > 0) {
-                        console.warn(
-                          `[saveBov] saved without columns missing from schema cache: ${droppedCols.join(', ')}. ` +
-                          `Run NOTIFY pgrst, 'reload schema'; in Supabase SQL editor, or apply pending migrations.`
-                        );
-                      }
-                      return;
-                    }
-                    const msg = String(error.message || '');
-                    const m = msg.match(/Could not find the '([\w_]+)' column/);
-                    if (!m) {
-                      toast.error(msg);
-                      return;
-                    }
-                    const missingCol = m[1];
-                    if (!(missingCol in current)) {
-                      toast.error(msg);
-                      return;
-                    }
-                    delete current[missingCol];
-                    droppedCols.push(missingCol);
-                  }
-                  toast.error('Save failed after stripping unknown columns. Reload Supabase schema cache.');
-                };
-
-                // ─── LUMP SUM handlers ───
-                // Lump-sum mode clears ALL breakdown fields including the
-                // optional house itemization (passing null for each).
-                const lumpClear = {
-                  mode: 'lump_sum' as BovMode | null,
-                  landValue: null,
-                  improvementValue: null,
-                  houseSqft: null,
-                  housePpsf: null,
-                  additionalVertical: null,
-                };
-                const onPpaChange = (raw: string) => {
-                  setBovPpaInput(raw);
-                  const ppa = raw === '' ? NaN : Number(raw);
-                  if (!Number.isFinite(ppa) || ppa <= 0) {
-                    setBovTotalInput('');
-                    saveBov({ ...lumpClear, total: null });
-                    return;
-                  }
-                  if (subjAcres > 0) {
-                    const total = ppa * subjAcres;
-                    setBovTotalInput(String(Math.round(total)));
-                    saveBov({ ...lumpClear, total });
-                  }
-                };
-                const onTotalChange = (raw: string) => {
-                  setBovTotalInput(raw);
-                  const total = raw === '' ? NaN : Number(raw);
-                  if (!Number.isFinite(total) || total <= 0) {
-                    setBovPpaInput('');
-                    saveBov({ ...lumpClear, total: null });
-                    return;
-                  }
-                  if (subjAcres > 0) {
-                    const ppa = total / subjAcres;
-                    setBovPpaInput(String(Math.round(ppa)));
-                  }
-                  saveBov({ ...lumpClear, total });
-                };
-
-                // ─── BREAKDOWN handlers ───
-                // Improvement breakdown helpers: derived improvement = (sqft × ppsf)
-                // + additional vertical. When any of those three are set, they
-                // become the source of truth; bovImprovementInput is computed.
-                const parsePos = (s: string): number => {
-                  const n = s === '' ? NaN : Number(s);
-                  return Number.isFinite(n) && n > 0 ? n : 0;
-                };
-                const computedImprovementFromItems = (
-                  sqft: number, ppsf: number, addl: number
-                ): number => {
-                  const house = (sqft > 0 && ppsf > 0) ? sqft * ppsf : 0;
-                  return house + addl;
-                };
-                const hasItemizationFlag = (sqft: string, ppsf: string, addl: string): boolean => {
-                  return parsePos(sqft) > 0 || parsePos(ppsf) > 0 || parsePos(addl) > 0;
-                };
-
-                // commitBreakdown unified — writes land, improvement total, AND
-                // the optional house-breakdown columns. The improvement total
-                // is either:
-                //   - the broker's typed-direct lump (when no itemization), OR
-                //   - the computed sum (house_sqft × ppsf) + additional_vertical
-                const commitBreakdown = (
-                  landValue: number | null,
-                  improvementOverride: number | null,
-                  itemization: { sqft: number; ppsf: number; addl: number } | null,
-                ) => {
-                  const land = landValue || 0;
-                  // Resolve improvement: itemization wins when present
-                  const itemized = itemization
-                    ? computedImprovementFromItems(itemization.sqft, itemization.ppsf, itemization.addl)
-                    : 0;
-                  const improvement = itemization && itemized > 0
-                    ? itemized
-                    : (improvementOverride && improvementOverride > 0 ? improvementOverride : 0);
-                  const total = (land + improvement) > 0 ? (land + improvement) : null;
-
-                  saveBov({
-                    mode: 'breakdown',
-                    total,
-                    landValue: landValue,
-                    improvementValue: improvement > 0 ? improvement : null,
-                    houseSqft: itemization && itemization.sqft > 0 ? itemization.sqft : null,
-                    housePpsf: itemization && itemization.ppsf > 0 ? itemization.ppsf : null,
-                    additionalVertical: itemization && itemization.addl > 0 ? itemization.addl : null,
-                  });
-                };
-                // Helper to collect current itemization state from inputs
-                const currentItemization = (sqft?: string, ppsf?: string, addl?: string) => {
-                  const s = parsePos(sqft ?? bovHouseSqftInput);
-                  const p = parsePos(ppsf ?? bovHousePpsfInput);
-                  const a = parsePos(addl ?? bovAddlVerticalInput);
-                  const has = s > 0 || p > 0 || a > 0;
-                  return has ? { sqft: s, ppsf: p, addl: a } : null;
-                };
-                const currentLand = () => {
-                  const v = parsePos(bovLandTotalInput);
-                  return v > 0 ? v : null;
-                };
-                const currentImpLump = () => {
-                  const v = parsePos(bovImprovementInput);
-                  return v > 0 ? v : null;
-                };
-
-                const onLandPpaChange = (raw: string) => {
-                  setBovLandPpaInput(raw);
-                  const ppa = raw === '' ? NaN : Number(raw);
-                  if (!Number.isFinite(ppa) || ppa <= 0) {
-                    setBovLandTotalInput('');
-                    commitBreakdown(null, currentImpLump(), currentItemization());
-                    return;
-                  }
-                  if (subjAcres > 0) {
-                    const landValue = ppa * subjAcres;
-                    setBovLandTotalInput(String(Math.round(landValue)));
-                    commitBreakdown(landValue, currentImpLump(), currentItemization());
-                  }
-                };
-                const onLandTotalChange = (raw: string) => {
-                  setBovLandTotalInput(raw);
-                  const landValue = raw === '' ? NaN : Number(raw);
-                  if (!Number.isFinite(landValue) || landValue <= 0) {
-                    setBovLandPpaInput('');
-                    commitBreakdown(null, currentImpLump(), currentItemization());
-                    return;
-                  }
-                  if (subjAcres > 0) {
-                    const ppa = landValue / subjAcres;
-                    setBovLandPpaInput(String(Math.round(ppa)));
-                  }
-                  commitBreakdown(landValue, currentImpLump(), currentItemization());
-                };
-                // Direct Improvement Value input — only used when itemization
-                // is NOT active. When itemized, this field is computed/read-only.
-                const onImprovementChange = (raw: string) => {
-                  setBovImprovementInput(raw);
-                  // If broker types directly in Improvement Value, clear any
-                  // existing itemization (they're going lump mode within the
-                  // breakdown). Carries over land value.
-                  setBovHouseSqftInput('');
-                  setBovHousePpsfInput('');
-                  setBovAddlVerticalInput('');
-                  const imp = parsePos(raw);
-                  commitBreakdown(currentLand(), imp > 0 ? imp : null, null);
-                };
-                // House SQFT input — recomputes improvement from items
-                const onHouseSqftChange = (raw: string) => {
-                  setBovHouseSqftInput(raw);
-                  const items = currentItemization(raw, undefined, undefined);
-                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
-                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
-                  commitBreakdown(currentLand(), null, items);
-                };
-                const onHousePpsfChange = (raw: string) => {
-                  setBovHousePpsfInput(raw);
-                  const items = currentItemization(undefined, raw, undefined);
-                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
-                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
-                  commitBreakdown(currentLand(), null, items);
-                };
-                const onAddlVerticalChange = (raw: string) => {
-                  setBovAddlVerticalInput(raw);
-                  const items = currentItemization(undefined, undefined, raw);
-                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
-                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
-                  commitBreakdown(currentLand(), null, items);
-                };
-
-                // ─── Mode switching — preserve values across switches ───
-                const switchToLumpSum = () => {
-                  // If broker had Land + Improvement values, sum them to the lump total
-                  const land = parsePos(bovLandTotalInput);
-                  const imp = parsePos(bovImprovementInput);
-                  const combined = land + imp;
-                  setBovMode('lump_sum');
-                  // Clear the house-breakdown UI state on mode flip
-                  setBovHouseSqftInput('');
-                  setBovHousePpsfInput('');
-                  setBovAddlVerticalInput('');
-                  setBovHouseBreakdownOpen(false);
-                  if (combined > 0) {
-                    setBovTotalInput(String(Math.round(combined)));
-                    if (subjAcres > 0) setBovPpaInput(String(Math.round(combined / subjAcres)));
-                    saveBov({ ...lumpClear, total: combined });
-                  } else {
-                    saveBov({ ...lumpClear, total: null });
-                  }
-                };
-                const switchToBreakdown = () => {
-                  // If broker had a lump total, transfer it to Land Value (assume no improvement yet)
-                  const lump = parsePos(bovTotalInput);
-                  setBovMode('breakdown');
-                  if (lump > 0) {
-                    setBovLandTotalInput(String(Math.round(lump)));
-                    if (subjAcres > 0) setBovLandPpaInput(String(Math.round(lump / subjAcres)));
-                    saveBov({
-                      mode: 'breakdown',
-                      total: lump,
-                      landValue: lump,
-                      improvementValue: null,
-                      houseSqft: null,
-                      housePpsf: null,
-                      additionalVertical: null,
-                    });
-                  } else {
-                    saveBov({
-                      mode: 'breakdown',
-                      total: null,
-                      landValue: null,
-                      improvementValue: null,
-                      houseSqft: null,
-                      housePpsf: null,
-                      additionalVertical: null,
-                    });
-                  }
-                };
-
-                // Placeholders pull from CMA averages so the broker sees
-                // suggested numbers if they leave fields blank.
-                const ppaPlaceholder = landMid > 0 ? Math.round(landMid).toString()
-                  : allInMid > 0 ? Math.round(allInMid).toString() : '';
-                const totalPlaceholder = landOnlyValue > 0 ? Math.round(landOnlyValue).toString()
-                  : allInValue > 0 ? Math.round(allInValue).toString() : '';
-
-                // Computed total in breakdown mode (live, from local inputs)
-                const breakdownLandNum = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
-                const breakdownImpNum = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
-                const breakdownTotal = (Number.isFinite(breakdownLandNum) ? breakdownLandNum : 0)
-                                     + (Number.isFinite(breakdownImpNum) ? breakdownImpNum : 0);
-
-                // Shared input class
-                const inputCls = 'w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono tabular-nums outline-none transition-all';
-
-                return (
-                  <>
-
-                  {/* ─── Subject Overview ───────────────────────────────
-                      Two-textarea section that feeds the marketing PDF's
-                      Subject Property page (Page 2). Broker types
-                      bullets/shorthand in "Your Notes" (private, never
-                      appears in the report), clicks Generate to get a
-                      polished prose draft from GPT-4o-mini via
-                      /api/cma/[id]/generate-overview, then edits +
-                      saves. Both fields persist via saveBov. See
-                      migration 032 + design discussion (May 26 2026). */}
-                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Subject Overview</p>
-                      <p className="text-[9px] text-ink-3">for marketing PDF</p>
-                    </div>
-
-                    {/* PRIVATE NOTES — never appears in any client-
-                        facing surface. Just feeds the AI generator. */}
-                    <div className="space-y-1">
-                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
-                        Your notes <span className="normal-case tracking-normal text-ink-3">· private, just for the AI</span>
-                      </p>
-                      <textarea
-                        placeholder={"551ac, Willow City\nNative Hill Country, ag valuation\nModest improvements: 570sf cabin built 2009, garage/shop, HVAC\nValue is the land — terrain, water, location"}
-                        value={subjectOverviewNotes}
-                        onChange={(e) => setSubjectOverviewNotes(e.target.value)}
-                        onBlur={() => {
-                          saveBov({
-                            mode: bovMode,
-                            total: Number(bovTotalInput) || null,
-                            landValue: Number(bovLandTotalInput) || null,
-                            improvementValue: Number(bovImprovementInput) || null,
-                            subjectOverviewNotes: subjectOverviewNotes.trim() === '' ? null : subjectOverviewNotes,
-                          });
-                        }}
-                        rows={4}
-                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed font-mono"
-                      />
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          disabled={subjectOverviewGenerating || !subjectOverviewNotes.trim() || !viewingCMA?.id}
-                          onClick={async () => {
-                            const cmaId = viewingCMA?.id;
-                            if (!cmaId) return;
-                            const notes = subjectOverviewNotes.trim();
-                            if (!notes) {
-                              toast.error('Add some notes first');
-                              return;
-                            }
-                            setSubjectOverviewGenerating(true);
-                            try {
-                              const res = await fetch(`/api/cma/${cmaId}/generate-overview`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ notes }),
-                              });
-                              const data = await res.json();
-                              if (!res.ok || !data?.ok || typeof data?.prose !== 'string') {
-                                toast.error(data?.error || 'Generation failed');
-                                return;
-                              }
-                              // Confirm before clobbering existing prose
-                              // — if the broker hand-edited the polished
-                              // version, regenerating wipes that work.
-                              // Small UX safety net via window.confirm;
-                              // the textarea also supports Cmd+Z undo
-                              // for inline recovery.
-                              if (subjectOverviewProse.trim().length > 0) {
-                                const ok = window.confirm(
-                                  'Replace your current draft with a new AI version? Your current text will be overwritten (you can Cmd+Z to undo).'
-                                );
-                                if (!ok) return;
-                              }
-                              setSubjectOverviewProse(data.prose);
-                              // Persist the new draft immediately so a
-                              // reload picks it up — saveBov is the
-                              // existing schema-cache-retry path.
-                              saveBov({
-                                mode: bovMode,
-                                total: Number(bovTotalInput) || null,
-                                landValue: Number(bovLandTotalInput) || null,
-                                improvementValue: Number(bovImprovementInput) || null,
-                                subjectOverviewNotes: notes,
-                                subjectOverviewProse: data.prose,
-                              });
-                              toast.success('Draft generated — review + edit below');
-                            } catch (e: any) {
-                              toast.error(e?.message || 'Generation failed');
-                            } finally {
-                              setSubjectOverviewGenerating(false);
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-blue hover:bg-slate-blue-2 text-white text-[11px] font-semibold rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <Sparkles size={11} />
-                          {subjectOverviewGenerating ? 'Generating…' : 'Generate'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* POLISHED PROSE — appears in PDF + share report.
-                        Broker can edit after AI generation or type it
-                        themselves from scratch. */}
-                    <div className="space-y-1 border-t border-beige pt-2">
-                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
-                        Polished overview <span className="normal-case tracking-normal text-ink-3">· appears in PDF</span>
-                      </p>
-                      <textarea
-                        placeholder="Click Generate above to draft, or type your own 2-3 paragraph overview here."
-                        value={subjectOverviewProse}
-                        onChange={(e) => setSubjectOverviewProse(e.target.value)}
-                        onBlur={() => {
-                          saveBov({
-                            mode: bovMode,
-                            total: Number(bovTotalInput) || null,
-                            landValue: Number(bovLandTotalInput) || null,
-                            improvementValue: Number(bovImprovementInput) || null,
-                            subjectOverviewProse: subjectOverviewProse.trim() === '' ? null : subjectOverviewProse,
-                          });
-                        }}
-                        rows={8}
-                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink outline-none transition-all resize-none leading-relaxed"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
-                      <p className="text-[9px] text-ink-3">optional</p>
-                    </div>
-
-                    {/* Presentation mode — Confirmed / Range / Discuss.
-                        Drives how the BOV is displayed on the client
-                        report. Independent of breakdown style (lump_sum
-                        vs breakdown) — broker can enter values as a
-                        breakdown and still ship in 'discuss' mode. */}
-                    <div className="space-y-1.5">
-                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Show on client report as</p>
-                      <div className="grid grid-cols-3 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
-                        {(['confirmed', 'range', 'discuss'] as const).map((mode) => {
-                          const label = mode === 'confirmed' ? 'Confirmed' : mode === 'range' ? 'Range' : "Let's Discuss";
-                          const isActive = opinionPresentation === mode;
-                          return (
-                            <button
-                              key={mode}
-                              type="button"
-                              onClick={() => {
-                                setOpinionPresentation(mode);
-                                saveBov({
-                                  mode: bovMode,
-                                  total: Number(bovTotalInput) || null,
-                                  landValue: Number(bovLandTotalInput) || null,
-                                  improvementValue: Number(bovImprovementInput) || null,
-                                  opinionPresentation: mode,
-                                });
-                              }}
-                              className={`py-1.5 rounded-md text-[10px] font-semibold transition-colors ${
-                                isActive
-                                  ? 'bg-white text-ink shadow-sm border border-beige-2'
-                                  : 'text-ink-2 hover:text-ink'
-                              }`}
-                              title={
-                                mode === 'confirmed' ? 'Show the hard number ($X.XM)'
-                                  : mode === 'range' ? 'Show comp range only — no point estimate'
-                                  : 'Hide the number — invite a conversation'
-                              }
-                            >
-                              {label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <p className="text-[9px] text-ink-3 leading-relaxed">
-                        {opinionPresentation === 'confirmed' && 'Client sees the hard number.'}
-                        {opinionPresentation === 'range' && 'Client sees the comp range only — no point estimate. Useful when listing strategy depends on market timing.'}
-                        {opinionPresentation === 'discuss' && "Client sees 'Let's discuss' instead of a number. Comp data still visible. Lets you anchor the conversation in a call, not the report."}
-                      </p>
-                    </div>
-
-                    {/* Mode toggle — Lump Sum vs Land + Improvements */}
-                    <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
-                      <button
-                        type="button"
-                        onClick={switchToLumpSum}
-                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
-                          bovMode === 'lump_sum'
-                            ? 'bg-white text-ink shadow-sm border border-beige-2'
-                            : 'text-ink-2 hover:text-ink'
-                        }`}
-                      >
-                        Lump Sum
-                      </button>
-                      <button
-                        type="button"
-                        onClick={switchToBreakdown}
-                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
-                          bovMode === 'breakdown'
-                            ? 'bg-white text-ink shadow-sm border border-beige-2'
-                            : 'text-ink-2 hover:text-ink'
-                        }`}
-                      >
-                        Land + Improvements
-                      </button>
-                    </div>
-
-                    {bovMode === 'lump_sum' ? (
-                      <>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
-                            <div className="relative">
-                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
-                            </div>
-                          </div>
-                          <div>
-                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
-                            <div className="relative">
-                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
-                            </div>
-                          </div>
-                        </div>
-                        <p className="text-[10px] text-ink-3 leading-relaxed">
-                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        {/* Land Value group */}
-                        <div className="space-y-1.5">
-                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Land Value</p>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
-                              <div className="relative">
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                <input type="number" placeholder={ppaPlaceholder} value={bovLandPpaInput} onChange={(e) => onLandPpaChange(e.target.value)} className={inputCls} />
-                              </div>
-                            </div>
-                            <div>
-                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
-                              <div className="relative">
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                <input type="number" placeholder={totalPlaceholder} value={bovLandTotalInput} onChange={(e) => onLandTotalChange(e.target.value)} className={inputCls} />
-                              </div>
-                            </div>
-                          </div>
-                          <p className="text-[10px] text-ink-3 leading-relaxed">
-                            Edit either — auto-calculates from {formatAcres(subjAcres)}.
-                          </p>
-                        </div>
-
-                        {/* Improvement Value
-                            When the house-breakdown sub-fields are filled in,
-                            this becomes a computed total: (sqft × ppsf) + additional.
-                            When the broker types directly here, the itemization
-                            sub-fields are cleared. */}
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
-                            <button
-                              type="button"
-                              onClick={() => setBovHouseBreakdownOpen((v) => !v)}
-                              className="text-[10px] text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1"
-                            >
-                              {bovHouseBreakdownOpen ? <><ChevronUp size={11} /> Hide house breakdown</> : <><ChevronDown size={11} /> Break out house</>}
-                            </button>
-                          </div>
-                          <div className="relative">
-                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                            <input
-                              type="number"
-                              placeholder="0"
-                              value={bovImprovementInput}
-                              onChange={(e) => onImprovementChange(e.target.value)}
-                              disabled={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput)}
-                              className={`${inputCls} ${hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'opacity-70 cursor-not-allowed' : ''}`}
-                              title={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'Computed from the house breakdown below. Clear those fields to edit directly.' : ''}
-                            />
-                          </div>
-                          {/* Optional house-breakdown expander */}
-                          {bovHouseBreakdownOpen && (
-                            <div className="bg-cream border border-beige rounded-lg p-2.5 space-y-3 mt-1">
-                              {/* HOUSE — SQFT × $/SQFT */}
-                              <div className="space-y-1.5">
-                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">House</p>
-                                <div className="grid grid-cols-2 gap-2">
-                                  <div>
-                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">SQFT</p>
-                                    <input
-                                      type="number"
-                                      placeholder="4,000"
-                                      value={bovHouseSqftInput}
-                                      onChange={(e) => onHouseSqftChange(e.target.value)}
-                                      className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md px-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
-                                    />
-                                  </div>
-                                  <div>
-                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">$/SQFT</p>
-                                    <div className="relative">
-                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                      <input
-                                        type="number"
-                                        placeholder="200"
-                                        value={bovHousePpsfInput}
-                                        onChange={(e) => onHousePpsfChange(e.target.value)}
-                                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
-                                      />
-                                    </div>
-                                  </div>
-                                </div>
-                                {/* Live line total */}
-                                {(parsePos(bovHouseSqftInput) > 0 && parsePos(bovHousePpsfInput) > 0) && (
-                                  <p className="text-[10px] text-ink-3 font-mono tabular-nums">
-                                    {parsePos(bovHouseSqftInput).toLocaleString()} sqft × ${parsePos(bovHousePpsfInput).toLocaleString()}/sqft
-                                    <span className="text-ink-2"> = </span>
-                                    <span className="text-olive-2 font-semibold">{formatCurrency(parsePos(bovHouseSqftInput) * parsePos(bovHousePpsfInput))}</span>
-                                  </p>
-                                )}
-                              </div>
-
-                              {/* ADDITIONAL VERTICAL IMPROVEMENTS — lump */}
-                              <div className="space-y-1.5">
-                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">Additional Vertical Improvements</p>
-                                <div className="relative">
-                                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
-                                  <input
-                                    type="number"
-                                    placeholder="0"
-                                    value={bovAddlVerticalInput}
-                                    onChange={(e) => onAddlVerticalChange(e.target.value)}
-                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
-                                  />
-                                </div>
-                                <p className="text-[9px] text-ink-3 leading-relaxed">
-                                  Barns, shops, sheds, equipment buildings, guest houses, etc. Horizontal improvements (fencing, ponds, wells) typically get baked into Land $/Acre above.
-                                </p>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Total Opinion — computed sum */}
-                        <div className="border-t border-beige pt-2 flex items-baseline justify-between">
-                          <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Opinion</p>
-                          <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
-                            {breakdownTotal > 0 ? formatCurrency(breakdownTotal) : '—'}
-                          </p>
-                        </div>
-                      </>
-                    )}
-
-                    {/* Valuation Notes — broker's WHY paragraph. Appears
-                        on the client report below the Opinion of Value.
-                        Especially useful in 'discuss' or 'range' mode
-                        (where the broker isn't committing to a hard
-                        number) or when the BOV sits outside the comp
-                        range (the above/below indicator from PR #43
-                        invites a one-sentence explanation). Saves on
-                        blur to avoid spamming saves on every keystroke. */}
-                    <div className="border-t border-beige pt-2 space-y-1.5">
-                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">
-                        Valuation Notes
-                        <span className="text-ink-3 normal-case tracking-normal"> · appears on client report</span>
-                      </p>
-                      <textarea
-                        placeholder={
-                          opinionPresentation === 'discuss'
-                            ? 'e.g. "Comps support a range — let\'s talk through the right number for your situation."'
-                            : opinionPresentation === 'range'
-                            ? 'e.g. "Final value depends on listing strategy + market timing — happy to discuss."'
-                            : 'e.g. "Above the comp range because of the hacienda + dual creek frontage."'
-                        }
-                        value={valuationNotes}
-                        onChange={(e) => setValuationNotes(e.target.value)}
-                        onBlur={() => {
-                          saveBov({
-                            mode: bovMode,
-                            total: Number(bovTotalInput) || null,
-                            landValue: Number(bovLandTotalInput) || null,
-                            improvementValue: Number(bovImprovementInput) || null,
-                            valuationNotes: valuationNotes.trim() === '' ? null : valuationNotes,
-                          });
-                        }}
-                        rows={3}
-                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed"
-                      />
-                    </div>
-                  </div>
-
-                  {/* ─── Suggested List Price ──────────────────────────
-                      The HEADLINE number on the client report. Defaults
-                      to BOV total × 1.10 (10% negotiation cushion —
-                      typical for TX ranch land); broker can override.
-
-                      Why a separate concept from BOV: BOV is "what I
-                      think it'll close at." List price is "what we put
-                      on the sign so the seller has room to negotiate
-                      down." Leading with the list price on the client
-                      report prevents sticker shock — the seller anchors
-                      on the aspirational number first.
-
-                      Lives inside the BOV editor IIFE so it has direct
-                      access to saveBov + bov*Input locals. */}
-                  {(() => {
-                    const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
-                    const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
-                    const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
-                    const effectiveBov = bovT > 0 ? bovT : landV + impV;
-                    if (effectiveBov <= 0) return null;
-                    const defaultListPrice = Math.round(effectiveBov * 1.10);
-                    const savedOverride = viewingCMA?.suggested_list_price;
-                    const currentList = bovListPriceInput
-                      ? Number(bovListPriceInput)
-                      : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
-                    const cushion = effectiveBov > 0 && currentList > 0
-                      ? ((currentList - effectiveBov) / effectiveBov) * 100
-                      : 10;
-                    return (
-                      <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
-                        <div className="flex items-baseline justify-between">
-                          <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
-                          <p className="text-[10px] text-ink-3 font-mono">
-                            {cushion >= 0 ? '+' : ''}{cushion.toFixed(0)}% above BOV
-                          </p>
-                        </div>
-                        <div className="relative">
-                          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
-                          <input
-                            type="number"
-                            placeholder={String(defaultListPrice)}
-                            value={bovListPriceInput}
-                            onChange={(e) => setBovListPriceInput(e.target.value)}
-                            onBlur={() => {
-                              const raw = bovListPriceInput.trim();
-                              const n = raw === '' ? null : Number(raw);
-                              saveBov({
-                                mode: bovMode,
-                                total: Number(bovTotalInput) || null,
-                                landValue: Number(bovLandTotalInput) || null,
-                                improvementValue: Number(bovImprovementInput) || null,
-                                suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
-                              });
-                            }}
-                            className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
-                          />
-                        </div>
-                        <p className="text-[10px] text-ink-3 leading-relaxed">
-                          Headline on the client report. Negotiation cushion baked in — expected sale lands around {formatCurrency(effectiveBov)}.
-                          {savedOverride != null && (
-                            <>
-                              {' '}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBovListPriceInput('');
-                                  saveBov({
-                                    mode: bovMode,
-                                    total: Number(bovTotalInput) || null,
-                                    landValue: Number(bovLandTotalInput) || null,
-                                    improvementValue: Number(bovImprovementInput) || null,
-                                    suggestedListPrice: null,
-                                  });
-                                }}
-                                className="text-olive-2 hover:text-olive underline decoration-olive-2/40 underline-offset-2"
-                              >
-                                Reset to default
-                              </button>
-                            </>
-                          )}
-                        </p>
-                      </div>
-                    );
-                  })()}
-                  </>
-                );
-              })()}
-
+              {/* ─── PHASE 1: COMPS-FIRST WORKSPACE ──────────────────
+                  The Comps list moved to directly under the Subject
+                  card, ABOVE the action row / averages / BOV. Rationale:
+                  the comps tell the story; averages and the broker's
+                  opinion are by-products of comp selection. Putting
+                  comps first frames the workspace around the actual
+                  work (comp curation), not the conclusion. */}
               {/* Comps list */}
               <div className="space-y-2">
                 {(() => {
@@ -5477,7 +5325,7 @@ export default function MapPage() {
                     </div>
                   );
                 })()}
-                {cmaComps.map((c) => {
+                {cmaComps.map((c, idx) => {
                   const expanded = expandedCompIds.has(c.id);
                   const adj = compAdjustmentsDraft[c.id] || {};
                   const allIn = allInPpa(c);
@@ -5487,6 +5335,12 @@ export default function MapPage() {
                   const isAdjusted = adj.improvement_value != null;
                   const isBrokerEstimated = effSrc === 'broker_estimate';
                   const editorOpen = adjustmentEditorOpen.has(c.id);
+                  // Comp number = position in the cmaComps array (1-indexed).
+                  // Same number is rendered on the matching map pin as a
+                  // corner badge, so the broker can say "look at comp 3" and
+                  // both surfaces line up. Re-orders dynamically when the
+                  // list re-sorts (handled at the cmaComps source level).
+                  const compNumber = idx + 1;
                   return (
                     <div
                       key={c.id}
@@ -5502,6 +5356,15 @@ export default function MapPage() {
                       >
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-bold text-ink truncate flex-1 flex items-center gap-1.5">
+                            {/* Numbered badge — matches the corner badge on
+                                the comp's map pin so the broker can cross-
+                                reference list ↔ map at a glance. */}
+                            <span
+                              className="text-[10px] font-bold w-5 h-5 rounded-full bg-ink text-cream-1 flex items-center justify-center flex-shrink-0 leading-none"
+                              title={`Comp ${compNumber} — matches pin #${compNumber} on the map`}
+                            >
+                              {compNumber}
+                            </span>
                             <span className="truncate">{c.property_name || `${c.county} County`}</span>
                             {c.has_improvements && (
                               <span className="text-[9px] font-bold px-1.5 py-0.5 bg-olive-tint text-olive rounded flex-shrink-0">
@@ -5934,6 +5797,1255 @@ export default function MapPage() {
                   </p>
                 )}
               </div>
+
+              {/* ─── PHASE 1: AVERAGES BELOW COMPS ───────────────────
+                  Averages moved to sit DIRECTLY under the Comps list.
+                  The numbers fall out of comp selection — once the
+                  broker has chosen the comp set, the averages are the
+                  next thing they want to see, before any utilities or
+                  broker-opinion editing. */}
+              {/* CMA averages — three stacked cards, each a different
+                  read on the comp set:
+                    1. TOTAL      headline market signal
+                    2. LAND-ONLY  what raw dirt is worth (strict subset)
+                    3. ADJUSTED   broker's market read with overrides
+
+                  Color cues on the Mid numeral only — olive for total
+                  (the headline), slate-blue for land-only (the dirt
+                  story), amber for adjusted (the broker's analysis).
+                  Sample size per card surfaces when a particular
+                  flavor has fewer comps contributing than the others. */}
+              {cmaAverages.total.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Average Total Price Per Acre</p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.total.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.total, cmaSubjectTotals.total, 'text-olive-2')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {cmaAverages.landOnly.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Land-Only Price Per Acre
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.landOnly.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.landOnly, cmaSubjectTotals.landOnly, 'text-slate-blue-2')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {cmaAverages.adjusted.n > 0 && (
+                <div className="bg-white border border-beige rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-beige flex items-center justify-between">
+                    <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                      Average Adjusted Price Per Acre
+                      <span className="text-ink-3 normal-case tracking-normal"> (broker overrides)</span>
+                    </p>
+                    <p className="text-[9px] text-ink-3 font-mono">{cmaAverages.adjusted.n} of {cmaComps.length} comps</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <tbody className="font-mono">
+                      {renderRowsForAvg(cmaAverages.adjusted, cmaSubjectTotals.adjusted, 'text-amber-800')}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+
+              {/* (Action row removed — subject-related buttons moved to
+                  directly under the Subject card above; wrap-up buttons
+                  Download/Collaborate/Exit moved to the very bottom of
+                  the panel after the BOV section.) */}
+
+              {/* ─── Broker Opinion of Value ──────────────────────────
+                  Two modes, broker picks which way they're thinking about
+                  the property:
+
+                    Lump Sum (default):    single $/Acre OR Total number
+                    Land + Improvements:   Land $/Ac + Improvement lump
+
+                  Lump sum saves to broker_opinion_value (total $).
+                  Breakdown saves to broker_opinion_land_value +
+                  broker_opinion_improvement_value, plus
+                  broker_opinion_value as the computed sum (backwards
+                  compatibility for read paths). broker_opinion_mode
+                  stores the active mode so the share report knows
+                  which way to render. */}
+              {(() => {
+                // Save helper — writes all relevant columns for the active mode
+                // and clears the inactive-mode columns. Optimistic local update
+                // so the right-panel re-renders instantly. Now also handles the
+                // optional house-breakdown columns (sqft, ppsf, additional vertical).
+                //
+                // Self-healing on schema-cache misses: if Supabase's PostgREST
+                // cache is stale (a column exists in the DB but the API layer
+                // hasn't picked it up yet, OR a migration genuinely hasn't been
+                // applied), the update would otherwise fail with three toast
+                // errors like "Could not find the 'broker_opinion_value'
+                // column of 'cmas' in the schema cache". We parse that, strip
+                // the offending field, retry. The broker's opinion still
+                // saves with whatever columns ARE in the cache. Mirrors the
+                // pattern used for comp inserts in src/app/dashboard/import.
+                const saveBov = async (patch: {
+                  mode: BovMode | null;
+                  total: number | null;
+                  landValue: number | null;
+                  improvementValue: number | null;
+                  houseSqft?: number | null;
+                  housePpsf?: number | null;
+                  additionalVertical?: number | null;
+                  // suggestedListPrice: optional — only included when the
+                  // broker explicitly edits the list-price input. Omitted
+                  // keys preserve the existing DB value (vs null which
+                  // would clear it). Same pattern as houseSqft etc.
+                  suggestedListPrice?: number | null;
+                  // opinionPresentation: report-display mode for the
+                  // BOV — 'confirmed' / 'range' / 'discuss'. Omitting
+                  // preserves existing DB value; passing null clears
+                  // back to confirmed default on render.
+                  opinionPresentation?: OpinionPresentation | null;
+                  // valuationNotes: broker's WHY paragraph. Omitting
+                  // preserves; empty string clears. Render path treats
+                  // both as "no notes set."
+                  valuationNotes?: string | null;
+                  // Subject Overview for the marketing PDF. Notes are
+                  // the broker's private scratchpad; prose is the
+                  // polished version (AI-drafted or hand-written) that
+                  // appears in the PDF + (optionally) share report.
+                  subjectOverviewNotes?: string | null;
+                  subjectOverviewProse?: string | null;
+                  // Range-mode totals (migration 035). Per-acre is derived
+                  // on display from the TOTAL ÷ subject acres. Both
+                  // nullable — when null, client report falls back to the
+                  // comp-derived range. Omitting the key preserves the
+                  // existing DB value; passing null explicitly clears it.
+                  rangeLowTotal?: number | null;
+                  rangeHighTotal?: number | null;
+                }) => {
+                  const fields: any = {
+                    broker_opinion_mode: patch.mode,
+                    broker_opinion_value: patch.total,
+                    broker_opinion_land_value: patch.landValue,
+                    broker_opinion_improvement_value: patch.improvementValue,
+                  };
+                  // Only include house-breakdown columns if explicitly passed.
+                  // Lump-sum mode writes them as null; breakdown writes
+                  // whatever value the broker has typed.
+                  if ('houseSqft' in patch) fields.broker_opinion_house_sqft = patch.houseSqft;
+                  if ('housePpsf' in patch) fields.broker_opinion_house_ppsf = patch.housePpsf;
+                  if ('additionalVertical' in patch) fields.broker_opinion_additional_vertical = patch.additionalVertical;
+                  if ('suggestedListPrice' in patch) fields.suggested_list_price = patch.suggestedListPrice;
+                  if ('opinionPresentation' in patch) fields.opinion_presentation = patch.opinionPresentation;
+                  if ('valuationNotes' in patch) fields.valuation_notes = patch.valuationNotes;
+                  if ('subjectOverviewNotes' in patch) fields.subject_overview_notes = patch.subjectOverviewNotes;
+                  if ('subjectOverviewProse' in patch) fields.subject_overview_prose = patch.subjectOverviewProse;
+                  if ('rangeLowTotal' in patch) fields.opinion_range_low_total = patch.rangeLowTotal;
+                  if ('rangeHighTotal' in patch) fields.opinion_range_high_total = patch.rangeHighTotal;
+
+                  setViewingCMA((prev: any) => prev ? ({ ...prev, ...fields }) : prev);
+
+                  // Flip to "Saving…" — the BOV-card header indicator picks
+                  // this up. Reset to "Saved" on success, "error" on failure.
+                  setBovSaveStatus('saving');
+
+                  let current = { ...fields };
+                  const droppedCols: string[] = [];
+                  const MAX_RETRIES = 8;
+                  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                    const { error } = await supabase
+                      .from('cmas')
+                      .update(current)
+                      .eq('id', viewingCMA.id);
+                    if (!error) {
+                      if (droppedCols.length > 0) {
+                        console.warn(
+                          `[saveBov] saved without columns missing from schema cache: ${droppedCols.join(', ')}. ` +
+                          `Run NOTIFY pgrst, 'reload schema'; in Supabase SQL editor, or apply pending migrations.`
+                        );
+                        // Partial save — some fields the broker entered
+                        // weren't persisted. Surface this with an error
+                        // toast so they know to apply migrations.
+                        toast.error(
+                          `Some fields couldn't save (DB missing: ${droppedCols.join(', ')}). Apply pending migrations.`,
+                          { duration: 6000, id: 'bov-partial-save' }
+                        );
+                        setBovSaveStatus('error');
+                      } else {
+                        setBovSaveStatus('saved');
+                        // Auto-reset the visible "Saved ✓" badge after a
+                        // moment so it doesn't linger forever — confirms the
+                        // save and then gets out of the way.
+                        setTimeout(() => {
+                          setBovSaveStatus((s) => s === 'saved' ? 'idle' : s);
+                        }, 1500);
+                      }
+                      return;
+                    }
+                    const msg = String(error.message || '');
+                    const m = msg.match(/Could not find the '([\w_]+)' column/);
+                    if (!m) {
+                      toast.error(msg);
+                      setBovSaveStatus('error');
+                      return;
+                    }
+                    const missingCol = m[1];
+                    if (!(missingCol in current)) {
+                      toast.error(msg);
+                      setBovSaveStatus('error');
+                      return;
+                    }
+                    delete current[missingCol];
+                    droppedCols.push(missingCol);
+                  }
+                  toast.error('Save failed after stripping unknown columns. Reload Supabase schema cache.');
+                  setBovSaveStatus('error');
+                };
+
+                // ─── LUMP SUM handlers ───
+                // Lump-sum mode clears ALL breakdown fields including the
+                // optional house itemization (passing null for each).
+                const lumpClear = {
+                  mode: 'lump_sum' as BovMode | null,
+                  landValue: null,
+                  improvementValue: null,
+                  houseSqft: null,
+                  housePpsf: null,
+                  additionalVertical: null,
+                };
+                const onPpaChange = (raw: string) => {
+                  setBovPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovTotalInput('');
+                    saveBov({ ...lumpClear, total: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovTotalInput(String(Math.round(total)));
+                    saveBov({ ...lumpClear, total });
+                  }
+                };
+                const onTotalChange = (raw: string) => {
+                  setBovTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovPpaInput('');
+                    saveBov({ ...lumpClear, total: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const ppa = total / subjAcres;
+                    setBovPpaInput(String(Math.round(ppa)));
+                  }
+                  saveBov({ ...lumpClear, total });
+                };
+
+                // ─── RANGE handlers (Low + High, each pair $/Ac ↔ Total) ───
+                // Mirror the lump-sum sync pattern but operate on the four
+                // range fields. Each pair (Low or High) auto-syncs across
+                // $/Acre and Total via subj acres. Writes to migration 035
+                // columns opinion_range_low_total / opinion_range_high_total.
+                // Empty / invalid input clears the corresponding pair AND
+                // writes null to the DB so the comp-derived range falls
+                // through again on the client report.
+                const onRangeLowPpaChange = (raw: string) => {
+                  setBovRangeLowPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovRangeLowTotalInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovRangeLowTotalInput(String(Math.round(total)));
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: Math.round(total) });
+                  }
+                };
+                const onRangeLowTotalChange = (raw: string) => {
+                  setBovRangeLowTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovRangeLowPpaInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    setBovRangeLowPpaInput(String(Math.round(total / subjAcres)));
+                  }
+                  saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeLowTotal: Math.round(total) });
+                };
+                const onRangeHighPpaChange = (raw: string) => {
+                  setBovRangeHighPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovRangeHighTotalInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const total = ppa * subjAcres;
+                    setBovRangeHighTotalInput(String(Math.round(total)));
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: Math.round(total) });
+                  }
+                };
+                const onRangeHighTotalChange = (raw: string) => {
+                  setBovRangeHighTotalInput(raw);
+                  const total = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(total) || total <= 0) {
+                    setBovRangeHighPpaInput('');
+                    saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: null });
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    setBovRangeHighPpaInput(String(Math.round(total / subjAcres)));
+                  }
+                  saveBov({ ...lumpClear, total: Number(bovTotalInput) || null, rangeHighTotal: Math.round(total) });
+                };
+
+                // ─── BREAKDOWN handlers ───
+                // Improvement breakdown helpers: derived improvement = (sqft × ppsf)
+                // + additional vertical. When any of those three are set, they
+                // become the source of truth; bovImprovementInput is computed.
+                const parsePos = (s: string): number => {
+                  const n = s === '' ? NaN : Number(s);
+                  return Number.isFinite(n) && n > 0 ? n : 0;
+                };
+                const computedImprovementFromItems = (
+                  sqft: number, ppsf: number, addl: number
+                ): number => {
+                  const house = (sqft > 0 && ppsf > 0) ? sqft * ppsf : 0;
+                  return house + addl;
+                };
+                const hasItemizationFlag = (sqft: string, ppsf: string, addl: string): boolean => {
+                  return parsePos(sqft) > 0 || parsePos(ppsf) > 0 || parsePos(addl) > 0;
+                };
+
+                // commitBreakdown unified — writes land, improvement total, AND
+                // the optional house-breakdown columns. The improvement total
+                // is either:
+                //   - the broker's typed-direct lump (when no itemization), OR
+                //   - the computed sum (house_sqft × ppsf) + additional_vertical
+                const commitBreakdown = (
+                  landValue: number | null,
+                  improvementOverride: number | null,
+                  itemization: { sqft: number; ppsf: number; addl: number } | null,
+                ) => {
+                  const land = landValue || 0;
+                  // Resolve improvement: itemization wins when present
+                  const itemized = itemization
+                    ? computedImprovementFromItems(itemization.sqft, itemization.ppsf, itemization.addl)
+                    : 0;
+                  const improvement = itemization && itemized > 0
+                    ? itemized
+                    : (improvementOverride && improvementOverride > 0 ? improvementOverride : 0);
+                  const total = (land + improvement) > 0 ? (land + improvement) : null;
+
+                  saveBov({
+                    mode: 'breakdown',
+                    total,
+                    landValue: landValue,
+                    improvementValue: improvement > 0 ? improvement : null,
+                    houseSqft: itemization && itemization.sqft > 0 ? itemization.sqft : null,
+                    housePpsf: itemization && itemization.ppsf > 0 ? itemization.ppsf : null,
+                    additionalVertical: itemization && itemization.addl > 0 ? itemization.addl : null,
+                  });
+                };
+                // Helper to collect current itemization state from inputs
+                const currentItemization = (sqft?: string, ppsf?: string, addl?: string) => {
+                  const s = parsePos(sqft ?? bovHouseSqftInput);
+                  const p = parsePos(ppsf ?? bovHousePpsfInput);
+                  const a = parsePos(addl ?? bovAddlVerticalInput);
+                  const has = s > 0 || p > 0 || a > 0;
+                  return has ? { sqft: s, ppsf: p, addl: a } : null;
+                };
+                const currentLand = () => {
+                  const v = parsePos(bovLandTotalInput);
+                  return v > 0 ? v : null;
+                };
+                const currentImpLump = () => {
+                  const v = parsePos(bovImprovementInput);
+                  return v > 0 ? v : null;
+                };
+
+                const onLandPpaChange = (raw: string) => {
+                  setBovLandPpaInput(raw);
+                  const ppa = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(ppa) || ppa <= 0) {
+                    setBovLandTotalInput('');
+                    commitBreakdown(null, currentImpLump(), currentItemization());
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const landValue = ppa * subjAcres;
+                    setBovLandTotalInput(String(Math.round(landValue)));
+                    commitBreakdown(landValue, currentImpLump(), currentItemization());
+                  }
+                };
+                const onLandTotalChange = (raw: string) => {
+                  setBovLandTotalInput(raw);
+                  const landValue = raw === '' ? NaN : Number(raw);
+                  if (!Number.isFinite(landValue) || landValue <= 0) {
+                    setBovLandPpaInput('');
+                    commitBreakdown(null, currentImpLump(), currentItemization());
+                    return;
+                  }
+                  if (subjAcres > 0) {
+                    const ppa = landValue / subjAcres;
+                    setBovLandPpaInput(String(Math.round(ppa)));
+                  }
+                  commitBreakdown(landValue, currentImpLump(), currentItemization());
+                };
+                // Direct Improvement Value input — only used when itemization
+                // is NOT active. When itemized, this field is computed/read-only.
+                const onImprovementChange = (raw: string) => {
+                  setBovImprovementInput(raw);
+                  // If broker types directly in Improvement Value, clear any
+                  // existing itemization (they're going lump mode within the
+                  // breakdown). Carries over land value.
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  const imp = parsePos(raw);
+                  commitBreakdown(currentLand(), imp > 0 ? imp : null, null);
+                };
+                // House SQFT input — recomputes improvement from items
+                const onHouseSqftChange = (raw: string) => {
+                  setBovHouseSqftInput(raw);
+                  const items = currentItemization(raw, undefined, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onHousePpsfChange = (raw: string) => {
+                  setBovHousePpsfInput(raw);
+                  const items = currentItemization(undefined, raw, undefined);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+                const onAddlVerticalChange = (raw: string) => {
+                  setBovAddlVerticalInput(raw);
+                  const items = currentItemization(undefined, undefined, raw);
+                  const newImpComputed = items ? computedImprovementFromItems(items.sqft, items.ppsf, items.addl) : 0;
+                  setBovImprovementInput(newImpComputed > 0 ? String(Math.round(newImpComputed)) : '');
+                  commitBreakdown(currentLand(), null, items);
+                };
+
+                // ─── Mode switching — preserve values across switches ───
+                const switchToLumpSum = () => {
+                  // If broker had Land + Improvement values, sum them to the lump total
+                  const land = parsePos(bovLandTotalInput);
+                  const imp = parsePos(bovImprovementInput);
+                  const combined = land + imp;
+                  setBovMode('lump_sum');
+                  // Clear the house-breakdown UI state on mode flip
+                  setBovHouseSqftInput('');
+                  setBovHousePpsfInput('');
+                  setBovAddlVerticalInput('');
+                  setBovHouseBreakdownOpen(false);
+                  if (combined > 0) {
+                    setBovTotalInput(String(Math.round(combined)));
+                    if (subjAcres > 0) setBovPpaInput(String(Math.round(combined / subjAcres)));
+                    saveBov({ ...lumpClear, total: combined });
+                  } else {
+                    saveBov({ ...lumpClear, total: null });
+                  }
+                };
+                const switchToBreakdown = () => {
+                  // If broker had a lump total, transfer it to Land Value (assume no improvement yet)
+                  const lump = parsePos(bovTotalInput);
+                  setBovMode('breakdown');
+                  if (lump > 0) {
+                    setBovLandTotalInput(String(Math.round(lump)));
+                    if (subjAcres > 0) setBovLandPpaInput(String(Math.round(lump / subjAcres)));
+                    saveBov({
+                      mode: 'breakdown',
+                      total: lump,
+                      landValue: lump,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
+                  } else {
+                    saveBov({
+                      mode: 'breakdown',
+                      total: null,
+                      landValue: null,
+                      improvementValue: null,
+                      houseSqft: null,
+                      housePpsf: null,
+                      additionalVertical: null,
+                    });
+                  }
+                };
+
+                // Placeholders pull from CMA averages so the broker sees
+                // suggested numbers if they leave fields blank.
+                const ppaPlaceholder = landMid > 0 ? Math.round(landMid).toString()
+                  : allInMid > 0 ? Math.round(allInMid).toString() : '';
+                const totalPlaceholder = landOnlyValue > 0 ? Math.round(landOnlyValue).toString()
+                  : allInValue > 0 ? Math.round(allInValue).toString() : '';
+
+                // Computed total in breakdown mode (live, from local inputs)
+                const breakdownLandNum = bovLandTotalInput === '' ? 0 : Number(bovLandTotalInput);
+                const breakdownImpNum = bovImprovementInput === '' ? 0 : Number(bovImprovementInput);
+                const breakdownTotal = (Number.isFinite(breakdownLandNum) ? breakdownLandNum : 0)
+                                     + (Number.isFinite(breakdownImpNum) ? breakdownImpNum : 0);
+
+                // Shared input class
+                const inputCls = 'w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-lg pl-6 pr-2 py-2 text-sm text-ink font-mono tabular-nums outline-none transition-all';
+
+                return (
+                  <>
+
+                  {/* ─── Suggested List Price ──────────────────────────
+                      The HEADLINE number on the client report. Defaults
+                      to BOV total × 1.10 (10% negotiation cushion —
+                      typical for TX ranch land); broker can override.
+
+                      Why a separate concept from BOV: BOV is "what I
+                      think it'll close at." List price is "what we put
+                      on the sign so the seller has room to negotiate
+                      down." Leading with the list price on the client
+                      report prevents sticker shock — the seller anchors
+                      on the aspirational number first.
+
+                      Lives inside the BOV editor IIFE so it has direct
+                      access to saveBov + bov*Input locals.
+
+                      Gated to Confirmed-mode only: in Range mode the broker
+                      is showing a band (no single list price); in Discuss
+                      mode the whole point is to skip numbers. Hiding the
+                      card in those modes prevents brokers from filling
+                      something the client never sees. */}
+                  {opinionPresentation === 'confirmed' && (() => {
+                    // Suggested List Price now ALWAYS renders (no BOV gate).
+                    // Rationale: list price is a by-product of the comps, not
+                    // of the broker's separate BOV input. We compute a sensible
+                    // default by anchoring on whatever is most authoritative:
+                    //   1. Saved broker override (suggested_list_price)
+                    //   2. BOV × 1.10 (when broker has entered BOV)
+                    //   3. Comp average $/ac × subject acres × 1.10
+                    //      (fall-back when BOV is blank — the comp set IS the
+                    //       valuation)
+                    //   4. Blank with placeholder when neither comps nor BOV
+                    //      are set yet (broker just opened a fresh CMA)
+                    const bovT = Number(viewingCMA?.broker_opinion_value) || 0;
+                    const landV = Number(viewingCMA?.broker_opinion_land_value) || 0;
+                    const impV = Number(viewingCMA?.broker_opinion_improvement_value) || 0;
+                    const effectiveBov = bovT > 0 ? bovT : landV + impV;
+
+                    // Comp-derived anchor: prefer adjusted (broker overrides
+                    // applied), fall back to land-only, then total. Each
+                    // averages helper has an .n sample-size so empty sets
+                    // are safely skipped.
+                    const compMid =
+                      (cmaAverages.adjusted.n > 0 ? cmaAverages.adjusted.mid : null)
+                      ?? (cmaAverages.landOnly.n > 0 ? cmaAverages.landOnly.mid : null)
+                      ?? (cmaAverages.total.n > 0 ? cmaAverages.total.mid : null)
+                      ?? 0;
+                    const compDerivedAnchor = compMid > 0 && subjAcres > 0 ? compMid * subjAcres : 0;
+
+                    // Pick the strongest anchor available for the default
+                    // suggestion. Cushion % comes from the broker's profile
+                    // (listPriceCushionPct state, loaded from
+                    // profiles.default_list_price_cushion_pct via migration
+                    // 034). Defaults to 10% for brokers who haven't set it.
+                    const anchor = effectiveBov > 0 ? effectiveBov : compDerivedAnchor;
+                    const cushionMultiplier = 1 + (listPriceCushionPct / 100);
+                    const defaultListPrice = anchor > 0 ? Math.round(anchor * cushionMultiplier) : 0;
+                    const savedOverride = viewingCMA?.suggested_list_price;
+                    const currentList = bovListPriceInput
+                      ? Number(bovListPriceInput)
+                      : (savedOverride != null ? Number(savedOverride) : defaultListPrice);
+                    const cushion = anchor > 0 && currentList > 0
+                      ? ((currentList - anchor) / anchor) * 100
+                      : 10;
+                    const anchorLabel = effectiveBov > 0 ? 'BOV' : compDerivedAnchor > 0 ? 'comp avg' : '';
+                    const expectedSaleHint = effectiveBov > 0
+                      ? formatCurrency(effectiveBov)
+                      : compDerivedAnchor > 0
+                      ? formatCurrency(compDerivedAnchor)
+                      : null;
+                    return (
+                      <div className="bg-white border border-beige rounded-xl px-3 py-3 space-y-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <p className="text-[10px] font-semibold text-ink-2 uppercase tracking-[0.08em]">Suggested List Price</p>
+                          {/* Inline cushion editor — broker types their preferred
+                              percentage above the anchor (BOV or comp avg).
+                              When changed, recomputes defaultListPrice AND
+                              persists to profiles.default_list_price_cushion_pct
+                              so the same broker's next CMA inherits it. The
+                              per-CMA dollar override below still wins. */}
+                          <div className="flex items-center gap-1 text-[10px] text-ink-3 font-mono">
+                            <span>+</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={50}
+                              step={1}
+                              value={listPriceCushionPct}
+                              onChange={(e) => {
+                                const n = Number(e.target.value);
+                                if (Number.isFinite(n)) setListPriceCushionPct(Math.max(0, Math.min(50, n)));
+                              }}
+                              onBlur={async () => {
+                                if (!currentUserId) return;
+                                setSavingCushionPct(true);
+                                try {
+                                  await supabase
+                                    .from('profiles')
+                                    .update({ default_list_price_cushion_pct: listPriceCushionPct })
+                                    .eq('id', currentUserId);
+                                } catch { /* silent — non-critical preference */ }
+                                setSavingCushionPct(false);
+                              }}
+                              className="w-9 text-right bg-cream border border-beige focus:border-olive rounded px-1 py-0.5 text-ink font-mono outline-none"
+                              title="Your default list-price cushion. Saves to your profile."
+                            />
+                            <span>% above {anchorLabel || 'BOV'}</span>
+                            {savingCushionPct && <span className="text-olive-2">·</span>}
+                          </div>
+                        </div>
+                        {/* Two-input grid: $/Acre + Total auto-sync via subj
+                            acres. Same pattern as the Opinion of Value
+                            inputs above — edit either, the other recomputes
+                            instantly. Only the TOTAL is persisted to the DB
+                            (suggested_list_price); per-acre derives on load. */}
+                        {(() => {
+                          const defaultListPpa = subjAcres > 0 && defaultListPrice > 0
+                            ? Math.round(defaultListPrice / subjAcres)
+                            : 0;
+                          const persistTotal = () => {
+                            const raw = bovListPriceInput.trim();
+                            const n = raw === '' ? null : Number(raw);
+                            saveBov({
+                              mode: bovMode,
+                              total: Number(bovTotalInput) || null,
+                              landValue: Number(bovLandTotalInput) || null,
+                              improvementValue: Number(bovImprovementInput) || null,
+                              suggestedListPrice: (n != null && Number.isFinite(n) && n > 0) ? n : null,
+                            });
+                          };
+                          return (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPpa > 0 ? String(defaultListPpa) : 'auto'}
+                                    value={bovListPpaInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPpaInput(raw);
+                                      const ppa = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(ppa) && ppa > 0 && subjAcres > 0) {
+                                        setBovListPriceInput(String(Math.round(ppa * subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPriceInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                                <div className="relative">
+                                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-sm">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder={defaultListPrice > 0 ? String(defaultListPrice) : 'Add comps or enter BOV…'}
+                                    value={bovListPriceInput}
+                                    onChange={(e) => {
+                                      const raw = e.target.value;
+                                      setBovListPriceInput(raw);
+                                      const total = raw === '' ? NaN : Number(raw);
+                                      if (Number.isFinite(total) && total > 0 && subjAcres > 0) {
+                                        setBovListPpaInput(String(Math.round(total / subjAcres)));
+                                      } else if (raw === '') {
+                                        setBovListPpaInput('');
+                                      }
+                                    }}
+                                    onBlur={persistTotal}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-6 pr-2 py-2 text-base font-semibold text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          {expectedSaleHint ? (
+                            <>Headline on the client report. Negotiation cushion baked in — expected sale lands around {expectedSaleHint}.</>
+                          ) : (
+                            <>Headline on the client report. Add comps or enter a BOV and we&apos;ll suggest a default with negotiation cushion baked in.</>
+                          )}
+                          {savedOverride != null && (
+                            <>
+                              {' '}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBovListPriceInput('');
+                                  setBovListPpaInput('');
+                                  saveBov({
+                                    mode: bovMode,
+                                    total: Number(bovTotalInput) || null,
+                                    landValue: Number(bovLandTotalInput) || null,
+                                    improvementValue: Number(bovImprovementInput) || null,
+                                    suggestedListPrice: null,
+                                  });
+                                }}
+                                className="text-olive-2 hover:text-olive underline decoration-olive-2/40 underline-offset-2"
+                              >
+                                Reset to default
+                              </button>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Your Opinion of Value</p>
+                      {/* Save status indicator. Brokers were entering values
+                          without any visual confirmation they saved (auto-save
+                          on change, no Save button). This badge flashes:
+                            • Saving…    (mid-write)
+                            • Saved ✓    (success, fades after 1.5s)
+                            • Save failed (sticks until next save attempt)
+                            • idle       (default — shows "optional") */}
+                      {bovSaveStatus === 'saving' ? (
+                        <p className="text-[9px] text-ink-3 font-mono">Saving…</p>
+                      ) : bovSaveStatus === 'saved' ? (
+                        <p className="text-[9px] text-olive-2 font-mono font-semibold">Saved ✓</p>
+                      ) : bovSaveStatus === 'error' ? (
+                        <p className="text-[9px] text-red-600 font-mono font-semibold">Save failed</p>
+                      ) : (
+                        <p className="text-[9px] text-ink-3">optional · auto-saves</p>
+                      )}
+                    </div>
+
+                    {/* Presentation mode — Confirmed / Range / Discuss.
+                        Drives how the BOV is displayed on the client
+                        report. Independent of breakdown style (lump_sum
+                        vs breakdown) — broker can enter values as a
+                        breakdown and still ship in 'discuss' mode. */}
+                    <div className="space-y-1.5">
+                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Show on client report as</p>
+                      <div className="grid grid-cols-3 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
+                        {(['confirmed', 'range', 'discuss'] as const).map((mode) => {
+                          const label = mode === 'confirmed' ? 'Confirmed' : mode === 'range' ? 'Range' : "Let's Discuss";
+                          const isActive = opinionPresentation === mode;
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => {
+                                setOpinionPresentation(mode);
+                                saveBov({
+                                  mode: bovMode,
+                                  total: Number(bovTotalInput) || null,
+                                  landValue: Number(bovLandTotalInput) || null,
+                                  improvementValue: Number(bovImprovementInput) || null,
+                                  opinionPresentation: mode,
+                                });
+                              }}
+                              className={`py-1.5 rounded-md text-[10px] font-semibold transition-colors ${
+                                isActive
+                                  ? 'bg-white text-ink shadow-sm border border-beige-2'
+                                  : 'text-ink-2 hover:text-ink'
+                              }`}
+                              title={
+                                mode === 'confirmed' ? 'Show the hard number ($X.XM)'
+                                  : mode === 'range' ? 'Show comp range only — no point estimate'
+                                  : 'Hide the number — invite a conversation'
+                              }
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[9px] text-ink-3 leading-relaxed">
+                        {opinionPresentation === 'confirmed' && 'Client sees the hard number.'}
+                        {opinionPresentation === 'range' && 'Client sees the comp range only — no point estimate. Useful when listing strategy depends on market timing.'}
+                        {opinionPresentation === 'discuss' && "Client sees 'Let's discuss' instead of a number. Comp data still visible. Lets you anchor the conversation in a call, not the report."}
+                      </p>
+                    </div>
+
+                    {/* ─── INPUTS GATED BY PRESENTATION MODE ───────────
+                        Each mode shows ONLY the inputs that matter for it.
+                        Confirmed → Lump Sum or Breakdown inputs + Suggested
+                        List Price card. Range → low/high band. Let's Discuss
+                        → explanation panel, no inputs to fill. Previously
+                        every section was visible at once which is why
+                        brokers said "I have no idea what to fill in." */}
+                    {opinionPresentation === 'confirmed' && (
+                      <>
+                    {/* Mode toggle — Lump Sum vs Land + Improvements */}
+                    <div className="grid grid-cols-2 gap-0.5 p-0.5 bg-cream border border-beige rounded-lg">
+                      <button
+                        type="button"
+                        onClick={switchToLumpSum}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'lump_sum'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Lump Sum
+                      </button>
+                      <button
+                        type="button"
+                        onClick={switchToBreakdown}
+                        className={`py-1.5 rounded-md text-[11px] font-semibold transition-colors ${
+                          bovMode === 'breakdown'
+                            ? 'bg-white text-ink shadow-sm border border-beige-2'
+                            : 'text-ink-2 hover:text-ink'
+                        }`}
+                      >
+                        Land + Improvements
+                      </button>
+                    </div>
+
+                    {bovMode === 'lump_sum' ? (
+                      // ─── CONFIRMED mode + Lump Sum: single $/Ac + Total pair ───
+                      <>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={ppaPlaceholder} value={bovPpaInput} onChange={(e) => onPpaChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                            <div className="relative">
+                              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                              <input type="number" placeholder={totalPlaceholder} value={bovTotalInput} onChange={(e) => onTotalChange(e.target.value)} className={inputCls} />
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit either field — the other auto-calculates from {formatAcres(subjAcres)}.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        {/* Land Value group */}
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Land Value</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">$/Acre</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={ppaPlaceholder} value={bovLandPpaInput} onChange={(e) => onLandPpaChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                            <div>
+                              <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Total</p>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder={totalPlaceholder} value={bovLandTotalInput} onChange={(e) => onLandTotalChange(e.target.value)} className={inputCls} />
+                              </div>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-ink-3 leading-relaxed">
+                            Edit either — auto-calculates from {formatAcres(subjAcres)}.
+                          </p>
+                        </div>
+
+                        {/* Improvement Value
+                            When the house-breakdown sub-fields are filled in,
+                            this becomes a computed total: (sqft × ppsf) + additional.
+                            When the broker types directly here, the itemization
+                            sub-fields are cleared. */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">Improvement Value</p>
+                            <button
+                              type="button"
+                              onClick={() => setBovHouseBreakdownOpen((v) => !v)}
+                              className="text-[10px] text-ink-2 hover:text-olive-2 transition-colors flex items-center gap-1"
+                            >
+                              {bovHouseBreakdownOpen ? <><ChevronUp size={11} /> Hide house breakdown</> : <><ChevronDown size={11} /> Break out house</>}
+                            </button>
+                          </div>
+                          <div className="relative">
+                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                            <input
+                              type="number"
+                              placeholder="0"
+                              value={bovImprovementInput}
+                              onChange={(e) => onImprovementChange(e.target.value)}
+                              disabled={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput)}
+                              className={`${inputCls} ${hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'opacity-70 cursor-not-allowed' : ''}`}
+                              title={hasItemizationFlag(bovHouseSqftInput, bovHousePpsfInput, bovAddlVerticalInput) ? 'Computed from the house breakdown below. Clear those fields to edit directly.' : ''}
+                            />
+                          </div>
+                          {/* Optional house-breakdown expander */}
+                          {bovHouseBreakdownOpen && (
+                            <div className="bg-cream border border-beige rounded-lg p-2.5 space-y-3 mt-1">
+                              {/* HOUSE — SQFT × $/SQFT */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">House</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">SQFT</p>
+                                    <input
+                                      type="number"
+                                      placeholder="4,000"
+                                      value={bovHouseSqftInput}
+                                      onChange={(e) => onHouseSqftChange(e.target.value)}
+                                      className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md px-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="text-[9px] text-ink-3 uppercase tracking-[0.04em] mb-0.5">$/SQFT</p>
+                                    <div className="relative">
+                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                      <input
+                                        type="number"
+                                        placeholder="200"
+                                        value={bovHousePpsfInput}
+                                        onChange={(e) => onHousePpsfChange(e.target.value)}
+                                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                                {/* Live line total */}
+                                {(parsePos(bovHouseSqftInput) > 0 && parsePos(bovHousePpsfInput) > 0) && (
+                                  <p className="text-[10px] text-ink-3 font-mono tabular-nums">
+                                    {parsePos(bovHouseSqftInput).toLocaleString()} sqft × ${parsePos(bovHousePpsfInput).toLocaleString()}/sqft
+                                    <span className="text-ink-2"> = </span>
+                                    <span className="text-olive-2 font-semibold">{formatCurrency(parsePos(bovHouseSqftInput) * parsePos(bovHousePpsfInput))}</span>
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* ADDITIONAL VERTICAL IMPROVEMENTS — lump */}
+                              <div className="space-y-1.5">
+                                <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.06em]">Additional Vertical Improvements</p>
+                                <div className="relative">
+                                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                  <input
+                                    type="number"
+                                    placeholder="0"
+                                    value={bovAddlVerticalInput}
+                                    onChange={(e) => onAddlVerticalChange(e.target.value)}
+                                    className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded-md pl-5 pr-2 py-1.5 text-sm text-ink font-mono tabular-nums outline-none transition-all"
+                                  />
+                                </div>
+                                <p className="text-[9px] text-ink-3 leading-relaxed">
+                                  Barns, shops, sheds, equipment buildings, guest houses, etc. Horizontal improvements (fencing, ponds, wells) typically get baked into Land $/Acre above.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Total Opinion — computed sum */}
+                        <div className="border-t border-beige pt-2 flex items-baseline justify-between">
+                          <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Total Opinion</p>
+                          <p className="text-base font-semibold text-olive-2 tabular-nums leading-tight">
+                            {breakdownTotal > 0 ? formatCurrency(breakdownTotal) : '—'}
+                          </p>
+                        </div>
+                      </>
+                    )}
+
+                      </>
+                    )}
+
+                    {/* ─── RANGE mode inputs (top-level, independent of bovMode) ───
+                        Two pairs (Low + High). Each pair $/Ac ↔ Total auto-syncs
+                        via × subject acres. Saved to opinion_range_low_total /
+                        opinion_range_high_total (migration 035). Empty fields
+                        fall back to the comp-derived range on the client. */}
+                    {opinionPresentation === 'range' && (
+                      <>
+                        <div className="space-y-2">
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range Low</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="$/Acre" value={bovRangeLowPpaInput} onChange={(e) => onRangeLowPpaChange(e.target.value)} className={inputCls} title="Low end of the range, per acre" />
+                              </div>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="Total" value={bovRangeLowTotalInput} onChange={(e) => onRangeLowTotalChange(e.target.value)} className={inputCls} title="Low end of the range, total dollars" />
+                              </div>
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-ink-3 uppercase tracking-[0.06em] mb-1">Range High</p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="$/Acre" value={bovRangeHighPpaInput} onChange={(e) => onRangeHighPpaChange(e.target.value)} className={inputCls} title="High end of the range, per acre" />
+                              </div>
+                              <div className="relative">
+                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-2 text-xs">$</span>
+                                <input type="number" placeholder="Total" value={bovRangeHighTotalInput} onChange={(e) => onRangeHighTotalChange(e.target.value)} className={inputCls} title="High end of the range, total dollars" />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-ink-3 leading-relaxed">
+                          Edit any field — its pair auto-calculates from {formatAcres(subjAcres)}. Leave blank to fall back to the comp-derived range on the client report.
+                        </p>
+                      </>
+                    )}
+
+                    {/* ─── LET'S DISCUSS mode — no inputs, just guidance ───
+                        Replaces the inputs with a brief explanation. The
+                        broker doesn't fill anything; client sees "Let's
+                        discuss" instead of a number, with comp data still
+                        visible below. Reduces cognitive load — no inputs
+                        means no questions about what to fill in. */}
+                    {opinionPresentation === 'discuss' && (
+                      <div className="bg-cream/60 border border-beige rounded-lg p-3 space-y-1.5">
+                        <p className="text-[11px] font-semibold text-ink leading-snug">
+                          Nothing to fill in here.
+                        </p>
+                        <p className="text-[10px] text-ink-2 leading-relaxed">
+                          The client report will show <span className="font-mono text-ink italic">&quot;Let&apos;s discuss&quot;</span> instead of a number. Comp data and your valuation notes still appear — they just won&apos;t see a hard valuation. Use Valuation Notes below to leave them a sentence inviting the conversation.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Valuation Notes — broker's WHY paragraph. Appears
+                        on the client report below the Opinion of Value.
+                        Especially useful in 'discuss' or 'range' mode
+                        (where the broker isn't committing to a hard
+                        number) or when the BOV sits outside the comp
+                        range (the above/below indicator from PR #43
+                        invites a one-sentence explanation). Saves on
+                        blur to avoid spamming saves on every keystroke. */}
+                    <div className="border-t border-beige pt-2 space-y-1.5">
+                      <p className="text-[9px] font-medium text-ink-2 uppercase tracking-[0.08em]">
+                        Valuation Notes
+                        <span className="text-ink-3 normal-case tracking-normal"> · appears on client report</span>
+                      </p>
+                      <textarea
+                        placeholder={
+                          opinionPresentation === 'discuss'
+                            ? 'e.g. "Comps support a range — let\'s talk through the right number for your situation."'
+                            : opinionPresentation === 'range'
+                            ? 'e.g. "Final value depends on listing strategy + market timing — happy to discuss."'
+                            : 'e.g. "Above the comp range because of the hacienda + dual creek frontage."'
+                        }
+                        value={valuationNotes}
+                        onChange={(e) => setValuationNotes(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            valuationNotes: valuationNotes.trim() === '' ? null : valuationNotes,
+                          });
+                        }}
+                        rows={3}
+                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed"
+                      />
+                    </div>
+                  </div>
+
+                  {/* ─── Subject Overview ───────────────────────────────
+                      Two-textarea section that feeds the marketing PDF's
+                      Subject Property page (Page 2). Broker types
+                      bullets/shorthand in "Your Notes" (private, never
+                      appears in the report), clicks Generate to get a
+                      polished prose draft from GPT-4o-mini via
+                      /api/cma/[id]/generate-overview, then edits +
+                      saves. Both fields persist via saveBov. See
+                      migration 032 + design discussion (May 26 2026). */}
+                  <div className="bg-white border border-beige rounded-xl p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.08em]">Subject Overview</p>
+                      <p className="text-[9px] text-ink-3">for marketing PDF</p>
+                    </div>
+
+                    {/* PRIVATE NOTES — never appears in any client-
+                        facing surface. Just feeds the AI generator. */}
+                    <div className="space-y-1">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Your notes <span className="normal-case tracking-normal text-ink-3">· private, just for the AI</span>
+                      </p>
+                      <textarea
+                        placeholder={"551ac, Willow City\nNative Hill Country, ag valuation\nModest improvements: 570sf cabin built 2009, garage/shop, HVAC\nValue is the land — terrain, water, location"}
+                        value={subjectOverviewNotes}
+                        onChange={(e) => setSubjectOverviewNotes(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewNotes: subjectOverviewNotes.trim() === '' ? null : subjectOverviewNotes,
+                          });
+                        }}
+                        rows={4}
+                        className="w-full bg-cream border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink-2 outline-none transition-all resize-none leading-relaxed font-mono"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={subjectOverviewGenerating || !subjectOverviewNotes.trim() || !viewingCMA?.id}
+                          onClick={async () => {
+                            const cmaId = viewingCMA?.id;
+                            if (!cmaId) return;
+                            const notes = subjectOverviewNotes.trim();
+                            if (!notes) {
+                              toast.error('Add some notes first');
+                              return;
+                            }
+                            setSubjectOverviewGenerating(true);
+                            try {
+                              const res = await fetch(`/api/cma/${cmaId}/generate-overview`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ notes }),
+                              });
+                              const data = await res.json();
+                              if (!res.ok || !data?.ok || typeof data?.prose !== 'string') {
+                                toast.error(data?.error || 'Generation failed');
+                                return;
+                              }
+                              // Confirm before clobbering existing prose
+                              // — if the broker hand-edited the polished
+                              // version, regenerating wipes that work.
+                              // Small UX safety net via window.confirm;
+                              // the textarea also supports Cmd+Z undo
+                              // for inline recovery.
+                              if (subjectOverviewProse.trim().length > 0) {
+                                const ok = window.confirm(
+                                  'Replace your current draft with a new AI version? Your current text will be overwritten (you can Cmd+Z to undo).'
+                                );
+                                if (!ok) return;
+                              }
+                              setSubjectOverviewProse(data.prose);
+                              // Persist the new draft immediately so a
+                              // reload picks it up — saveBov is the
+                              // existing schema-cache-retry path.
+                              saveBov({
+                                mode: bovMode,
+                                total: Number(bovTotalInput) || null,
+                                landValue: Number(bovLandTotalInput) || null,
+                                improvementValue: Number(bovImprovementInput) || null,
+                                subjectOverviewNotes: notes,
+                                subjectOverviewProse: data.prose,
+                              });
+                              toast.success('Draft generated — review + edit below');
+                            } catch (e: any) {
+                              toast.error(e?.message || 'Generation failed');
+                            } finally {
+                              setSubjectOverviewGenerating(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-blue hover:bg-slate-blue-2 text-white text-[11px] font-semibold rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <Sparkles size={11} />
+                          {subjectOverviewGenerating ? 'Generating…' : 'Generate'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* POLISHED PROSE — appears in PDF + share report.
+                        Broker can edit after AI generation or type it
+                        themselves from scratch. */}
+                    <div className="space-y-1 border-t border-beige pt-2">
+                      <p className="text-[9px] font-medium text-ink-3 uppercase tracking-[0.06em]">
+                        Polished overview <span className="normal-case tracking-normal text-ink-3">· appears in PDF</span>
+                      </p>
+                      <textarea
+                        placeholder="Click Generate above to draft, or type your own 2-3 paragraph overview here."
+                        value={subjectOverviewProse}
+                        onChange={(e) => setSubjectOverviewProse(e.target.value)}
+                        onBlur={() => {
+                          saveBov({
+                            mode: bovMode,
+                            total: Number(bovTotalInput) || null,
+                            landValue: Number(bovLandTotalInput) || null,
+                            improvementValue: Number(bovImprovementInput) || null,
+                            subjectOverviewProse: subjectOverviewProse.trim() === '' ? null : subjectOverviewProse,
+                          });
+                        }}
+                        rows={8}
+                        className="w-full bg-white border border-beige focus:border-olive focus:ring-2 focus:ring-olive/20 rounded text-[11px] px-2 py-1.5 text-ink outline-none transition-all resize-none leading-relaxed"
+                      />
+                    </div>
+                  </div>
+
+                  </>
+                );
+              })()}
+
+              {/* ─── WRAP-UP ACTIONS (END OF PANEL) ────────────────────
+                  Download / Collaborate / Exit live at the very bottom
+                  of the panel so they don't compete with the analysis
+                  work above. Each takes a full row for tap-friendliness
+                  on touchscreens + visual separation. */}
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-beige">
+                <button
+                  onClick={downloadMarketingPdf}
+                  disabled={pdfDownloading || !viewingCMA?.id}
+                  className="col-span-2 py-2 border rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ borderColor: 'rgba(182,138,53,0.4)', backgroundColor: 'rgba(182,138,53,0.10)', color: '#8C6A29' }}
+                >
+                  {pdfDownloading ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      Building PDF…
+                    </>
+                  ) : (
+                    <>
+                      <Download size={12} />
+                      Download Marketing PDF
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={openCollaboratorModal}
+                  className="col-span-2 py-2 border border-olive-border bg-olive-tint hover:bg-olive-tint text-xs font-bold text-ink-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Users size={12} />
+                  Collaborate{collaboratorUserIds.size > 0 ? ` (${collaboratorUserIds.size})` : ''}
+                </button>
+                <button
+                  onClick={exitCmaWorkspace}
+                  className="col-span-2 py-2 border border-beige bg-cream hover:border-beige-2 text-xs font-bold text-ink-2 rounded-lg transition-colors"
+                >
+                  Exit Report
+                </button>
+              </div>
+
             </div>
           </div>
         );

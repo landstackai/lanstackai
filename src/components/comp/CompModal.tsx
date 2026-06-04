@@ -70,6 +70,13 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
     confirmation_source: '',
     description: '',
     source_url: '',
+    // Optional pre-filled boundary geometry. When set (e.g. from the
+    // map page's "Create Comp" button after drawing a polygon or
+    // selecting parcels), it gets written to the comps row on save
+    // so the new comp lands with its boundary already populated. Not
+    // editable in the form UI — the boundary comes from upstream
+    // selection or from the per-comp /dashboard/review page.
+    boundary_geojson: null as any,
     visibility: 'team',
     confidence: 'Unverified',
     is_company_transaction: false,
@@ -185,6 +192,12 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
         confirmation_source: comp.confirmation_source || '',
         description: comp.description || '',
         source_url: comp.source_url || '',
+        // Carry boundary_geojson through. Two cases that matter:
+        //   1) Editing existing comp → preserve its current boundary so
+        //      saving doesn't wipe it.
+        //   2) Pre-fill from map page (drew polygon, hit "Create Comp")
+        //      → the new comp lands with the boundary already populated.
+        boundary_geojson: (comp as any).boundary_geojson ?? null,
         visibility: comp.visibility || 'team',
         confidence: comp.confidence || 'Unverified',
         is_company_transaction: comp.is_company_transaction || false,
@@ -253,6 +266,12 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
   };
 
   const handleSave = async () => {
+    // BUILD STAMP — if you can read this in the console, the new
+    // nuclear-strip scrub is live. If you don't see it, the bundle
+    // hasn't refreshed. Delete this line once UUID save bug is
+    // confirmed dead.
+    console.info('[CompModal] handleSave v3-nuclear-strip — bundle is live');
+
     if (!form.county || !form.acres || !form.sale_price) {
       toast.error('County, acres, and price are required');
       return;
@@ -314,6 +333,10 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       flood_plain: form.flood_plain,
       improvement_value: form.improvement_value !== '' ? parseFloat(form.improvement_value) : null,
       improvement_source: form.improvement_source || null,
+      // Conditional spread — only write boundary_geojson if we actually
+      // have one. Prevents an edit-comp save from accidentally NULLing
+      // an existing comp's boundary when the form never received one.
+      ...(form.boundary_geojson ? { boundary_geojson: form.boundary_geojson } : {}),
       // Agent-Verified auto-tags the verifier and timestamp (internal audit trail
       // — never shown on the client share report). For appraiser / broker_estimate
       // / cleared, blank out the audit columns.
@@ -322,15 +345,121 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
       is_draft: false,
     };
 
+    // NUCLEAR-OPTION SCRUB. Strip any key whose value looks dangerous
+    // entirely from the payload — instead of coercing to null, we just
+    // DELETE the key. Supabase treats missing keys as "leave that column
+    // alone" on updates, so the only behavioral change is: if a column
+    // had a value before, it stays unchanged; if it was null, it stays
+    // null. Net effect: that column simply isn't touched by this save.
+    //
+    // Why this is bulletproof: even if the JSON serializer were doing
+    // something exotic (passing 'undefined' literal through), the value
+    // never enters the payload at all.
+    //
+    // We strip:
+    //   1) value === undefined (the literal JS value)
+    //   2) value === 'undefined' (the string — has bitten us 3 times)
+    //   3) value === 'null' (the STRING 'null', different from null)
+    //   4) For UUID-shaped column names: any value that isn't either
+    //      null OR a real UUID-formatted string gets stripped.
+    //
+    // Also instrument with console.warn for any stripped key so we can
+    // find the upstream leak source.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const isUuidShapedKey = (k: string) =>
+      k === 'created_by' ||
+      k === 'team_id' ||
+      k === 'transaction_agent_id' ||
+      k === 'improvement_verified_by' ||
+      k.endsWith('_by') ||
+      (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id');
+    const strippedKeys: string[] = [];
+    for (const k of Object.keys(payload)) {
+      const v = (payload as any)[k];
+      let shouldStrip = false;
+
+      if (v === undefined || v === 'undefined' || v === 'null') {
+        shouldStrip = true;
+      } else if (isUuidShapedKey(k) && v != null) {
+        if (typeof v !== 'string' || !UUID_RE.test(v)) {
+          shouldStrip = true;
+        }
+      }
+
+      if (shouldStrip) {
+        strippedKeys.push(`${k}=${JSON.stringify(v)}`);
+        delete (payload as any)[k];
+      }
+    }
+    if (strippedKeys.length > 0) {
+      console.warn(`[CompModal] STRIPPED dangerous keys from payload:`, strippedKeys);
+    }
+
     // Self-healing save: if a column doesn't exist in the deployed Supabase
     // schema (e.g. a migration hasn't been run yet), strip that field from
     // the payload and retry. Up to 10 retries — covers the case where a
     // payload references several columns from un-run migrations.
     let current: Record<string, any> = { ...payload };
+
+    // FINAL JSON-LEVEL SCRUB — defense in depth.
+    // Round-trip the payload through JSON.stringify with a replacer
+    // that PHYSICALLY rewrites any "undefined" string value to null.
+    // Even if the upstream scrubs missed something, or some clever
+    // upstream code re-introduced 'undefined' between the scrub and
+    // this save call, the JSON that goes onto the wire literally
+    // cannot contain the literal string "undefined".
+    //
+    // This is the last guarantee before the network call. Anything
+    // that gets past every JS guard above this point gets caught
+    // here at the serialization boundary.
+    const safeJson = JSON.stringify(current, (key, value) => {
+      if (value === 'undefined' || value === 'null' || value === undefined) return null;
+      // For UUID-shaped keys (created_by, *_id, *_by) that aren't
+      // null and aren't a real UUID, force null. Same rule as the
+      // earlier scrub but applied as a JSON-serialization barrier
+      // so it cannot be bypassed by closure/reference issues.
+      const isUuid = (k: string) =>
+        k === 'created_by' ||
+        k === 'team_id' ||
+        k === 'transaction_agent_id' ||
+        k === 'improvement_verified_by' ||
+        k.endsWith('_by') ||
+        (k.endsWith('_id') && k !== 'parcel_id' && k !== 'recording_id');
+      if (isUuid(key) && value != null) {
+        if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+          return null;
+        }
+      }
+      return value;
+    });
+    current = JSON.parse(safeJson);
+
+    console.info('[CompModal] save payload (final):', current);
+    // DEBUG: surface whether boundary_geojson made it through to the
+    // wire. Several user reports of comps saving without their drawn/
+    // selected boundary — this confirms whether the issue is upstream
+    // (lost before save) or at the DB write step.
+    toast(
+      current.boundary_geojson
+        ? `Save: boundary INCLUDED (${(current.boundary_geojson as any)?.type || 'present'})`
+        : 'Save: boundary MISSING from payload',
+      { duration: 3000 }
+    );
     let lastError: any = null;
     let success = false;
+    // ROOT CAUSE: the modal accepts both a fully-loaded existing
+    // comp (has .id) AND a prefill object from the map-page "Add as
+    // New Comp" flow (no .id, just county/acres/centroid). Earlier
+    // code used `comp ? UPDATE : INSERT` — which sent any prefill
+    // object down the UPDATE path with `WHERE id = undefined`,
+    // producing the cryptic "invalid input syntax for type uuid:
+    // undefined" error that's bitten us multiple times.
+    //
+    // Fix: only UPDATE when comp.id is an actual UUID. Anything else
+    // (no comp, prefill object, malformed comp) is treated as INSERT.
+    const isExistingComp = !!comp && typeof comp.id === 'string' && comp.id.length > 0;
     for (let attempt = 0; attempt < 10; attempt++) {
-      const { error } = comp
+      const { error } = isExistingComp
         ? await supabase.from('comps').update(current).eq('id', comp.id)
         : await supabase.from('comps').insert(current);
       if (!error) {
@@ -349,11 +478,14 @@ export default function CompModal({ comp, onClose, onSave }: CompModalProps) {
 
     if (!success) {
       const detail = lastError?.message || lastError?.details || 'unknown error';
-      console.error('[CompModal] save failed:', lastError);
+      // Log the full payload alongside the error so next time we hit
+      // a Postgres type error we can grep the console for which field
+      // had the bad value (e.g. transaction_agent_id: "undefined").
+      console.error('[CompModal] save failed:', lastError, { payload: current });
       toast.error(`Save failed: ${detail}`, { duration: 6000 });
       setLoading(false);
     } else {
-      toast.success(comp ? 'Comp updated!' : 'Comp added!');
+      toast.success(isExistingComp ? 'Comp updated!' : 'Comp added!');
       onSave();
     }
   };

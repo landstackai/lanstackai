@@ -98,10 +98,51 @@ export function buildPdfData(input: BuildPdfDataInput): CmaPdfData {
   };
 
   // 5. Mapbox URLs
-  const compCoords = comps.map((c: any) => ({
-    latitude: c.latitude != null ? Number(c.latitude) : null,
-    longitude: c.longitude != null ? Number(c.longitude) : null,
-  }));
+  // Compute lat/lng for each comp with a boundary-centroid fallback: if
+  // c.latitude is null but c.boundary_geojson exists, derive the centroid
+  // from the polygon and use it as the pin position. This matches what
+  // the broker sees on the interactive workspace map (which uses boundary
+  // overlays for these comps even when the lat/lng columns are blank).
+  // Without this fallback, comps imported without geocoding came back
+  // missing from the PDF Sales Location Map even though they showed in
+  // the workspace.
+  const centroidOf = (geojson: any): { lat: number; lng: number } | null => {
+    try {
+      const geom = geojson?.type === 'Feature' ? geojson.geometry : geojson;
+      if (!geom || (geom.type !== 'Polygon' && geom.type !== 'MultiPolygon')) return null;
+      // Flatten coordinates to a list of [lng, lat] pairs and average them.
+      // Simple polygon-vertex average is good enough for a static-map pin
+      // (we're not computing area-weighted centroid).
+      const points: Array<[number, number]> = [];
+      const collect = (arr: any) => {
+        if (!Array.isArray(arr)) return;
+        if (arr.length === 2 && typeof arr[0] === 'number' && typeof arr[1] === 'number') {
+          points.push([arr[0], arr[1]]);
+        } else {
+          arr.forEach(collect);
+        }
+      };
+      collect(geom.coordinates);
+      if (points.length === 0) return null;
+      const sumLng = points.reduce((s, p) => s + p[0], 0);
+      const sumLat = points.reduce((s, p) => s + p[1], 0);
+      return { lng: sumLng / points.length, lat: sumLat / points.length };
+    } catch {
+      return null;
+    }
+  };
+  const compCoords = comps.map((c: any) => {
+    let lat = c.latitude != null ? Number(c.latitude) : null;
+    let lng = c.longitude != null ? Number(c.longitude) : null;
+    if ((lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) && c.boundary_geojson) {
+      const centroid = centroidOf(c.boundary_geojson);
+      if (centroid) {
+        lat = centroid.lat;
+        lng = centroid.lng;
+      }
+    }
+    return { latitude: lat, longitude: lng };
+  });
   const subject_aerial_url = buildCoverAerial(subject);
   const comp_map_url = buildCompMapUrl(subject, compCoords);
 

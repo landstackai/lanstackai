@@ -43,6 +43,22 @@ function normalize(w: string): string {
 }
 
 /**
+ * Is this "word" a real word? Filters out tokens that contain no
+ * alphanumeric character (like "&", "/", "—") so they don't get
+ * picked up as part of an abbreviation.
+ *
+ * Real bug this catches: "Schwartz & Ralston Investments, LLC" tokenizes
+ * to ["Schwartz", "&", "Ralston", "Investments,", "LLC"]. The entity-
+ * path picker would grab the first 2 ("Schwartz", "&") and produce
+ * "Schwartz &" as a search chip — useless and looks broken to the
+ * broker. After this filter the picker correctly skips "&" and grabs
+ * the next real word, producing "Schwartz Ralston".
+ */
+function isRealWord(w: string): boolean {
+  return /[a-z0-9]/i.test(w);
+}
+
+/**
  * Abbreviate an owner name into a search-friendly term.
  *
  * Person names (no entity keyword, 1–4 words) → return surname
@@ -65,7 +81,11 @@ export function abbreviateOwner(rawName: string | null | undefined): string | nu
   const trimmed = rawName.trim();
   if (!trimmed) return null;
 
-  const words = trimmed.split(/\s+/).filter(Boolean);
+  // Drop pure-punctuation tokens like "&" before any picker logic runs.
+  // Without this, "Schwartz & Ralston Investments LLC" would
+  // abbreviate to "Schwartz &" because the entity picker grabs the
+  // first two words and "&" counts as a word here.
+  const words = trimmed.split(/\s+/).filter((w) => Boolean(w) && isRealWord(w));
   if (words.length === 0) return null;
   if (words.length === 1) return words[0];
 

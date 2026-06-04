@@ -27,6 +27,26 @@
   box-sizing: border-box;
 }
 
+/* Global rule: never hyphenate words mid-character anywhere in the app.
+   Default browser hyphens is 'manual' (only at &shy;) but some Tailwind
+   prose plugins / utility classes can flip it to 'auto', which produces
+   ugly mid-word breaks on long property names like 'BORGELT, ROGER W &
+   CYN-THIA'. Forcing 'manual' app-wide means a long word that doesn't
+   fit wraps as a whole to the next line — never split with a hyphen.
+
+   overflow-wrap: break-word is kept as a fallback for truly oversized
+   single tokens (URLs, no-space owner strings) so they don't blow out
+   container widths — but they still won't get a visible hyphen. This
+   mirrors the rule applied to the PDF via Font.registerHyphenationCallback
+   in src/lib/pdf/theme.ts so brokers see the same typography behavior
+   across every Landstack surface. */
+* {
+  hyphens: manual !important;
+  -webkit-hyphens: manual !important;
+  -ms-hyphens: manual !important;
+  overflow-wrap: break-word;
+}
+
 html, body {
   height: 100%;
   background: var(--night);

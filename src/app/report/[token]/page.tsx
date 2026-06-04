@@ -590,9 +590,26 @@ export default function ClientReport({ params }: ClientReportProps) {
             const usingLandOnly = hasAnyAdjustedComp && landOnly.length > 0;
 
             // Active range = land-only when adjustments exist, else all-in.
-            const rngLow = usingLandOnly ? lLow : aLow;
-            const rngMid = usingLandOnly ? lMid : aMid;
-            const rngHigh = usingLandOnly ? lHigh : aHigh;
+            //
+            // Broker override (migration 035): if the broker explicitly set
+            // opinion_range_low_total / opinion_range_high_total on the CMA
+            // (via the Range-mode input pair in the workspace), those values
+            // win — both for display in Range mode and for the per-acre
+            // derivation (total ÷ subject acres). NULL on either column
+            // falls back to the comp-derived range. Self-healing on missing
+            // migration: column reads as undefined, treated as null.
+            const compRngLow = usingLandOnly ? lLow : aLow;
+            const compRngMid = usingLandOnly ? lMid : aMid;
+            const compRngHigh = usingLandOnly ? lHigh : aHigh;
+            const brokerRangeLowTotal = Number((cma as any).opinion_range_low_total) || 0;
+            const brokerRangeHighTotal = Number((cma as any).opinion_range_high_total) || 0;
+            const rngLow = brokerRangeLowTotal > 0 && subjAcres > 0
+              ? brokerRangeLowTotal / subjAcres
+              : compRngLow;
+            const rngHigh = brokerRangeHighTotal > 0 && subjAcres > 0
+              ? brokerRangeHighTotal / subjAcres
+              : compRngHigh;
+            const rngMid = (rngLow + rngHigh) / 2 || compRngMid;
 
             // Compute the total broker opinion + components
             const opinionLand = Number.isFinite(landNum) && landNum > 0 ? landNum : 0;
@@ -617,12 +634,38 @@ export default function ClientReport({ params }: ClientReportProps) {
             const hasHouseItemization = houseValue > 0 || additionalVerticalVal > 0;
 
             const computedPpa = usingLandOnly ? lMid : aMid;
-            const suggestedValue = isBreakdown
+            // BOV (Opinion of Value) — broker's professional estimate of
+            // current market value. Either lump sum or breakdown total.
+            const opinionOfValue = isBreakdown
               ? opinionBreakdownTotal
               : isLumpSum
               ? opinionLumpSum
+              : 0;
+            // Suggested List Price — broker's override saved on the CMA.
+            // Stored in cmas.suggested_list_price (migration 030); the
+            // workspace card defaults this to OOV × cushion but only writes
+            // the column if the broker explicitly typed a value.
+            const suggestedListRaw = (cma as any).suggested_list_price;
+            const suggestedListPrice = Number(suggestedListRaw) > 0 ? Number(suggestedListRaw) : 0;
+
+            // Headline value: which number leads the report?
+            //   Both OOV + List filled → List price headlines, OOV is supporting
+            //   Only List filled       → List price headlines
+            //   Only OOV filled        → OOV headlines (legacy behavior)
+            //   Neither filled         → comp-derived fallback (legacy behavior)
+            const headlineKind: 'list' | 'opinion' | 'computed' =
+              suggestedListPrice > 0 ? 'list'
+              : opinionOfValue > 0   ? 'opinion'
+              : 'computed';
+            const suggestedValue =
+              headlineKind === 'list'     ? suggestedListPrice
+              : headlineKind === 'opinion' ? opinionOfValue
               : computedPpa * subjAcres;
             const suggestedPpa = subjAcres > 0 ? suggestedValue / subjAcres : computedPpa;
+            // Supporting OOV line — shown UNDER the headline when the
+            // headline is the Suggested List Price AND OOV exists. Defends
+            // the cushion: "list at $5.13M · opinion of value $4.67M".
+            const supportingOpinionOfValue = headlineKind === 'list' && opinionOfValue > 0 ? opinionOfValue : 0;
 
             // Marker position on the range bar (0–100%).
             const markerPct =
@@ -668,33 +711,104 @@ export default function ClientReport({ params }: ClientReportProps) {
 
             return (
               <>
-                {/* ============ SECTION 1 — YOUR PROPERTY (mirrors broker SUBJECT card) ============
-                    Warm brick red dot + label matches the subject pin on the
-                    map. Calm white card on cream, vault-style restraint —
-                    color identity comes from the small red dot, not a tinted
-                    background. */}
-                <div className="p-4 border-b border-beige space-y-3">
-                  <div className="bg-white border border-beige rounded-xl p-3 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
-                    </div>
-                    {/* Subject name pretty-printed so the report doesn't
-                        look like a CAD parcel printout when the source
-                        record is ALL CAPS ("CARAWAY PARTNERS LTD"). */}
-                    <p className="text-sm font-semibold text-ink">{properCase(cma.subject_name)}</p>
-                    <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
-                      <MapPin size={10} className="text-ink-3" />
-                      {properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}
-                    </p>
-                  </div>
+                {/* ============ SECTION 1 — STICKY SUBJECT + HEADLINE PRICE ============
+                    Sticky at the top of the scrolling report so the
+                    seller / buyer never loses sight of WHICH PROPERTY
+                    and WHAT NUMBER they're reading about, no matter how
+                    far they scroll into the comps. The headline number
+                    on the right shifts based on what's filled out:
+                      • Discuss mode → "Let's discuss"
+                      • Range mode   → "$X–$Y"
+                      • Otherwise    → Opinion of Value (suggested $)
+                    Falls back to subject-only display if no valuation
+                    is set yet (showPrice gate). */}
+                <div className="sticky top-0 z-20 bg-cream border-b border-beige p-4">
+                  <div className="bg-white border border-beige rounded-xl p-3">
+                    {(() => {
+                      // Inline presentation flags so this section can show
+                      // the appropriate headline price without depending on
+                      // Section 4's later computation. Duplicates the logic
+                      // at line ~774 — kept local to avoid hoisting state
+                      // that might affect Section 4's existing render.
+                      const presentation = ((cma as any).opinion_presentation as 'confirmed' | 'range' | 'discuss' | null) || 'confirmed';
+                      const isDiscuss = presentation === 'discuss';
+                      const isRange = presentation === 'range';
+                      const rangeLowDollar = rngLow * subjAcres;
+                      const rangeHighDollar = rngHigh * subjAcres;
+                      const showPrice =
+                        isDiscuss
+                        || (isRange && rngHigh > rngLow && subjAcres > 0)
+                        || suggestedValue > 0;
 
-                  {/* Download Marketing PDF — the client can grab the
-                      printable six-page CMA. Gold accent matches the
-                      PDF's brand palette so the visual handshake feels
-                      intentional when they open the file. Same content
-                      as the broker's PDF, minus the broker's
-                      email/phone (anon profiles RLS). */}
+                      return (
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-1 min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#C8503F', boxShadow: '0 0 0 3px rgba(200,80,63,0.20)' }} />
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Your Property</p>
+                            </div>
+                            {/* Subject name pretty-printed so the report doesn't
+                                look like a CAD parcel printout when the source
+                                record is ALL CAPS ("CARAWAY PARTNERS LTD"). */}
+                            <p className="text-sm font-semibold text-ink truncate">{properCase(cma.subject_name)}</p>
+                            <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1">
+                              <MapPin size={10} className="text-ink-3 flex-shrink-0" />
+                              <span className="truncate">{properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(subjAcres)}</span>
+                            </p>
+                          </div>
+                          {showPrice && (
+                            <div className="text-right flex-shrink-0 max-w-[10rem]">
+                              <p className="text-[9px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                                {isDiscuss
+                                  ? 'Valuation'
+                                  : isRange
+                                  ? 'Range'
+                                  : headlineKind === 'list'
+                                  ? 'Suggested List'
+                                  : 'Opinion of Value'}
+                              </p>
+                              {isDiscuss ? (
+                                <p className="text-sm font-semibold text-ink italic font-mono leading-tight mt-0.5">
+                                  Let&apos;s discuss
+                                </p>
+                              ) : isRange ? (
+                                <>
+                                  <p className="text-sm font-semibold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                    {formatCurrency(rangeLowDollar)}–{formatCurrency(rangeHighDollar)}
+                                  </p>
+                                  {subjAcres > 0 && (
+                                    <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                      {formatPPA(rngLow)}–{formatPPA(rngHigh)}
+                                    </p>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-base font-bold text-olive-2 font-mono tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                                    {formatCurrency(suggestedValue)}
+                                  </p>
+                                  {subjAcres > 0 && (
+                                    <p className="text-[10px] text-ink-3 font-mono tabular-nums whitespace-nowrap">
+                                      {formatPPA(suggestedPpa)}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Download Marketing PDF — moved OUT of the sticky strip
+                    so the sticky region stays compact. The button still
+                    sits right under the subject card on initial scroll,
+                    so the client encounters it immediately. Gold accent
+                    matches the PDF's brand palette so the visual
+                    handshake feels intentional when they open the file. */}
+                <div className="p-4 border-b border-beige">
                   <button
                     onClick={downloadMarketingPdf}
                     disabled={pdfDownloading}
@@ -788,8 +902,21 @@ export default function ClientReport({ params }: ClientReportProps) {
                       lead with their professional opinion of value;
                       list-price strategy is a separate conversation. */}
                   <div className="mx-4 mb-4 p-5 rounded-2xl bg-white border border-beige shadow-sm">
+                    {/* Headline label adapts to what's filled out:
+                          • Suggested List Price entered  → "Suggested List Price"
+                          • Only OOV entered              → "Opinion of Value"
+                          • Range / Discuss mode          → "Valuation" / "Range" (existing)
+                        The label tells the client EXACTLY what number
+                        they're looking at, so the cushion / negotiation
+                        room isn't a hidden assumption. */}
                     <p className="text-[10px] font-medium text-ink-2 uppercase tracking-[0.18em] mb-2">
-                      Opinion of Value
+                      {isDiscussMode
+                        ? 'Valuation'
+                        : isRangeMode
+                        ? 'Range'
+                        : headlineKind === 'list'
+                        ? 'Suggested List Price'
+                        : 'Opinion of Value'}
                     </p>
 
                     {isDiscussMode ? (
@@ -892,7 +1019,12 @@ export default function ClientReport({ params }: ClientReportProps) {
                         </div>
                       </div>
                     ) : (
-                      // Single number — either broker's lump sum or computed from averages
+                      // Single number — Suggested List Price OR Opinion of
+                      // Value OR comp-derived (in that priority order). When
+                      // the headline is the List Price AND the broker also
+                      // entered an OOV, the OOV appears as a supporting line
+                      // below — "list at $5.13M · opinion of value $4.67M" —
+                      // so the negotiation cushion is visible, not hidden.
                       <>
                         <p className="text-3xl font-semibold text-olive-2 font-mono tabular-nums leading-none">
                           {formatCurrency(suggestedValue)}
@@ -900,6 +1032,15 @@ export default function ClientReport({ params }: ClientReportProps) {
                         <p className="text-[11px] text-ink-2 font-mono tabular-nums mt-1.5">
                           {formatPPA(suggestedPpa)} × {formatAcres(subjAcres)}
                         </p>
+                        {supportingOpinionOfValue > 0 && (
+                          <p className="text-[11px] text-ink-2 mt-2 leading-relaxed">
+                            <span className="text-ink-3">Opinion of Value:</span>{' '}
+                            <span className="font-mono font-semibold text-ink tabular-nums">{formatCurrency(supportingOpinionOfValue)}</span>
+                            {subjAcres > 0 && (
+                              <> <span className="text-ink-3">·</span> <span className="font-mono tabular-nums">{formatPPA(supportingOpinionOfValue / subjAcres)}</span></>
+                            )}
+                          </p>
+                        )}
                       </>
                     )}
 

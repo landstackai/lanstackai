@@ -47,12 +47,22 @@ export function CompMapPage({ data }: { data: CmaPdfData }) {
         }}
       >
         {mapUrl ? (
+          // objectFit: 'contain' — the Mapbox image is 1200x900 (4:3),
+          // the PDF container is more square-ish. With 'cover' (the
+          // previous setting), react-pdf scaled to fill and CROPPED the
+          // sides, clipping any pins near the east/west edges of the
+          // satellite view. Brokers reported PDFs missing the comps at
+          // the bounding-box extremes even when the Mapbox URL had all
+          // pins. 'contain' fits the entire image inside the container
+          // (letterboxed top/bottom if needed) so every pin Mapbox
+          // rendered is visible. Tiny vertical margin loss is a fair
+          // trade for never silently losing comps.
           <Image
             src={mapUrl}
             style={{
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: 'contain',
             }}
           />
         ) : (
