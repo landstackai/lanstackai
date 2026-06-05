@@ -858,7 +858,36 @@ function attachAerialsToComps(
   // its cite-the-source citations. Each citation looks like
   // "page 2 · transaction data · 'Sale Price' row" — we count which
   // page each comp's citations reference most and pick that page's
-  // aerial. Falls back to index alignment when citations have no page.
+  // aerial.
+  //
+  // ⚠️ NO-REUSE CONSTRAINT (critical correctness invariant):
+  // Each aerial page can be assigned to AT MOST ONE comp. This kills
+  // the New Braunfels-class failure mode where multiple comps' chunked
+  // extractions had citations converging on the same page and all
+  // ended up with the same thumbnail. The bug isn't about boundary
+  // detection — it's that two comps were ever allowed to claim the
+  // same page in the first place.
+  //
+  // We ALSO removed the index-alignment fallback (`sourceAerial[i]`)
+  // that the previous version used as last resort. That fallback was
+  // an active source of cross-attribution: when citation-derived pages
+  // couldn't resolve, it would assign by array order — meaning
+  // comp 3 (the 3rd extracted) would silently get the 3rd aerial in
+  // input order, with zero correlation to the actual document
+  // structure. Better to leave a comp with NO aerial than the WRONG
+  // aerial — brokers can't trust a thumbnail they can't trust.
+  //
+  // Algorithm:
+  //   1. For each comp (in input order), compute citation-page hits.
+  //   2. Build candidate pages: dominant page first, then the
+  //      lead-page heuristic (odd-page before even-page), then all
+  //      other cited pages as widening fallback.
+  //   3. Walk candidates; claim the first UNCLAIMED aerial whose page
+  //      matches.
+  //   4. If every candidate is claimed or absent → comp gets no
+  //      aerial (no fallback to unrelated pages, no index alignment).
+  const claimed = new Set<number>(); // aerial page numbers already used
+
   for (let i = 0; i < comps.length; i++) {
     const c = comps[i];
     const citations: string[] = [
@@ -888,30 +917,47 @@ function attachAerialsToComps(
       }
     }
 
-    // Heuristic for TX appraisal PDFs: aerials usually sit on the LEAD
-    // page of a 2-page comp (page 1 of "Land Sale 1" pair, page 3 of
-    // "Land Sale 2" pair). When the dominant citation page comes back
-    // even-numbered, also try the prior odd page — that's almost always
-    // where the aerial lives in this format.
+    // Build candidate pages in priority order:
+    //   1. Dominant citation page
+    //   2. Lead-page heuristic (for 2-page comps, the aerial often lives
+    //      on the odd page — page 1 of "comp pair 1-2", page 3 of "comp
+    //      pair 3-4"). When dominant is even, try prior odd; when odd,
+    //      try next even.
+    //   3. All other pages mentioned in citations (widens net when
+    //      dominant page's aerial is already claimed by an earlier comp).
     const candidatePages: number[] = [];
     if (dominantPage != null) {
       candidatePages.push(dominantPage);
       if (dominantPage % 2 === 0) candidatePages.push(dominantPage - 1);
       else candidatePages.push(dominantPage + 1);
     }
-    let aerial = null as { page: number; dataUrl: string } | null;
+    for (const pg of Object.keys(pageHits).map(Number)) {
+      if (!candidatePages.includes(pg)) candidatePages.push(pg);
+    }
+
+    // Walk candidates in priority order. First unclaimed match wins.
+    let aerial: { page: number; dataUrl: string } | null = null;
     for (const pg of candidatePages) {
+      if (claimed.has(pg)) continue;
       const hit = sourceAerial.find((a) => a.page === pg);
       if (hit) { aerial = hit; break; }
     }
-    // Final fallback: index alignment (comp 0 → first aerial, etc.).
-    if (!aerial) aerial = sourceAerial[i] || null;
 
     if (aerial) {
       c.aerialImage = aerial.dataUrl;
+      claimed.add(aerial.page);
       attached += 1;
+      console.log(
+        `[aerial] comp ${i + 1} (${c.property_name || c._boundary_label || 'unnamed'}) ` +
+        `→ page ${aerial.page} (dominant ${dominantPage ?? 'n/a'})`
+      );
     } else {
       missed += 1;
+      console.log(
+        `[aerial] comp ${i + 1} (${c.property_name || c._boundary_label || 'unnamed'}) ` +
+        `→ NO aerial (candidates ${candidatePages.join(',') || 'none'}, ` +
+        `all already claimed or missing). Comp will save without a thumbnail.`
+      );
     }
   }
   return { attached, missed };
