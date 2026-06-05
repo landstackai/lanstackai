@@ -10,6 +10,10 @@ import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { detectCompBoundaries, type CompMap } from '@/lib/utils/pdfBoundaryDetection';
 import { sanitizeExtractedBatch } from '@/lib/utils/extractionSanity';
+import {
+  uploadSourceDocument,
+  attachSourceDocumentToComps,
+} from '@/lib/utils/compDocuments';
 import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
@@ -1837,6 +1841,50 @@ export default function ImportPage() {
       await autoSaveExtracted(allComps);
     }
 
+    // ─── Phase 2c source-document attachment (boundary path) ─────────
+    // Upload the source PDF once and write one comp_documents row per
+    // saved comp pointing back at the upload + its page range. Runs
+    // AFTER autoSaveExtracted so we have the inserted comp UUIDs.
+    // Boundary path always knows per-comp page ranges (compMap.comps[i].pages)
+    // and the doc is by definition appraisal-shaped (that's what
+    // boundary detection fires on).
+    //
+    // Fail-soft: if upload or attach fails (missing bucket, RLS, env
+    // var miss), we log and continue. Comps still saved; only the
+    // provenance link is missing — not a blocker for the broker.
+    if (allComps.length > 0) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const saved = allComps.filter((c) => (c as any)._savedId);
+          if (saved.length > 0) {
+            const upload = await uploadSourceDocument({ file, userId: user.id });
+            if (upload) {
+              const pageRangeByCompId: Record<string, { start: number; end: number } | null> = {};
+              for (const c of saved) {
+                const pages: number[] = (c as any)._boundary_pages || [];
+                if (pages.length > 0) {
+                  pageRangeByCompId[(c as any)._savedId] = {
+                    start: pages[0],
+                    end: pages[pages.length - 1],
+                  };
+                }
+              }
+              await attachSourceDocumentToComps({
+                compIds: saved.map((c) => (c as any)._savedId),
+                upload,
+                pageRangeByCompId,
+                docType: 'appraisal',
+                userId: user.id,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[boundary] source-document attach failed:', e);
+      }
+    }
+
     const perCompBreakdown = compMap.comps.map((c, i) =>
       `${c.label}: ${perCompCounts[i] || 0}`
     ).join(' · ');
@@ -2196,6 +2244,36 @@ export default function ImportPage() {
     // buttons on each card handle the cleanup paths.
     if (dedupedComps.length > 0) {
       await autoSaveExtracted(dedupedComps);
+    }
+
+    // ─── Phase 2c source-document attachment (chunked path) ──────────
+    // Mirror of the boundary path's hook, with two differences:
+    //   • Page range is null per comp — chunked extraction can't
+    //     reliably say which pages each comp came from once dedupe
+    //     has merged near-duplicates across overlapping chunks.
+    //   • doc_type is null (unclassified). A future classifier in
+    //     Phase 2c.1 can backfill these rows by reading the PDF text.
+    if (dedupedComps.length > 0) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const saved = dedupedComps.filter((c) => (c as any)._savedId);
+          if (saved.length > 0) {
+            const upload = await uploadSourceDocument({ file, userId: user.id });
+            if (upload) {
+              await attachSourceDocumentToComps({
+                compIds: saved.map((c) => (c as any)._savedId),
+                upload,
+                pageRangeByCompId: undefined,
+                docType: null,
+                userId: user.id,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[chunked] source-document attach failed:', e);
+      }
     }
 
     const summary = dedupedComps.length === 0
