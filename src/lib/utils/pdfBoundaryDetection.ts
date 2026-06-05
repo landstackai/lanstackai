@@ -12,8 +12,9 @@
 //
 // This module pulls the structure-detection job OUT of the AI. We scan
 // every page's text for boundary markers (visual structure that's
-// consistent across Texas appraisal formats) and build a deterministic
-// page → comp mapping BEFORE any AI call.
+// consistent across US land-appraisal formats — the regex patterns
+// below are appraisal-industry standard, not state-specific) and build
+// a deterministic page → comp mapping BEFORE any AI call.
 //
 // Once we know exactly which pages belong to which comp, the downstream
 // AI extraction can focus on a single job (extract this comp's fields
@@ -83,7 +84,8 @@ export interface CompMap {
 }
 
 // Boundary markers in priority order. Each entry describes a pattern that
-// commonly heads a comp's first page in Texas land appraisals. Matched
+// commonly heads a comp's first page in US land-appraisal reports
+// (terminology is industry-standard across states). Matched
 // case-insensitively. The patterns are intentionally narrow — we'd rather
 // MISS a boundary (fall back to AI) than HALLUCINATE one (split a single
 // comp across multiple).
