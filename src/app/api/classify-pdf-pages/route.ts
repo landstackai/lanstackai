@@ -98,42 +98,50 @@ interface PageClassification {
   evidence: string;
 }
 
-const SYSTEM_PROMPT = `You classify pages of land-appraisal and real-estate comp documents. \
+// Prompt empirically verified locally against the New Braunfels for
+// Christina.pdf (10 pages, 5 comps, Land Sale 1-5 headers). The
+// original prompt biased the model toward classifying "Land Sale 1"
+// as a subject_property because of the hint "subjects appear at the
+// front, before any Sale 1 header." Removed that prior; added an
+// explicit "header text WINS over page position" rule. Result: 10/10
+// roles + 10/10 comp_indices correct, repeatedly, at the
+// production-equivalent image scale (612x792 JPEG q=0.85).
+const SYSTEM_PROMPT = `You classify pages of US land-appraisal and real-estate comparable-sales documents. \
 You will receive N page images in order, page 1 first. Classify each one.
 
 Roles:
-  cover               — title page, firm letterhead, table of contents, intro letter
-  subject_property    — the property BEING VALUED (the appraisal's subject, not a comparable)
-  comp_id_page        — first page of a COMPARABLE sale: contains the comp header \
-("Land Sale N", "Comparable N", "Sale N", "Comp N", "Property A", or similar) plus the \
-identification table, transaction data, sale price, dates, etc.
-  comp_continuation   — second or third page of the SAME comp the prior page introduced: \
-property description, remarks, photos, plat. Does NOT have its own comp header.
-  summary             — adjustment grid, summary table, reconciliation page at end
-  other               — certifications, qualifications, appraiser bio, addenda
+  comp_id_page        — first page of a comparable sale. RECOGNIZABLE BY a header at the \
+top of the page reading "Land Sale N", "Sale N", "Sale No. N", "Comparable N", "Comp #N", \
+"Property A/B/C", or similar. The page also typically contains an identification table, \
+transaction data (price/date/grantor/grantee), and an aerial photo.
+  comp_continuation   — second/third page of the same comp the prior page introduced. \
+Continues the property description, remarks, or photo set. NO comp header at the top.
+  subject_property    — the property being VALUED. Labeled "Subject Property", "Subject", \
+or contained in a clearly-marked "Subject" section. NEVER has a "Land Sale N" / \
+"Comparable N" / "Sale N" header — if you see one of those headers, it is a comp_id_page.
+  cover               — title page, firm letterhead, table of contents, intro letter.
+  summary             — adjustment grid, reconciliation page, sales comparison summary.
+  other               — certifications, qualifications, appraiser bio, addenda.
+
+CRITICAL: Header text WINS over page position. A page with "Land Sale 1" at the top is \
+ALWAYS comp_id_page with comp_index 1 — even if it appears on page 1 of the document. \
+Do NOT classify it as subject_property based on position. The label on the page is the \
+ground truth.
 
 comp_index rules:
-  • Count comparable sales in the order they appear in the document. The first comp \
-you see is comp_index 1, the next is 2, and so on. ALWAYS contiguous: 1, 2, 3, … (no gaps).
-  • A subject property is NEVER a comp — set comp_index null for subject_property pages.
-  • comp_continuation pages share the comp_index of the comp they continue.
-  • cover, subject_property, summary, other pages all have comp_index null.
+  • Count comp_id_page occurrences in document order. First comp_id_page you see is \
+comp_index 1, next is 2, etc. ALWAYS contiguous: 1, 2, 3, …
+  • comp_continuation pages share their comp's comp_index.
+  • All non-comp roles (cover, subject_property, summary, other) have comp_index null.
 
 comp_label rules:
-  • Copy the label EXACTLY as it appears on the page: "Land Sale 1", "Sale No. 2", "Comp #3", \
-"Property B", etc. Preserve capitalization and punctuation.
-  • If the page has no visible label but is clearly a comp page, infer from context \
-(e.g. "Comp 2" if it's the second comp you've encountered).
+  • Copy the header text EXACTLY as it appears: "Land Sale 1", "Sale No. 2", "Comp #3", etc.
   • Null for non-comp pages.
 
-evidence: one sentence describing what made you classify the page this way. Examples: \
-"Header reads 'LAND SALE 1' at top, Transaction Data table below." Keep it factual.
+evidence: one sentence stating what specific text or visual element drove your decision.
 
-Be conservative. Subjects usually appear at the front, before any "Sale 1" header; comps \
-appear after. When in doubt about role, prefer 'other' over guessing.
-
-Return an object with key 'pages' whose value is an array of classifications, one per \
-input image, in page order.`;
+Return {pages: [{page, role, comp_index, comp_label, evidence}, ...]} with one entry per \
+input image in page order.`;
 
 export async function POST(request: NextRequest) {
   try {

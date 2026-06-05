@@ -34,3 +34,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local test renders (used by scripts/test-vision-*.mjs — do not commit)
+.test-render/
+.test-render-small/
+.test-render-mid/
+.test-render-fix/
+.test-render-png10/

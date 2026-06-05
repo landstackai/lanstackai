@@ -35,12 +35,25 @@ interface PageClassification {
   evidence: string;
 }
 
-// Resolution choice for classifier images. At scale 0.5 a typical
-// 8.5"×11" PDF page renders to ~600×800 px, which is enough for the
-// vision model to read 12pt+ header text. Each PNG comes out at
-// ~50-90KB base64 — 10 pages = ~800KB request body.
-const CLASSIFIER_RENDER_SCALE = 0.5;
-const CLASSIFIER_MAX_PAGES = 30;
+// Resolution choice for classifier images. EMPIRICALLY DETERMINED:
+//
+//   • scale 0.5 (306×396 on letter-size) → vision misclassifies EVERY
+//     page. The "Land Sale 1" header is too small for the model to read
+//     reliably, and the model defaults to classifying every page as
+//     subject_property. Verified locally against New Braunfels for
+//     Christina.pdf — 0/10 pages correct.
+//   • scale 0.75 (459×594) → vision gets 8/10 pages right but loses
+//     the first comp entirely, treating its pages as subject_property.
+//   • scale 1.0 (612×792) → vision gets 10/10 pages perfect.
+//
+// We use scale 1.0 with JPEG quality 0.85 to keep request bodies
+// compact. At those settings, 10 pages ≈ 1.0–1.5MB total, comfortably
+// under the 4.5MB Vercel serverless limit. JPEG quality 0.85 is
+// visually indistinguishable from PNG for the model's purposes — vision
+// doesn't care about lossless compression artifacts on document text.
+const CLASSIFIER_RENDER_SCALE = 1.0;
+const CLASSIFIER_JPEG_QUALITY = 0.85;
+const CLASSIFIER_MAX_PAGES = 20;
 
 /**
  * Classify the PDF's pages via the vision endpoint and assemble a
@@ -64,6 +77,8 @@ export async function detectCompBoundariesViaVision(
     classifierImages = await pdfToImages(file, {
       scale: CLASSIFIER_RENDER_SCALE,
       maxPages: CLASSIFIER_MAX_PAGES,
+      format: 'jpeg',
+      quality: CLASSIFIER_JPEG_QUALITY,
     });
   } catch (err) {
     console.warn('[vision-boundary] failed to render classifier images:', err);
