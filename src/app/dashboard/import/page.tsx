@@ -9,6 +9,7 @@ import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { detectCompBoundaries, type CompMap } from '@/lib/utils/pdfBoundaryDetection';
+import { sanitizeExtractedBatch } from '@/lib/utils/extractionSanity';
 import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
@@ -1751,10 +1752,31 @@ export default function ImportPage() {
       `got thumbnails (${aerialsPerPage.length} aerials across ${images.length} pages)`
     );
 
+    // ─── Phase 2a sanity layer (runs BEFORE auto-locate) ─────────────
+    // Catches AI-hallucinated coords (out-of-Texas bbox), math mismatches
+    // between acres × PPA and sale_price, future-dated sales, and
+    // required-field gaps. Nulls out clearly-bad lat/lng so auto-locate
+    // takes over. Flags everything else for review (Phase 3 will surface
+    // the warnings in the UI; today they live in console + _sanity_warnings).
+    {
+      const sanityResult = sanitizeExtractedBatch(allComps);
+      console.log(
+        `[boundary] sanity: ${allComps.length} comps checked, ` +
+        `${sanityResult.totalWarnings} warnings, ${sanityResult.errorCount} errors`
+      );
+      // Mutate the array in place (we want the sanitized values to flow
+      // through the rest of the pipeline).
+      for (let i = 0; i < sanityResult.comps.length; i++) {
+        allComps[i] = sanityResult.comps[i];
+      }
+    }
+
     // ─── Browser auto-locate (skip if AI extracted explicit coords) ──
     // Same pattern as the chunked path. The new extraction rules tell the
     // AI to always pull "Geographic Location" lat/lng when present, so
     // most comps from appraisal-style PDFs land here with coords already.
+    // Sanity layer above will have nulled coords if they were outside TX
+    // — those comps fall through to the locator chain here.
     for (let i = 0; i < allComps.length; i++) {
       const c = allComps[i];
       if (c.latitude != null && c.longitude != null) {
@@ -1776,6 +1798,15 @@ export default function ImportPage() {
       } catch (e) {
         console.error(`[boundary] autoLocate failed for ${c.property_name}:`, e);
       }
+    }
+
+    // ─── Path telemetry ──────────────────────────────────────────────
+    // Tag every comp with which extraction path produced it. Useful for
+    // A/B comparing accuracy between the boundary-aware and legacy
+    // chunked paths over real broker usage. The field is transient
+    // (underscore-prefixed) so it never lands in the DB.
+    for (const c of allComps) {
+      (c as any)._extraction_path = 'boundary';
     }
 
     // Dedupe against existing vault comps (same helper as chunked path).
@@ -2068,6 +2099,21 @@ export default function ImportPage() {
       }
     }
 
+    // ─── Phase 2a sanity layer (runs BEFORE auto-locate) ─────────────
+    // Same checks as the boundary path: out-of-Texas lat/lng nulled,
+    // math gates flag drift, required fields tagged. See
+    // src/lib/utils/extractionSanity.ts for the full rule set.
+    {
+      const sanityResult = sanitizeExtractedBatch(dedupedComps);
+      console.log(
+        `[chunked] sanity: ${dedupedComps.length} comps checked, ` +
+        `${sanityResult.totalWarnings} warnings, ${sanityResult.errorCount} errors`
+      );
+      for (let i = 0; i < sanityResult.comps.length; i++) {
+        dedupedComps[i] = sanityResult.comps[i];
+      }
+    }
+
     // Run browser auto-locate for each unique comp (overrides any AI-guessed
     // coords for comps that don't have explicit "Geographic Location" fields).
     for (let i = 0; i < dedupedComps.length; i++) {
@@ -2094,6 +2140,15 @@ export default function ImportPage() {
       } catch (e) {
         console.error(`[chunked] autoLocate failed for ${c.property_name}:`, e);
       }
+    }
+
+    // ─── Path telemetry ──────────────────────────────────────────────
+    // Tag every comp with which extraction path produced it. Useful for
+    // A/B comparing accuracy between the boundary-aware and legacy
+    // chunked paths over real broker usage. The field is transient
+    // (underscore-prefixed) so it never lands in the DB.
+    for (const c of dedupedComps) {
+      (c as any)._extraction_path = 'chunked';
     }
 
     // Build diagnostic summary message — shows per-chunk counts so we can
