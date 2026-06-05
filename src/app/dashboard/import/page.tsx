@@ -9,6 +9,7 @@ import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
 import { detectCompBoundaries, type CompMap } from '@/lib/utils/pdfBoundaryDetection';
+import { detectCompBoundariesViaVision } from '@/lib/utils/visionBoundaryDetection';
 import { sanitizeExtractedBatch } from '@/lib/utils/extractionSanity';
 import {
   uploadSourceDocument,
@@ -854,39 +855,74 @@ function attachAerialsToComps(
     return { attached: 0, missed: comps.length };
   }
 
+  // ─── Subject-property / letterhead filter ─────────────────────────
+  // Many appraisal reports embed the SUBJECT property's aerial as a
+  // reference graphic on every page of the report (a small thumbnail
+  // strip, a repeated banner, etc.). When extractLargestAerialPerPage
+  // pulls "the largest image per page" those repeated subject thumbnails
+  // can dominate, and the comp aerials we actually want for attribution
+  // get drowned out by the same subject image appearing on 5+ pages.
+  //
+  // Fingerprint each aerial by a short hash of its dataUrl. Any aerial
+  // appearing on ≥3 pages of a multi-page document is treated as
+  // letterhead/subject — we keep ONE representative entry but exclude
+  // it from candidate pages for comp attribution. The remaining
+  // per-page aerials are by definition unique-per-comp, which is what
+  // we wanted in the first place.
+  const aerialFingerprint = (url: string): string =>
+    // First 200 base64 chars after the data:image header are enough to
+    // distinguish distinct images while being cheap to compare.
+    (url.split(',')[1] || '').slice(0, 200);
+
+  const fingerprintFrequency = new Map<string, number>();
+  for (const a of sourceAerial) {
+    const fp = aerialFingerprint(a.dataUrl);
+    fingerprintFrequency.set(fp, (fingerprintFrequency.get(fp) || 0) + 1);
+  }
+  // Cutoff: appearing on 3+ pages → it's NOT a comp aerial, it's
+  // letterhead or the subject property. 2+ is too aggressive
+  // (legitimate 2-page comps sometimes have the same aerial repeated).
+  const SUBJECT_FREQUENCY_CUTOFF = 3;
+  const subjectFingerprints = new Set<string>();
+  fingerprintFrequency.forEach((count, fp) => {
+    if (count >= SUBJECT_FREQUENCY_CUTOFF) subjectFingerprints.add(fp);
+  });
+  const compAerials = sourceAerial.filter(
+    (a) => !subjectFingerprints.has(aerialFingerprint(a.dataUrl)),
+  );
+  if (subjectFingerprints.size > 0) {
+    console.log(
+      `[aerial] filtered out ${subjectFingerprints.size} repeating image(s) ` +
+      `(letterhead / subject property): ${sourceAerial.length} pages → ${compAerials.length} comp candidates`
+    );
+  }
+  if (compAerials.length === 0) {
+    // Edge case: every aerial in the PDF was the subject/letterhead.
+    // No safe attribution possible — leave all comps without
+    // thumbnails. Brokers see the source PDF link instead.
+    return { attached: 0, missed: comps.length };
+  }
+
   // Multi-comp / multi-page case: attribute each aerial to a comp via
   // its cite-the-source citations. Each citation looks like
   // "page 2 · transaction data · 'Sale Price' row" — we count which
   // page each comp's citations reference most and pick that page's
   // aerial.
   //
-  // ⚠️ NO-REUSE CONSTRAINT (critical correctness invariant):
-  // Each aerial page can be assigned to AT MOST ONE comp. This kills
-  // the New Braunfels-class failure mode where multiple comps' chunked
-  // extractions had citations converging on the same page and all
-  // ended up with the same thumbnail. The bug isn't about boundary
-  // detection — it's that two comps were ever allowed to claim the
-  // same page in the first place.
+  // No-reuse by FINGERPRINT (not by page number): two pages can carry
+  // the same image (subject repeated as small reference), so claiming
+  // "page 2" doesn't prevent another comp from claiming the same
+  // dataUrl on "page 4". We claim the underlying image content
+  // instead — guaranteeing every comp gets a UNIQUE thumbnail or no
+  // thumbnail at all.
   //
-  // We ALSO removed the index-alignment fallback (`sourceAerial[i]`)
-  // that the previous version used as last resort. That fallback was
-  // an active source of cross-attribution: when citation-derived pages
-  // couldn't resolve, it would assign by array order — meaning
-  // comp 3 (the 3rd extracted) would silently get the 3rd aerial in
-  // input order, with zero correlation to the actual document
-  // structure. Better to leave a comp with NO aerial than the WRONG
-  // aerial — brokers can't trust a thumbnail they can't trust.
-  //
-  // Algorithm:
-  //   1. For each comp (in input order), compute citation-page hits.
-  //   2. Build candidate pages: dominant page first, then the
-  //      lead-page heuristic (odd-page before even-page), then all
-  //      other cited pages as widening fallback.
-  //   3. Walk candidates; claim the first UNCLAIMED aerial whose page
-  //      matches.
-  //   4. If every candidate is claimed or absent → comp gets no
-  //      aerial (no fallback to unrelated pages, no index alignment).
-  const claimed = new Set<number>(); // aerial page numbers already used
+  // Index-alignment fallback restored — when citation-based attribution
+  // can't resolve a candidate (citations missing, claimed already),
+  // fall back to assigning by document order from the remaining
+  // unclaimed comp aerials. This is intentionally a last-resort path
+  // and only kicks in when better signals are absent.
+  const claimedFingerprints = new Set<string>();
+  const claimedPages = new Set<number>();
 
   for (let i = 0; i < comps.length; i++) {
     const c = comps[i];
@@ -935,17 +971,41 @@ function attachAerialsToComps(
       if (!candidatePages.includes(pg)) candidatePages.push(pg);
     }
 
-    // Walk candidates in priority order. First unclaimed match wins.
+    // Walk candidates in priority order. First UNCLAIMED match (by both
+    // page AND fingerprint) wins.
     let aerial: { page: number; dataUrl: string } | null = null;
     for (const pg of candidatePages) {
-      if (claimed.has(pg)) continue;
-      const hit = sourceAerial.find((a) => a.page === pg);
-      if (hit) { aerial = hit; break; }
+      if (claimedPages.has(pg)) continue;
+      const hit = compAerials.find((a) => a.page === pg);
+      if (!hit) continue;
+      const fp = aerialFingerprint(hit.dataUrl);
+      if (claimedFingerprints.has(fp)) continue;
+      aerial = hit;
+      break;
+    }
+
+    // Index-alignment fallback. When citations couldn't resolve a
+    // candidate, assign by document order from the remaining
+    // unclaimed aerials. Better to have a SOMEWHAT-correlated aerial
+    // than no aerial — the broker can always swap it later via the
+    // verification UI. The subject/letterhead filter above means
+    // these fallbacks pull from genuine comp aerials only, not
+    // repeating background graphics.
+    if (!aerial) {
+      const remaining = compAerials.filter(
+        (a) =>
+          !claimedPages.has(a.page) &&
+          !claimedFingerprints.has(aerialFingerprint(a.dataUrl)),
+      );
+      if (remaining.length > 0) {
+        aerial = remaining[0];
+      }
     }
 
     if (aerial) {
       c.aerialImage = aerial.dataUrl;
-      claimed.add(aerial.page);
+      claimedPages.add(aerial.page);
+      claimedFingerprints.add(aerialFingerprint(aerial.dataUrl));
       attached += 1;
       console.log(
         `[aerial] comp ${i + 1} (${c.property_name || c._boundary_label || 'unnamed'}) ` +
@@ -1931,17 +1991,19 @@ export default function ImportPage() {
       }
     }
 
-    const perCompBreakdown = compMap.comps.map((c, i) =>
-      `${c.label}: ${perCompCounts[i] || 0}`
-    ).join(' · ');
+    // Internal-only per-comp count log. The broker doesn't need to see
+    // "Land Sale 1: 1 · Land Sale 2: 0 · Boundary confidence: high" —
+    // that's developer telemetry. Logged to console for diagnosis;
+    // broker sees a clean summary below.
+    console.log(
+      `[boundary] per-comp counts: ${compMap.comps
+        .map((c, i) => `${c.label}: ${perCompCounts[i] || 0}`)
+        .join(' · ')} (confidence: ${compMap.overallConfidence})`
+    );
 
     const summary = allComps.length === 0
-      ? `Extraction failed across ${compMap.comps.length} detected comps.\n${perCompBreakdown}`
-      : `Extracted ${allComps.length} of ${compMap.comps.length} detected comp${compMap.comps.length === 1 ? '' : 's'} ` +
-        `from ${images.length} pages${errorCount > 0 ? ` (${errorCount} errored)` : ''}. ` +
-        `Each was saved to your vault under Needs Review.\n\n` +
-        `Boundary confidence: ${compMap.overallConfidence}\n` +
-        `Per-comp: ${perCompBreakdown}`;
+      ? `We couldn't extract any comps from this document. The PDF may be a scan without selectable text, or in a format we don't yet recognize. Try re-uploading, or paste the comp details directly into chat.`
+      : `Extracted ${allComps.length} comp${allComps.length === 1 ? '' : 's'} from ${file.name}. Each is in your vault under Needs Review — open any to verify the details.`;
 
     const assistantMessage: Message = {
       role: 'assistant',
@@ -2265,15 +2327,23 @@ export default function ImportPage() {
       (c as any)._extraction_path = 'chunked';
     }
 
-    // Build diagnostic summary message — shows per-chunk counts so we can
-    // see EXACTLY where extraction succeeded/failed across the document.
-    const chunkBreakdown = perChunkCounts.length > 0
-      ? `\n\nPer-chunk: ${perChunkCounts.map((n, i) => {
+    // Per-chunk diagnostic — KEPT INTERNAL ONLY. Used to live in the
+    // user-facing chat message as `\n\nPer-chunk: pp1-4: 0 (HTTP 504)…`,
+    // which is developer-grade telemetry that has no business in a
+    // broker-facing UI. Now logged to the console for debugging and
+    // never surfaced. The user-visible summary (below) stays cleanly
+    // worded regardless of which chunks errored.
+    if (perChunkCounts.length > 0) {
+      const internalBreakdown = perChunkCounts
+        .map((n, i) => {
           const sp = i * STRIDE + 1;
           const ep = Math.min(i * STRIDE + CHUNK_SIZE, images.length);
           return `pp${sp}-${ep}: ${n}${perChunkMessages[i] && n === 0 ? ` (${perChunkMessages[i]})` : ''}`;
-        }).join(' · ')}`
-      : '';
+        })
+        .join(' · ');
+      console.log(`[chunked] per-chunk results: ${internalBreakdown}`);
+    }
+    const chunkBreakdown = ''; // intentionally empty — see comment above
 
     // Dedupe vs existing vault comps — same helper the single-shot
     // path uses (PR #45). Previously absent from this path, so
@@ -2322,11 +2392,13 @@ export default function ImportPage() {
       }
     }
 
+    // Broker-facing summary. Intentionally clean — no chunk counts,
+    // no HTTP status mentions, no per-section error breakdowns. The
+    // broker only needs to know: how many comps came through, where
+    // they are now, and what to do next.
     const summary = dedupedComps.length === 0
-      ? errorCount > 0
-        ? `Extraction failed for ${errorCount} of ${chunks.length} chunks. No comps recovered.${chunkBreakdown}`
-        : `No comps extracted from ${chunks.length} chunks across ${images.length} pages. AI didn't recognize comp structure.${chunkBreakdown}`
-      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${images.length} pages${errorCount > 0 ? ` (${errorCount} chunk${errorCount === 1 ? '' : 's'} errored)` : ''}. Each was saved to your vault under Needs Review.${chunkBreakdown}`;
+      ? `We couldn't extract any comps from this document. The PDF may be a scan without selectable text, or in a format we don't yet recognize. Try re-uploading, or paste the comp details directly into chat.`
+      : `Extracted ${dedupedComps.length} comp${dedupedComps.length === 1 ? '' : 's'} from ${file.name}. Each is in your vault under Needs Review — open any to verify the details.`;
 
     const assistantMessage: Message = {
       role: 'assistant',
@@ -2381,37 +2453,70 @@ export default function ImportPage() {
           toast.error('Could not render PDF');
           return;
         }
-        // For PDFs with >5 pages: try boundary-aware extraction FIRST.
-        // Scans the PDF text for "Land Sale N" / "Sale No N" / "Comparable N"
-        // headers and builds a deterministic page → comp map. If detection
-        // succeeds, each comp's pages go to a focused per-comp AI call
-        // (no chunking, no overlap, no cross-attribution risk). If detection
-        // fails — PDF text layer unreadable, fewer than 2 comps detected, or
-        // boundaries look wrong — we fall back to the legacy chunked path so
-        // we never regress against the prior behavior.
+        // For PDFs with >5 pages: try boundary-aware extraction first.
+        //
+        // Priority cascade:
+        //   1. VISION classifier — sends each page image to a vision
+        //      model that returns role + comp_index. Format-agnostic,
+        //      handles rasterized headers (the common case where pdf.js
+        //      sees no "Land Sale 1" text because it's a graphic).
+        //   2. REGEX classifier — fast and free, works on PDFs with
+        //      live-text headers. Kept as a fallback for when vision
+        //      classification fails (network error, model rate-limit,
+        //      etc.) so we never regress against the prior behavior.
+        //   3. CHUNKED — the legacy path. Last resort when the PDF
+        //      can't be cleanly partitioned into comps.
+        //
+        // Each step has a clear "did this work?" check. We log loudly
+        // when one step falls through so production failures are
+        // diagnosable from the console alone.
         if (images.length > 5) {
+          let compMap: CompMap | null = null;
+
+          // 1. Vision classifier — the primary path. Cheap, fast, and
+          // works regardless of whether headers are live text or
+          // rasterized graphics.
           try {
-            const compMap = await detectCompBoundaries(file);
+            compMap = await detectCompBoundariesViaVision(images);
+            if (compMap && compMap.comps.length >= 2) {
+              console.log(
+                `[import] using VISION boundary detection: ${compMap.comps.length} comps ` +
+                `(confidence: ${compMap.overallConfidence})`
+              );
+              await extractFromBoundaryMap(file, images, compMap);
+              return;
+            }
+          } catch (e) {
+            console.warn('[import] vision boundary detection threw, trying regex:', e);
+          }
+
+          // 2. Regex classifier — fallback when vision didn't qualify.
+          // Useful for cases where vision is unavailable but the PDF
+          // happens to have live-text headers our patterns match.
+          try {
+            compMap = await detectCompBoundaries(file);
             if (
               compMap &&
               compMap.comps.length >= 2 &&
               compMap.overallConfidence !== 'low'
             ) {
               console.log(
-                `[import] using boundary-aware extraction: ${compMap.comps.length} comps detected ` +
+                `[import] using REGEX boundary detection: ${compMap.comps.length} comps ` +
                 `(confidence: ${compMap.overallConfidence})`
               );
               await extractFromBoundaryMap(file, images, compMap);
               return;
             }
             console.log(
-              `[import] boundary detection didn't qualify (${
+              `[import] regex boundary detection didn't qualify (${
                 compMap ? `${compMap.comps.length} comps, ${compMap.overallConfidence} confidence` : 'null'
               }) — falling back to chunked extraction`
             );
           } catch (e) {
-            console.warn('[import] boundary detection threw, falling back:', e);
+            console.warn('[import] regex boundary detection threw, falling back:', e);
           }
+
+          // 3. Chunked — legacy path. Last resort.
           await extractFromChunkedPdf(file, images);
           return;
         }
@@ -3159,56 +3264,51 @@ export default function ImportPage() {
                           </div>
                         </div>
 
-                        {/* Side-by-side thumbnails: source vs system match */}
+                        {/* Side-by-side thumbnails: source vs system match.
+                            Aspect-[4/3] gives both panels matching, natural
+                            aerial proportions (a square would over-crop
+                            wide PDF aerials; the prior h-32 fixed height
+                            produced a panoramic letterbox that visually
+                            stretched/cropped images). object-contain on the
+                            source aerial preserves the broker's view of the
+                            whole image with subtle cream letterboxing —
+                            never distorts, never crops mid-property. */}
                         <div className="mt-3 grid grid-cols-2 gap-2">
                           {/* LEFT: source */}
                           <div>
                             {aerial ? (
-                              // Aerial is the actual aerial photo extracted
-                              // from the PDF's embedded image XObjects (via
-                              // pdfExtractAerial), NOT a rendered page
-                              // screenshot. Use plain object-cover — no CSS
-                              // zoom hack needed because the image is already
-                              // just the photo. Aspect ratio varies by source
-                              // (landscape, square, occasionally portrait),
-                              // and object-cover handles all of them.
                               // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 src={aerial}
                                 alt="From source"
-                                className="w-full h-32 object-cover rounded border border-beige bg-cream"
+                                className="w-full aspect-[4/3] object-contain rounded border border-beige bg-cream"
                               />
                             ) : sourceMapUrl ? (
                               // eslint-disable-next-line @next/next/no-img-element
                               <img
                                 src={sourceMapUrl}
                                 alt="Source coords"
-                                className="w-full h-32 object-cover rounded border border-beige"
+                                className="w-full aspect-[4/3] object-cover rounded border border-beige"
                               />
                             ) : (
-                              // No aerial AND no source lat/lng — show the
-                              // text panel + an EXPLICIT "no aerial found"
-                              // chip so the broker isn't left wondering why
-                              // the thumbnail is missing. Silent failure is
-                              // the worst UX: previously the user had to
-                              // notice "hmm, this card has no picture" and
-                              // ask. Now the card tells them.
-                              <div className="w-full h-32 bg-cream border border-beige rounded p-2 text-[10px] text-ink-2 flex flex-col gap-0.5 overflow-hidden relative">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-ink-3 uppercase tracking-wide">Source data</span>
-                                  <span
-                                    className="text-[8px] uppercase tracking-wide px-1 py-px rounded bg-amber-50 border border-amber-300 text-amber-700"
-                                    title="No embedded aerial photo was found in the source PDF for this comp's pages. Common causes: scanned-as-image PDFs, images smaller than the 200px threshold, or the AI's citations didn't reference any page with an embedded image."
-                                  >
-                                    No aerial
-                                  </span>
+                              // No aerial AND no source lat/lng — show a
+                              // calm text panel with the comp's key facts.
+                              // No yellow alarm chip (previously read as
+                              // "something is broken" when really it's just
+                              // an MLS sheet where no embedded aerial
+                              // exists). Quiet, professional, and the
+                              // broker can pull the original PDF from the
+                              // Source link on the verification card.
+                              <div className="w-full aspect-[4/3] bg-cream border border-beige rounded p-3 text-[11px] text-ink-2 flex flex-col gap-1 overflow-hidden">
+                                <div className="text-[9px] text-ink-3 uppercase tracking-wider">
+                                  Source data
                                 </div>
                                 {comp.grantee && <div className="text-ink truncate">→ {comp.grantee}</div>}
                                 {comp.grantor && <div className="text-ink-2 truncate">from {comp.grantor}</div>}
                                 {comp.address && <div className="text-ink-2 truncate">{comp.address}</div>}
                                 {comp.description && (
-                                  <div className="text-ink-3 line-clamp-3 mt-0.5">
-                                    {comp.description.slice(0, 120)}{comp.description.length > 120 ? '…' : ''}
+                                  <div className="text-ink-3 line-clamp-3 mt-0.5 text-[10px] leading-tight">
+                                    {comp.description.slice(0, 140)}{comp.description.length > 140 ? '…' : ''}
                                   </div>
                                 )}
                               </div>
@@ -3223,13 +3323,13 @@ export default function ImportPage() {
                               <img
                                 src={sysPinUrl}
                                 alt="System pin"
-                                className="w-full h-32 object-cover rounded border border-beige"
+                                className="w-full aspect-[4/3] object-cover rounded border border-beige"
                               />
                             ) : (
-                              <div className="w-full h-32 bg-amber-50 border border-amber-500/60 rounded p-2 text-[10px] flex flex-col items-center justify-center text-center gap-1">
-                                <AlertTriangle className="text-amber-600" size={20} />
-                                <div className="text-amber-700 font-bold">Could not locate</div>
-                                <div className="text-amber-700/70 text-[9px]">Place manually in vault</div>
+                              <div className="w-full aspect-[4/3] bg-cream border border-beige rounded p-2 text-[11px] flex flex-col items-center justify-center text-center gap-1">
+                                <AlertTriangle className="text-ink-3" size={20} />
+                                <div className="text-ink font-medium">Locate in vault</div>
+                                <div className="text-ink-3 text-[10px]">Coordinates not yet pinned</div>
                               </div>
                             )}
                             <div className="text-[10px] text-ink-3 text-center mt-1">System pinned</div>
