@@ -8,6 +8,12 @@ import { Upload, Send, FileText, CheckCircle, AlertCircle, Plus, X, AlertTriangl
 import DeleteConfirmButton from '@/components/ui/DeleteConfirmButton';
 import toast from 'react-hot-toast';
 import { pdfToImages } from '@/lib/utils/pdfToImages';
+import { detectCompBoundaries, type CompMap } from '@/lib/utils/pdfBoundaryDetection';
+import { sanitizeExtractedBatch } from '@/lib/utils/extractionSanity';
+import {
+  uploadSourceDocument,
+  attachSourceDocumentToComps,
+} from '@/lib/utils/compDocuments';
 import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
@@ -760,6 +766,10 @@ async function geocodeAddressFallback(comp: any): Promise<{
   geometry: any;
   match_reason: string;
   match_confidence: 'high' | 'medium' | 'low';
+  // Phase 2b: Mapbox v6 also returns the county that contains the
+  // geocoded address. We surface it here so the caller (locateCompForImport)
+  // can cross-check it against the AI-extracted county.
+  geocoded_county?: string | null;
 } | null> {
   const address = typeof comp?.address === 'string' ? comp.address.trim() : '';
   // No address OR address has no number → skip. Mapbox would happily
@@ -777,6 +787,7 @@ async function geocodeAddressFallback(comp: any): Promise<{
       geometry: null,
       match_reason: 'pinned to street address — verify boundary',
       match_confidence: 'low',
+      geocoded_county: hit.county ?? null,
     };
   } catch {
     return null;
@@ -786,10 +797,25 @@ async function geocodeAddressFallback(comp: any): Promise<{
 // Combined locate: parcel-level first (best), address geocode second
 // (good enough). Both call sites in the import pipeline should call
 // this rather than autoLocateInBrowserLogged directly.
+//
+// Phase 2b cross-check: when the locator falls through to geocode (parcel
+// match failed), Mapbox tells us which county the address actually sits
+// in. We cross-check that against the AI-extracted county and append a
+// warning to _sanity_warnings if they disagree — the broker sees this in
+// review. We DON'T overwrite the extracted county; that's a broker call.
 async function locateCompForImport(comp: any) {
   const located = await autoLocateInBrowserLogged(comp);
   if (located) return located;
-  return geocodeAddressFallback(comp);
+  const fallback = await geocodeAddressFallback(comp);
+  if (fallback && fallback.geocoded_county) {
+    try {
+      const { crossCheckGeocodedCounty } = await import('@/lib/utils/extractionSanity');
+      crossCheckGeocodedCounty(comp, { county: fallback.geocoded_county });
+    } catch (e) {
+      console.warn('[locate] county cross-check failed:', e);
+    }
+  }
+  return fallback;
 }
 
 // ─── Aerial attribution (shared between single-shot + chunked paths) ──
@@ -1573,6 +1599,323 @@ export default function ImportPage() {
     }
   };
 
+  // ─── Boundary-aware extraction (Phase 1 of the extractor rebuild) ───
+  //
+  // Previously the only path for multi-page PDFs was extractFromChunkedPdf
+  // (fixed-stride overlapping chunks → AI does boundary detection + field
+  // extraction + aerial attribution all at once). That bundled three jobs
+  // into one prompt and produced compounding failures:
+  //   • Missing comps when boundaries fell between chunk strides
+  //   • Wrong field values when narrative paragraphs competed with structured
+  //     table rows for the AI's attention
+  //   • Wrong thumbnails when overlapping-chunk page numbering broke the
+  //     aerial → comp attribution
+  //
+  // This new path runs detectCompBoundaries() FIRST — a deterministic
+  // text scan that finds "Land Sale N" / "Sale No N" / "Comparable N"
+  // headers and builds a page-by-comp map without any AI involvement. Then:
+  //
+  //   1. For each detected comp, we send ONLY THAT COMP'S PAGES to the
+  //      AI with a focused prompt ("extract this single comp from these
+  //      pages"). No chunking, no overlap, no boundary risk.
+  //   2. Aerial extraction is attributed by comp-scoped page range — each
+  //      aerial belongs to exactly one comp, eliminating cross-attribution.
+  //   3. No dedup needed in the output (we know we're sending one comp at
+  //      a time), so the over-aggressive fragment-skip rule that dropped
+  //      legit comps in the chunked path doesn't apply here.
+  //
+  // Falls back to extractFromChunkedPdf if boundary detection returns null
+  // (PDF text layer unreadable, <2 comps detected, or non-monotonic
+  // boundaries indicating a misread) — so we never regress against the
+  // legacy behavior for PDFs the new detector can't handle yet.
+  const extractFromBoundaryMap = async (
+    file: File,
+    images: string[],
+    compMap: CompMap,
+  ) => {
+    // Kick off aerial extraction in parallel with AI calls — same pattern
+    // as the chunked path. We'll attribute per-page after all AI calls land.
+    const aerialsPromise = extractLargestAerialPerPage(file).catch(
+      () => [] as Array<{ page: number; dataUrl: string }>
+    );
+
+    const userMessage: Message = {
+      role: 'user',
+      content:
+        `[Document uploaded]\n` +
+        `Uploaded: ${file.name} (${images.length} pages, ${compMap.comps.length} comp boundaries detected)`,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, userMessage]);
+
+    const allComps: any[] = [];
+    let errorCount = 0;
+    const perCompCounts: number[] = [];
+
+    for (let compIdx = 0; compIdx < compMap.comps.length; compIdx++) {
+      const compBoundary = compMap.comps[compIdx];
+      // Slice images to this comp's pages (boundary uses 1-indexed pages,
+      // images array is 0-indexed).
+      const compImages = compBoundary.pages
+        .map((p) => images[p - 1])
+        .filter((img): img is string => Boolean(img));
+
+      if (compImages.length === 0) {
+        console.warn(`[boundary] comp ${compIdx + 1} has no images; skipping`);
+        perCompCounts.push(0);
+        continue;
+      }
+
+      const toastId = `comp-${compIdx}`;
+      const pageRange = compBoundary.pages.length === 1
+        ? `page ${compBoundary.pages[0]}`
+        : `pages ${compBoundary.pages[0]}-${compBoundary.pages[compBoundary.pages.length - 1]}`;
+      toast.loading(`Extracting ${compBoundary.label} (${pageRange})…`, { id: toastId });
+
+      try {
+        const focusedPrompt =
+          `[Document uploaded]\n` +
+          `Extract EXACTLY ONE comparable land sale from these pages. ` +
+          `The document title for this comp is "${compBoundary.label}"${
+            compBoundary.saleId ? ` (Sale ID: ${compBoundary.saleId})` : ''
+          }. ` +
+          `These ${compBoundary.pages.length} page(s) contain ONE comp's full data — ` +
+          `the Property Identification table, Transaction Data table, Property ` +
+          `Description, and Remarks. Do NOT split this into multiple comps.\n\n` +
+          // Hard rules — same priority order the rebuild plan calls for.
+          // (1) Structured tables always win over narrative paragraphs for
+          // numeric fields. (2) Required fields must be populated when the
+          // source has them. (3) Never fabricate; null is better than wrong.
+          `EXTRACTION RULES (in priority order):\n` +
+          `1. For numeric fields (acres, sale_price, price_per_acre), ` +
+          `   ALWAYS prefer values from STRUCTURED TABLE ROWS over narrative ` +
+          `   prose. Example: if the "Gross Acres" row says 344.96 and the ` +
+          `   Remarks paragraph says "349.7 acres in size", use 344.96.\n` +
+          `2. The "Geographic Location" row (semicolon-separated lat;lng like ` +
+          `   "29.81340027; -98.32949829") is the AUTHORITATIVE coordinate ` +
+          `   source. If present, populate latitude + longitude from it. Do ` +
+          `   not skip this field — it's structured data, always reliable.\n` +
+          `3. Required: acres, sale_price, sale_date, grantor, grantee, ` +
+          `   county. If a required field is genuinely absent from the source, ` +
+          `   leave it null (do not fabricate or infer).\n` +
+          `4. is_comparable=true unless this is clearly NOT a land sale.\n` +
+          `5. Return exactly ONE comp in the comps array.`;
+
+        const response = await fetch('/api/import-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: focusedPrompt }],
+            images: compImages,
+          }),
+        });
+        toast.dismiss(toastId);
+
+        if (!response.ok) {
+          errorCount++;
+          perCompCounts.push(0);
+          console.warn(`[boundary] ${compBoundary.label} HTTP ${response.status}`);
+          continue;
+        }
+
+        const data = await response.json();
+        const compsReturned: any[] = Array.isArray(data.comps) ? data.comps : [];
+        if (compsReturned.length === 0) {
+          perCompCounts.push(0);
+          console.log(`[boundary] ${compBoundary.label}: 0 comps (AI: ${data.message?.slice(0, 80)})`);
+          continue;
+        }
+
+        // We told the AI to return exactly one — take the first if it
+        // returned multiple (defensive — shouldn't happen given the prompt).
+        const comp = compsReturned[0];
+        // Tag the comp with its boundary metadata for downstream debugging
+        // and for confident aerial attribution. _boundary_pages is the
+        // canonical page range for THIS comp; aerial attribution uses it
+        // to pick the largest image from this range only.
+        comp._boundary_pages = compBoundary.pages;
+        comp._boundary_label = compBoundary.label;
+        comp._boundary_sale_id = compBoundary.saleId;
+        allComps.push(comp);
+        perCompCounts.push(1);
+        console.log(`[boundary] ${compBoundary.label}: extracted (pages ${compBoundary.pages.join(',')})`);
+      } catch (e: any) {
+        toast.dismiss(toastId);
+        errorCount++;
+        perCompCounts.push(0);
+        console.error(`[boundary] ${compBoundary.label} threw:`, e);
+      }
+    }
+
+    // ─── Per-comp aerial attribution ─────────────────────────────────
+    // Critical structural win over the chunked path: each comp's aerial
+    // comes from its OWN page range. No global heuristic, no cross-
+    // attribution. The largest image whose page is in this comp's pages
+    // wins. If no aerials in range, the comp gets none (better than wrong).
+    const aerialsPerPage = await aerialsPromise;
+    let aerialsAttached = 0;
+    for (const c of allComps) {
+      const compPages: number[] = c._boundary_pages || [];
+      if (compPages.length === 0) continue;
+      // Find aerials whose page is in this comp's range. Pick the one
+      // with the largest data URL length (proxy for biggest image — the
+      // ID-page aerial is always the biggest, since it's the property
+      // photo, vs. tiny logos/icons on other pages).
+      const inRange = aerialsPerPage.filter((a) => compPages.includes(a.page));
+      if (inRange.length === 0) continue;
+      const biggest = inRange.reduce((best, a) =>
+        a.dataUrl.length > best.dataUrl.length ? a : best
+      );
+      c.aerial_image = biggest.dataUrl;
+      c._aerial_page = biggest.page;
+      c._aerial_source = 'boundary-scoped';
+      aerialsAttached++;
+    }
+    console.log(
+      `[boundary] aerial attribution: ${aerialsAttached}/${allComps.length} comps ` +
+      `got thumbnails (${aerialsPerPage.length} aerials across ${images.length} pages)`
+    );
+
+    // ─── Phase 2a sanity layer (runs BEFORE auto-locate) ─────────────
+    // Catches AI-hallucinated coords (out-of-Texas bbox), math mismatches
+    // between acres × PPA and sale_price, future-dated sales, and
+    // required-field gaps. Nulls out clearly-bad lat/lng so auto-locate
+    // takes over. Flags everything else for review (Phase 3 will surface
+    // the warnings in the UI; today they live in console + _sanity_warnings).
+    {
+      const sanityResult = sanitizeExtractedBatch(allComps);
+      console.log(
+        `[boundary] sanity: ${allComps.length} comps checked, ` +
+        `${sanityResult.totalWarnings} warnings, ${sanityResult.errorCount} errors`
+      );
+      // Mutate the array in place (we want the sanitized values to flow
+      // through the rest of the pipeline).
+      for (let i = 0; i < sanityResult.comps.length; i++) {
+        allComps[i] = sanityResult.comps[i];
+      }
+    }
+
+    // ─── Browser auto-locate (skip if AI extracted explicit coords) ──
+    // Same pattern as the chunked path. The new extraction rules tell the
+    // AI to always pull "Geographic Location" lat/lng when present, so
+    // most comps from appraisal-style PDFs land here with coords already.
+    // Sanity layer above will have nulled coords if they were outside TX
+    // — those comps fall through to the locator chain here.
+    for (let i = 0; i < allComps.length; i++) {
+      const c = allComps[i];
+      if (c.latitude != null && c.longitude != null) {
+        console.log(`[boundary] ${c.property_name || c._boundary_label}: explicit doc coords (${c.latitude}, ${c.longitude})`);
+        continue;
+      }
+      try {
+        const located = await locateCompForImport(c);
+        if (located) {
+          allComps[i] = {
+            ...c,
+            latitude: located.latitude,
+            longitude: located.longitude,
+            parcel_id: located.parcel_id ?? c.parcel_id,
+            geometry: located.geometry,
+            _auto_located_confidence: located.match_confidence,
+          };
+        }
+      } catch (e) {
+        console.error(`[boundary] autoLocate failed for ${c.property_name}:`, e);
+      }
+    }
+
+    // ─── Path telemetry ──────────────────────────────────────────────
+    // Tag every comp with which extraction path produced it. Useful for
+    // A/B comparing accuracy between the boundary-aware and legacy
+    // chunked paths over real broker usage. The field is transient
+    // (underscore-prefixed) so it never lands in the DB.
+    for (const c of allComps) {
+      (c as any)._extraction_path = 'boundary';
+    }
+
+    // Dedupe against existing vault comps (same helper as chunked path).
+    await runDuplicateCheck(allComps, supabase);
+
+    // Auto-save — same pattern. Every comp lands as needs-review.
+    if (allComps.length > 0) {
+      await autoSaveExtracted(allComps);
+    }
+
+    // ─── Phase 2c source-document attachment (boundary path) ─────────
+    // Upload the source PDF once and write one comp_documents row per
+    // saved comp pointing back at the upload + its page range. Runs
+    // AFTER autoSaveExtracted so we have the inserted comp UUIDs.
+    // Boundary path always knows per-comp page ranges (compMap.comps[i].pages)
+    // and the doc is by definition appraisal-shaped (that's what
+    // boundary detection fires on).
+    //
+    // Fail-soft: if upload or attach fails (missing bucket, RLS, env
+    // var miss), we log and continue. Comps still saved; only the
+    // provenance link is missing — not a blocker for the broker.
+    if (allComps.length > 0) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const saved = allComps.filter((c) => (c as any)._savedId);
+          if (saved.length > 0) {
+            const upload = await uploadSourceDocument({ file, userId: user.id });
+            if (upload) {
+              const pageRangeByCompId: Record<string, { start: number; end: number } | null> = {};
+              for (const c of saved) {
+                const pages: number[] = (c as any)._boundary_pages || [];
+                if (pages.length > 0) {
+                  pageRangeByCompId[(c as any)._savedId] = {
+                    start: pages[0],
+                    end: pages[pages.length - 1],
+                  };
+                }
+              }
+              await attachSourceDocumentToComps({
+                compIds: saved.map((c) => (c as any)._savedId),
+                upload,
+                pageRangeByCompId,
+                docType: 'appraisal',
+                userId: user.id,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[boundary] source-document attach failed:', e);
+      }
+    }
+
+    const perCompBreakdown = compMap.comps.map((c, i) =>
+      `${c.label}: ${perCompCounts[i] || 0}`
+    ).join(' · ');
+
+    const summary = allComps.length === 0
+      ? `Extraction failed across ${compMap.comps.length} detected comps.\n${perCompBreakdown}`
+      : `Extracted ${allComps.length} of ${compMap.comps.length} detected comp${compMap.comps.length === 1 ? '' : 's'} ` +
+        `from ${images.length} pages${errorCount > 0 ? ` (${errorCount} errored)` : ''}. ` +
+        `Each was saved to your vault under Needs Review.\n\n` +
+        `Boundary confidence: ${compMap.overallConfidence}\n` +
+        `Per-comp: ${perCompBreakdown}`;
+
+    const assistantMessage: Message = {
+      role: 'assistant',
+      content: summary,
+      comps: allComps,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, assistantMessage]);
+
+    if (allComps.length > 0) {
+      setPendingComps(prev => [...prev, ...allComps]);
+      toast.success(
+        `Saved ${allComps.length} comp${allComps.length === 1 ? '' : 's'} to your vault`,
+        { duration: 4000 }
+      );
+    } else {
+      toast.error('No comps extracted from this document');
+    }
+  };
+
   // Chunked PDF extraction for large appraisal reports. Splits images into
   // 5-page batches, runs AI extraction on each separately, accumulates the
   // unique comps, dedupes, then runs browser auto-locate on each.
@@ -1824,6 +2167,21 @@ export default function ImportPage() {
       }
     }
 
+    // ─── Phase 2a sanity layer (runs BEFORE auto-locate) ─────────────
+    // Same checks as the boundary path: out-of-Texas lat/lng nulled,
+    // math gates flag drift, required fields tagged. See
+    // src/lib/utils/extractionSanity.ts for the full rule set.
+    {
+      const sanityResult = sanitizeExtractedBatch(dedupedComps);
+      console.log(
+        `[chunked] sanity: ${dedupedComps.length} comps checked, ` +
+        `${sanityResult.totalWarnings} warnings, ${sanityResult.errorCount} errors`
+      );
+      for (let i = 0; i < sanityResult.comps.length; i++) {
+        dedupedComps[i] = sanityResult.comps[i];
+      }
+    }
+
     // Run browser auto-locate for each unique comp (overrides any AI-guessed
     // coords for comps that don't have explicit "Geographic Location" fields).
     for (let i = 0; i < dedupedComps.length; i++) {
@@ -1852,6 +2210,15 @@ export default function ImportPage() {
       }
     }
 
+    // ─── Path telemetry ──────────────────────────────────────────────
+    // Tag every comp with which extraction path produced it. Useful for
+    // A/B comparing accuracy between the boundary-aware and legacy
+    // chunked paths over real broker usage. The field is transient
+    // (underscore-prefixed) so it never lands in the DB.
+    for (const c of dedupedComps) {
+      (c as any)._extraction_path = 'chunked';
+    }
+
     // Build diagnostic summary message — shows per-chunk counts so we can
     // see EXACTLY where extraction succeeded/failed across the document.
     const chunkBreakdown = perChunkCounts.length > 0
@@ -1877,6 +2244,36 @@ export default function ImportPage() {
     // buttons on each card handle the cleanup paths.
     if (dedupedComps.length > 0) {
       await autoSaveExtracted(dedupedComps);
+    }
+
+    // ─── Phase 2c source-document attachment (chunked path) ──────────
+    // Mirror of the boundary path's hook, with two differences:
+    //   • Page range is null per comp — chunked extraction can't
+    //     reliably say which pages each comp came from once dedupe
+    //     has merged near-duplicates across overlapping chunks.
+    //   • doc_type is null (unclassified). A future classifier in
+    //     Phase 2c.1 can backfill these rows by reading the PDF text.
+    if (dedupedComps.length > 0) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const saved = dedupedComps.filter((c) => (c as any)._savedId);
+          if (saved.length > 0) {
+            const upload = await uploadSourceDocument({ file, userId: user.id });
+            if (upload) {
+              await attachSourceDocumentToComps({
+                compIds: saved.map((c) => (c as any)._savedId),
+                upload,
+                pageRangeByCompId: undefined,
+                docType: null,
+                userId: user.id,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[chunked] source-document attach failed:', e);
+      }
     }
 
     const summary = dedupedComps.length === 0
@@ -1938,11 +2335,37 @@ export default function ImportPage() {
           toast.error('Could not render PDF');
           return;
         }
-        // For PDFs with >5 pages: chunked extraction (5 pages per AI call,
-        // accumulate + dedupe comps from each chunk). Single-shot extraction
-        // hits GPT-4o's input limit on large appraisal reports (20+ pages)
-        // and returns "no comps" even when comps exist.
+        // For PDFs with >5 pages: try boundary-aware extraction FIRST.
+        // Scans the PDF text for "Land Sale N" / "Sale No N" / "Comparable N"
+        // headers and builds a deterministic page → comp map. If detection
+        // succeeds, each comp's pages go to a focused per-comp AI call
+        // (no chunking, no overlap, no cross-attribution risk). If detection
+        // fails — PDF text layer unreadable, fewer than 2 comps detected, or
+        // boundaries look wrong — we fall back to the legacy chunked path so
+        // we never regress against the prior behavior.
         if (images.length > 5) {
+          try {
+            const compMap = await detectCompBoundaries(file);
+            if (
+              compMap &&
+              compMap.comps.length >= 2 &&
+              compMap.overallConfidence !== 'low'
+            ) {
+              console.log(
+                `[import] using boundary-aware extraction: ${compMap.comps.length} comps detected ` +
+                `(confidence: ${compMap.overallConfidence})`
+              );
+              await extractFromBoundaryMap(file, images, compMap);
+              return;
+            }
+            console.log(
+              `[import] boundary detection didn't qualify (${
+                compMap ? `${compMap.comps.length} comps, ${compMap.overallConfidence} confidence` : 'null'
+              }) — falling back to chunked extraction`
+            );
+          } catch (e) {
+            console.warn('[import] boundary detection threw, falling back:', e);
+          }
           await extractFromChunkedPdf(file, images);
           return;
         }
