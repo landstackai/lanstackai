@@ -22,6 +22,14 @@ export type GeocodeResult = {
   // Suggested zoom level matched to the precision of the result —
   // address: 14, place/POI: 12, postal: 11, county-centroid: 9.
   zoom: number;
+  // Resolved admin context from Mapbox v6 context object. Used by the
+  // Phase 2b address-county sanity check (extractionSanity.ts) to flag
+  // comps where the AI-extracted county disagrees with what Mapbox
+  // says the address actually sits in. Null when Mapbox didn't return
+  // that context key for this address (rare for US street addresses).
+  county?: string | null;   // e.g. "Comal" — bare name, no "County" suffix
+  city?: string | null;     // locality / place name
+  state?: string | null;    // 2-letter, "TX"
 };
 
 /**
@@ -61,7 +69,24 @@ export async function geocodeAddress(address: string): Promise<GeocodeResult | n
       locality: 11,
     };
     const zoom = featureType ? (zoomByType[featureType] ?? 12) : 12;
-    return { lng: coords[0], lat: coords[1], zoom };
+
+    // Mapbox v6 context: an OBJECT keyed by admin level. For US street
+    // addresses, `district` is the county. Strip the "County" suffix so
+    // it matches the canonical storage format from normalizeCounty.ts.
+    const ctx = f?.properties?.context ?? {};
+    const rawDistrict = typeof ctx?.district?.name === 'string' ? ctx.district.name : null;
+    const county = rawDistrict ? rawDistrict.replace(/\s+County\s*$/i, '').trim() || null : null;
+    const city = typeof ctx?.place?.name === 'string'
+      ? ctx.place.name
+      : (typeof ctx?.locality?.name === 'string' ? ctx.locality.name : null);
+    const stateRaw = typeof ctx?.region?.region_code === 'string'
+      ? ctx.region.region_code
+      : (typeof ctx?.region?.name === 'string' ? ctx.region.name : null);
+    const state = stateRaw
+      ? (stateRaw.length === 2 ? stateRaw.toUpperCase() : stateRaw)
+      : null;
+
+    return { lng: coords[0], lat: coords[1], zoom, county, city, state };
   } catch {
     return null;
   }

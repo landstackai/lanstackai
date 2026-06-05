@@ -762,6 +762,10 @@ async function geocodeAddressFallback(comp: any): Promise<{
   geometry: any;
   match_reason: string;
   match_confidence: 'high' | 'medium' | 'low';
+  // Phase 2b: Mapbox v6 also returns the county that contains the
+  // geocoded address. We surface it here so the caller (locateCompForImport)
+  // can cross-check it against the AI-extracted county.
+  geocoded_county?: string | null;
 } | null> {
   const address = typeof comp?.address === 'string' ? comp.address.trim() : '';
   // No address OR address has no number → skip. Mapbox would happily
@@ -779,6 +783,7 @@ async function geocodeAddressFallback(comp: any): Promise<{
       geometry: null,
       match_reason: 'pinned to street address — verify boundary',
       match_confidence: 'low',
+      geocoded_county: hit.county ?? null,
     };
   } catch {
     return null;
@@ -788,10 +793,25 @@ async function geocodeAddressFallback(comp: any): Promise<{
 // Combined locate: parcel-level first (best), address geocode second
 // (good enough). Both call sites in the import pipeline should call
 // this rather than autoLocateInBrowserLogged directly.
+//
+// Phase 2b cross-check: when the locator falls through to geocode (parcel
+// match failed), Mapbox tells us which county the address actually sits
+// in. We cross-check that against the AI-extracted county and append a
+// warning to _sanity_warnings if they disagree — the broker sees this in
+// review. We DON'T overwrite the extracted county; that's a broker call.
 async function locateCompForImport(comp: any) {
   const located = await autoLocateInBrowserLogged(comp);
   if (located) return located;
-  return geocodeAddressFallback(comp);
+  const fallback = await geocodeAddressFallback(comp);
+  if (fallback && fallback.geocoded_county) {
+    try {
+      const { crossCheckGeocodedCounty } = await import('@/lib/utils/extractionSanity');
+      crossCheckGeocodedCounty(comp, { county: fallback.geocoded_county });
+    } catch (e) {
+      console.warn('[locate] county cross-check failed:', e);
+    }
+  }
+  return fallback;
 }
 
 // ─── Aerial attribution (shared between single-shot + chunked paths) ──

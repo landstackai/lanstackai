@@ -24,6 +24,21 @@ export interface SanityResult<T> {
   warnings: SanityWarning[];
 }
 
+// ─── County normalization (local copy of the storage rule) ───────────
+// We don't import normalizeCountyForStorage here to avoid a hard dep —
+// the sanity layer should be readable in isolation. This is the same
+// idea: lowercase, strip "County" suffix, take the first segment if a
+// compound is given. Used by crossCheckGeocodedCounty below.
+function canonCounty(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  // Take only the first piece on a compound ("Atascosa, Wilson" → "Atascosa")
+  const first = s.split(/\s+and\s+|\s*&\s*|\s*,\s*|\s*\/\s*/i)[0] || '';
+  const cleaned = first.toLowerCase().replace(/\bcounty\b/g, '').replace(/\s+/g, ' ').trim();
+  return cleaned || null;
+}
+
 // Texas bounding box. Slight padding on each side so legitimate parcels
 // at the very edge of the state still pass. Outside this box → almost
 // certainly an AI hallucination or a typo we shouldn't trust.
@@ -171,6 +186,53 @@ export function sanitizeExtractedComp<T extends Record<string, any>>(
   (out as any)._sanity_warnings = warnings;
 
   return { comp: out, warnings };
+}
+
+/**
+ * Cross-check the AI-extracted county against a geocoded county
+ * (returned by Mapbox v6 in geocodePlace.ts). Mutates the comp in
+ * place: appends a warning to _sanity_warnings if the counties
+ * disagree. Returns true when a mismatch was flagged.
+ *
+ * Designed to be called from the locator path RIGHT AFTER a geocode
+ * hit, so we don't burn an extra Mapbox call just to validate. The
+ * cheap path (auto-locate already returned the right parcel) skips
+ * this entirely — that match is already validated by acres + owner.
+ *
+ * NOTE: Mapbox's county is the "ground truth" for the geocoded
+ * address; the extracted county is the AI's read of the document.
+ * If they disagree, one of:
+ *   1. AI got the county wrong (most common — flag the comp)
+ *   2. Address itself was wrong/typo'd (Mapbox geocoded to the
+ *      wrong city, county is right) → still worth surfacing
+ *   3. Comp straddles a county line (rare for land sales of any
+ *      meaningful size) → broker can dismiss the warning
+ *
+ * We never auto-correct the county here. The broker decides during
+ * Phase 3 review.
+ */
+export function crossCheckGeocodedCounty<T extends Record<string, any>>(
+  comp: T,
+  geocoded: { county?: string | null } | null,
+): boolean {
+  if (!geocoded || !geocoded.county) return false;
+  const extracted = canonCounty(comp.county);
+  const resolved = canonCounty(geocoded.county);
+  if (!extracted || !resolved) return false;
+  if (extracted === resolved) return false;
+
+  const warning: SanityWarning = {
+    field: 'county',
+    message:
+      `county mismatch: extracted "${comp.county}" but geocoded address resolves to "${geocoded.county}". ` +
+      `One of these is wrong — likely the AI misread the county header.`,
+    severity: 'warning',
+  };
+  const existing = Array.isArray((comp as any)._sanity_warnings)
+    ? (comp as any)._sanity_warnings as SanityWarning[]
+    : [];
+  (comp as any)._sanity_warnings = [...existing, warning];
+  return true;
 }
 
 /**
