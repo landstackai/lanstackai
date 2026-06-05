@@ -105,11 +105,15 @@ const COMP_SCHEMA = {
       additionalProperties: false,
       properties: {
         overall: { type: 'number' },
-        // per_field is a free-form object of field-name → confidence
-        // value. Structured outputs can't enforce arbitrary keys, so we
-        // accept any string-keyed object here. The values themselves
-        // can be number or string (the prompt mixes both today).
-        per_field: { type: 'object', additionalProperties: true, properties: {} },
+        // per_field used to be a free-form object of field→confidence
+        // pairs. OpenAI strict mode rejects `additionalProperties: true`
+        // on every object — so we can't represent a free-form object.
+        // Coerce per_field to a nullable string instead. The AI can
+        // return a JSON-serialized summary ("acres: 95, sale_price: 88")
+        // or null. Downstream code already treats per_field as opaque
+        // (we don't read structured data from it today) so this is a
+        // pure shape change, not a behavior change.
+        per_field: { type: ['string', 'null'] },
       },
       required: ['overall', 'per_field'],
     },

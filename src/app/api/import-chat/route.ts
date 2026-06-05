@@ -356,23 +356,48 @@ export async function POST(request: NextRequest) {
     // USE_SCHEMA_EXTRACTION is set, the model is bound to a strict
     // JSON Schema (src/lib/utils/compExtractionSchema.ts) that enforces
     // field types at the model level: numeric fields must be numbers,
-    // enum fields must use one of the allowed strings, etc. Kills the
-    // "AI returned '$1.2M' for sale_price" class of bug deterministically.
+    // enum fields must use one of the allowed strings, etc.
     //
-    // Off by default. Flip USE_SCHEMA_EXTRACTION=1 in Vercel env vars
-    // to enable for a small test window, watch a few uploads, then
-    // promote to default.
+    // SAFETY FALLBACK: if OpenAI rejects the schema (validation error,
+    // strict-mode violation, unsupported keyword), we automatically
+    // fall back to plain json_object mode and retry. That way a bad
+    // schema can NEVER bring down extraction — the worst case is we
+    // lose the type-level safety net for that one request and revert
+    // to the looser-but-working JSON mode that's been running all year.
+    // Triggered the first time when an over-permissive
+    // `additionalProperties: true` on a sub-object made OpenAI reject
+    // every request with HTTP 500 for ~30 min — a fallback would
+    // have masked the bug instantly.
     const useSchema = isSchemaExtractionEnabled();
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      max_tokens: 4000,
-      response_format: useSchema
-        ? IMPORT_RESPONSE_FORMAT
-        : { type: 'json_object' },
-      messages: [...systemMessages, ...processedMessages],
-    });
+    let completion;
     if (useSchema) {
-      console.log('[import-chat] used schema-locked extraction format');
+      try {
+        completion = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          max_tokens: 4000,
+          response_format: IMPORT_RESPONSE_FORMAT,
+          messages: [...systemMessages, ...processedMessages],
+        });
+        console.log('[import-chat] used schema-locked extraction format');
+      } catch (schemaErr: any) {
+        console.warn(
+          '[import-chat] schema-locked mode rejected by OpenAI ' +
+          `(${schemaErr?.message || 'unknown'}) — falling back to json_object mode`
+        );
+        completion = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          max_tokens: 4000,
+          response_format: { type: 'json_object' },
+          messages: [...systemMessages, ...processedMessages],
+        });
+      }
+    } else {
+      completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        max_tokens: 4000,
+        response_format: { type: 'json_object' },
+        messages: [...systemMessages, ...processedMessages],
+      });
     }
 
     const responseText = completion.choices[0]?.message?.content || '{}';
