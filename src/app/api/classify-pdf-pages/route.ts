@@ -3,82 +3,103 @@ import OpenAI from 'openai';
 
 // Vision-based page classifier for multi-comp PDFs.
 //
-// THE PROBLEM this replaces:
-// Earlier the import flow used regex pattern-matching on pdf.js text content
-// to find comp boundaries ("Land Sale 1", "Sale No. 2", etc.). Three failure
-// modes made that approach unreliable in production:
-//   1. Appraisal headers are often rendered as STYLIZED GRAPHICS, not live
-//      text. pdf.js sees no "Land Sale 1" string to match.
-//   2. Letterheads, copyright blocks, and page footers push the actual
-//      header below whatever scan window we set.
-//   3. Every new appraisal format invented by every new appraiser is
-//      another regex we don't have. Whack-a-mole.
+// Why this exists: regex-based boundary detection on pdf.js text content
+// fails on the most common failure mode — appraisal headers rendered as
+// stylized graphics (no live text to match). The model receives the page
+// IMAGES and reads them the way a human would, returning a structured
+// classification per page that the import flow assembles into a CompMap.
 //
-// THE FIX:
-// Use a vision model to read each page the way a human reads it. For every
-// page image, the model returns a structured classification:
-//   • role: 'cover' | 'comp_id_page' | 'comp_continuation' | 'summary' | 'other'
-//   • comp_index: 1-based ordinal of which comp this page belongs to (null
-//     for non-comp content)
-//   • comp_label: the label the model saw on the page ("Land Sale 1",
-//     "Sale 2", "Comp #3", "Property A" — whatever the format uses)
+// Design choices, in order of importance:
 //
-// From those per-page classifications, the import flow builds a deterministic
-// page→comp map. Format-agnostic — works on rasterized headers, MLS sheets,
-// closing statements, anything that visually looks like a real-estate
-// document. No regex patterns to maintain.
+// 1. SINGLE BATCHED CALL. Earlier draft fanned out one OpenAI call per
+//    page. That hit two real production limits:
+//      • Vercel serverless body limit is 4.5MB. Ten high-res page
+//        images don't fit.
+//      • Ten parallel calls per PDF spike OpenAI rate limits unnecessarily.
+//    Now: ONE call receives all pages in one multi-part user message,
+//    one response returns an array of N classifications. One round trip,
+//    one rate-limit cost, one body to size-budget.
 //
-// COST/LATENCY:
-// gpt-4o-mini vision at "low" detail runs about $0.0001-0.0005 per page and
-// ~1.5-3s per page. Pages run in PARALLEL via Promise.all, so a 10-page
-// PDF classifies in roughly the same wall-clock time as one page (limited by
-// the slowest single page, not the sum). Total cost per PDF: well under 1¢.
+// 2. CALLER PRE-DOWNSCALES IMAGES. We need the model to see headers,
+//    not full-resolution aerials. The client (visionBoundaryDetection.ts)
+//    renders dedicated low-res images for the classifier — separate from
+//    the high-res images used for downstream extraction. Body stays well
+//    under the 4.5MB limit even on long documents.
+//
+// 3. HIGH DETAIL VISION. 'low' detail downsamples to 512×512 which is
+//    insufficient for small/stylized header text. 'high' detail costs
+//    ~12× more but lands us at ~$0.005 per PDF total — still trivial.
+//    Quality of the boundary signal matters more than cost here.
+//
+// 4. STRICT JSON SCHEMA. The response shape is locked at the model
+//    layer. The model can't drift, omit fields, or return strings where
+//    integers are expected. Output is safe to consume without
+//    defensive parsing.
+//
+// 5. PER-PAGE FAILURE TOLERANCE INSIDE A SINGLE CALL. The model
+//    classifies all pages in one response. If any individual page is
+//    ambiguous, the model returns role='other' for it — never throws.
+//    Network/quota failures fail the WHOLE call (which the caller
+//    handles by falling back to regex).
 
 export const maxDuration = 60;
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Per-page classification schema. Strict mode so the model can't drift.
+// Per-page classification. See SYSTEM_PROMPT for the semantics of each
+// role and the rules for comp_index / comp_label.
 const PAGE_CLASSIFICATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    page: { type: 'integer' },
     role: {
       type: 'string',
       enum: [
-        'cover',              // title page, table of contents, appraiser intro
-        'subject_property',   // the property being valued (NOT a comp)
-        'comp_id_page',       // first page of a comparable: header + ID table + sale data
-        'comp_continuation',  // second/third page of the SAME comp (description, remarks)
-        'summary',            // adjustment grid, summary table at end
-        'other',              // certifications, qualifications, addenda
+        'cover',
+        'subject_property',
+        'comp_id_page',
+        'comp_continuation',
+        'summary',
+        'other',
       ],
     },
-    // 1-based ordinal of the comp this page belongs to. Null for non-comp
-    // pages (cover, subject, summary, other). The model is told to count
-    // comps in the order they appear in the document, so the FIRST comp
-    // it encounters is 1 regardless of its label.
     comp_index: { type: ['integer', 'null'] },
-    // The label as it appears on the page ("Land Sale 1", "Comp 2", etc.).
-    // Helps with debugging + UX (we can show "Imported: Sale 3" instead of
-    // a generic "Comp 3").
     comp_label: { type: ['string', 'null'] },
-    // Short free-form summary of what the page contains. Used for
-    // diagnostic logs + future broker-facing "what we saw" affordance.
     evidence: { type: 'string' },
   },
-  required: ['role', 'comp_index', 'comp_label', 'evidence'],
+  required: ['page', 'role', 'comp_index', 'comp_label', 'evidence'],
+} as const;
+
+// Top-level response: a flat array of N page classifications.
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    pages: {
+      type: 'array',
+      items: PAGE_CLASSIFICATION_SCHEMA,
+    },
+  },
+  required: ['pages'],
 } as const;
 
 interface PageClassification {
-  role: 'cover' | 'subject_property' | 'comp_id_page' | 'comp_continuation' | 'summary' | 'other';
+  page: number;
+  role:
+    | 'cover'
+    | 'subject_property'
+    | 'comp_id_page'
+    | 'comp_continuation'
+    | 'summary'
+    | 'other';
   comp_index: number | null;
   comp_label: string | null;
   evidence: string;
 }
 
 const SYSTEM_PROMPT = `You classify pages of land-appraisal and real-estate comp documents. \
-You will receive ONE page image at a time. Decide what's on it.
+You will receive N page images in order, page 1 first. Classify each one.
 
 Roles:
   cover               — title page, firm letterhead, table of contents, intro letter
@@ -93,7 +114,7 @@ property description, remarks, photos, plat. Does NOT have its own comp header.
 
 comp_index rules:
   • Count comparable sales in the order they appear in the document. The first comp \
-you see is comp_index 1, the next is 2, and so on.
+you see is comp_index 1, the next is 2, and so on. ALWAYS contiguous: 1, 2, 3, … (no gaps).
   • A subject property is NEVER a comp — set comp_index null for subject_property pages.
   • comp_continuation pages share the comp_index of the comp they continue.
   • cover, subject_property, summary, other pages all have comp_index null.
@@ -102,90 +123,113 @@ comp_label rules:
   • Copy the label EXACTLY as it appears on the page: "Land Sale 1", "Sale No. 2", "Comp #3", \
 "Property B", etc. Preserve capitalization and punctuation.
   • If the page has no visible label but is clearly a comp page, infer from context \
-(e.g. "Comp 2" if it's the second comp you've encountered) and put that in comp_label.
+(e.g. "Comp 2" if it's the second comp you've encountered).
   • Null for non-comp pages.
 
-evidence: one sentence describing what made you classify the page this way. \
-Examples: "Header reads 'LAND SALE 1' at top, Transaction Data table below." or \
-"Continues property description from prior page; no header." Keep it factual.
+evidence: one sentence describing what made you classify the page this way. Examples: \
+"Header reads 'LAND SALE 1' at top, Transaction Data table below." Keep it factual.
 
-Be conservative. If a page could plausibly be a subject property OR a comp, examine the \
-context: subjects usually appear at the front, before any "Sale 1" header; comps appear \
-after. When in doubt about role, prefer 'other' over guessing.`;
+Be conservative. Subjects usually appear at the front, before any "Sale 1" header; comps \
+appear after. When in doubt about role, prefer 'other' over guessing.
+
+Return an object with key 'pages' whose value is an array of classifications, one per \
+input image, in page order.`;
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const images: string[] = Array.isArray(body?.images) ? body.images : [];
+    const images: unknown = body?.images;
 
-    if (images.length === 0) {
-      return NextResponse.json({ error: 'no images provided' }, { status: 400 });
-    }
-    if (images.length > 30) {
+    if (!Array.isArray(images) || images.length === 0) {
       return NextResponse.json(
-        { error: 'too many pages (max 30 per request)' },
+        { error: 'request body must include images: string[]' },
         { status: 400 }
       );
     }
+    // Bound the per-request page count. 30 pages × ~80KB low-res =
+    // ~2.4MB request body, comfortably under the 4.5MB serverless limit.
+    if (images.length > 30) {
+      return NextResponse.json(
+        { error: 'too many pages — max 30 per classification request' },
+        { status: 400 }
+      );
+    }
+    for (const img of images) {
+      if (typeof img !== 'string' || !img.startsWith('data:image/')) {
+        return NextResponse.json(
+          { error: 'each image must be a data:image/... URL' },
+          { status: 400 }
+        );
+      }
+    }
+    const pageImages = images as string[];
 
-    // Parallel classification — one call per page. Caps fan-out implicitly
-    // via the 30-page limit above. gpt-4o-mini vision low-detail is fast +
-    // cheap; the bottleneck is per-page latency, not throughput.
-    const classifications = await Promise.all(
-      images.map(async (dataUrl, idx) => {
-        try {
-          const completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            max_tokens: 300,
-            response_format: {
-              type: 'json_schema',
-              json_schema: {
-                name: 'page_classification',
-                strict: true,
-                schema: PAGE_CLASSIFICATION_SCHEMA,
-              },
-            },
-            messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'text',
-                    text: `Classify this page (page ${idx + 1} of ${images.length}).`,
-                  },
-                  {
-                    type: 'image_url',
-                    // 'low' detail is plenty for header/role detection and
-                    // keeps cost down to ~$0.0001-0.0005 per page.
-                    image_url: { url: dataUrl, detail: 'low' as const },
-                  },
-                ],
-              },
-            ],
-          });
-          const text = completion.choices[0]?.message?.content || '{}';
-          const parsed = JSON.parse(text) as PageClassification;
-          return { page: idx + 1, ...parsed };
-        } catch (err: any) {
-          // Per-page failure shouldn't kill the whole classification.
-          // Mark as 'other' so the caller knows we couldn't classify it
-          // but has SOMETHING to work with.
-          console.warn(`[classify-pdf-pages] page ${idx + 1} failed:`, err?.message);
-          return {
-            page: idx + 1,
-            role: 'other' as const,
-            comp_index: null,
-            comp_label: null,
-            evidence: `classification failed: ${err?.message || 'unknown'}`,
-          };
-        }
-      })
-    );
+    // Single multi-part user message: text instruction + one image_url
+    // entry per page. Detail 'high' so the model can read small / stylized
+    // header text (the 'low' setting downsamples to 512×512, which loses
+    // header detail in real-world appraisal layouts).
+    const userContent: Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string; detail: 'high' } }
+    > = [
+      {
+        type: 'text',
+        text:
+          `Classify all ${pageImages.length} pages of this document. ` +
+          `Return one classification per page, in page order, in the 'pages' array.`,
+      },
+      ...pageImages.map((url) => ({
+        type: 'image_url' as const,
+        image_url: { url, detail: 'high' as const },
+      })),
+    ];
 
-    return NextResponse.json({ pages: classifications });
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      // Generous budget — each page classification is ~50-80 tokens out;
+      // 6000 covers 30 pages comfortably plus structural overhead.
+      max_tokens: 6000,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'pdf_page_classifications',
+          strict: true,
+          schema: RESPONSE_SCHEMA,
+        },
+      },
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userContent },
+      ],
+    });
+
+    const text = completion.choices[0]?.message?.content || '{"pages":[]}';
+    let parsed: { pages: PageClassification[] };
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseErr) {
+      console.error('[classify-pdf-pages] JSON parse failed:', parseErr, text.slice(0, 500));
+      return NextResponse.json(
+        { error: 'classifier returned unparseable JSON' },
+        { status: 502 }
+      );
+    }
+
+    const out = Array.isArray(parsed?.pages) ? parsed.pages : [];
+
+    // Sanity: the model SHOULD return exactly one classification per input
+    // page, in order. If it returned fewer or skipped pages, log loudly so
+    // the caller's CompMap-builder can compensate by treating missing
+    // pages as 'other' (unassigned).
+    if (out.length !== pageImages.length) {
+      console.warn(
+        `[classify-pdf-pages] expected ${pageImages.length} classifications, got ${out.length}`
+      );
+    }
+
+    return NextResponse.json({ pages: out });
   } catch (err: any) {
-    console.error('[classify-pdf-pages] route failure:', err);
+    console.error('[classify-pdf-pages] route failure:', err?.message || err);
     return NextResponse.json(
       { error: err?.message || 'classification failed' },
       { status: 500 }

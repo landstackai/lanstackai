@@ -859,20 +859,40 @@ function attachAerialsToComps(
   // Many appraisal reports embed the SUBJECT property's aerial as a
   // reference graphic on every page of the report (a small thumbnail
   // strip, a repeated banner, etc.). When extractLargestAerialPerPage
-  // pulls "the largest image per page" those repeated subject thumbnails
-  // can dominate, and the comp aerials we actually want for attribution
-  // get drowned out by the same subject image appearing on 5+ pages.
+  // pulls "the largest image per page" those repeated subject
+  // thumbnails dominate, and the comp aerials we actually want for
+  // attribution get drowned out by the same subject image appearing on
+  // 5+ pages — landing the wrong thumbnail on every comp.
   //
-  // Fingerprint each aerial by a short hash of its dataUrl. Any aerial
-  // appearing on ≥3 pages of a multi-page document is treated as
-  // letterhead/subject — we keep ONE representative entry but exclude
-  // it from candidate pages for comp attribution. The remaining
-  // per-page aerials are by definition unique-per-comp, which is what
-  // we wanted in the first place.
-  const aerialFingerprint = (url: string): string =>
-    // First 200 base64 chars after the data:image header are enough to
-    // distinguish distinct images while being cheap to compare.
-    (url.split(',')[1] || '').slice(0, 200);
+  // We fingerprint each aerial by a content hash and treat any
+  // fingerprint appearing on ≥3 pages as letterhead/subject. Those
+  // fingerprints are excluded from comp attribution; the remaining
+  // aerials are unique-per-comp, which is the invariant we need.
+  //
+  // FINGERPRINT QUALITY MATTERS: the first 200 chars of a JPEG dataUrl
+  // are mostly the `data:image/jpeg;base64,` prefix and JPEG metadata
+  // headers — nearly identical across different photos. Hashing just
+  // those bytes can collide two genuinely-different aerials onto the
+  // same fingerprint, incorrectly classifying real comp aerials as
+  // "letterhead" and dropping them.
+  //
+  // FNV-1a 32-bit hash over the FULL dataUrl: synchronous, fast (~10µs
+  // per 100KB image), deterministic, and reliably differentiates
+  // distinct images while collapsing repeats to a single value. Good
+  // enough for this dedup purpose — not crypto, but not pretending to
+  // be either.
+  const aerialFingerprint = (url: string): string => {
+    let hash = 0x811c9dc5; // FNV offset basis (32-bit)
+    for (let i = 0; i < url.length; i++) {
+      hash ^= url.charCodeAt(i);
+      // FNV prime = 0x01000193, but JS bitwise ops force int32 so we use
+      // Math.imul to keep the multiplication in 32-bit unsigned space.
+      hash = Math.imul(hash, 0x01000193);
+    }
+    // Return as unsigned hex string so the value is stable across
+    // sign-bit toggles.
+    return (hash >>> 0).toString(16);
+  };
 
   const fingerprintFrequency = new Map<string, number>();
   for (const a of sourceAerial) {
@@ -1854,32 +1874,71 @@ export default function ImportPage() {
     }
 
     // ─── Per-comp aerial attribution ─────────────────────────────────
-    // Critical structural win over the chunked path: each comp's aerial
-    // comes from its OWN page range. No global heuristic, no cross-
-    // attribution. The largest image whose page is in this comp's pages
-    // wins. If no aerials in range, the comp gets none (better than wrong).
+    // Each comp's aerial is drawn ONLY from its own page range — no
+    // cross-attribution possible. Within range, we pick the largest
+    // image (by dataUrl length, a reliable proxy for pixel area) since
+    // the comp's primary aerial photo is invariably bigger than any
+    // small map / icon / logo on the same page.
+    //
+    // SUBJECT-PROPERTY FILTER: before per-comp picking, exclude any
+    // image that appears on ≥3 pages across the full document. Those
+    // are subject-property aerials or letterhead graphics — present on
+    // every page as a reference, NOT a comp aerial. Without this
+    // filter, a 2-page comp whose pages both contain the subject's
+    // repeated reference image would pick that reference as its
+    // "largest" instead of the actual unique comp aerial.
+    //
+    // FIELD NAME: writes c.aerialImage (camelCase), which matches what
+    // the verification UI and the save path BOTH read. A long-standing
+    // bug had this writing c.aerial_image (snake) — the value was
+    // immediately lost. Fixed.
     const aerialsPerPage = await aerialsPromise;
+
+    // Build a set of "appears 3+ times" fingerprints to exclude.
+    const aerialFingerprint = (url: string): string => {
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < url.length; i++) {
+        hash ^= url.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return (hash >>> 0).toString(16);
+    };
+    const fpFrequency = new Map<string, number>();
+    for (const a of aerialsPerPage) {
+      const fp = aerialFingerprint(a.dataUrl);
+      fpFrequency.set(fp, (fpFrequency.get(fp) || 0) + 1);
+    }
+    const subjectFps = new Set<string>();
+    fpFrequency.forEach((count, fp) => {
+      if (count >= 3) subjectFps.add(fp);
+    });
+    const compAerials = aerialsPerPage.filter(
+      (a) => !subjectFps.has(aerialFingerprint(a.dataUrl))
+    );
+    if (subjectFps.size > 0) {
+      console.log(
+        `[boundary] filtered out ${subjectFps.size} repeating image(s) ` +
+        `(subject/letterhead): ${aerialsPerPage.length} → ${compAerials.length}`
+      );
+    }
+
     let aerialsAttached = 0;
     for (const c of allComps) {
       const compPages: number[] = c._boundary_pages || [];
       if (compPages.length === 0) continue;
-      // Find aerials whose page is in this comp's range. Pick the one
-      // with the largest data URL length (proxy for biggest image — the
-      // ID-page aerial is always the biggest, since it's the property
-      // photo, vs. tiny logos/icons on other pages).
-      const inRange = aerialsPerPage.filter((a) => compPages.includes(a.page));
+      const inRange = compAerials.filter((a) => compPages.includes(a.page));
       if (inRange.length === 0) continue;
       const biggest = inRange.reduce((best, a) =>
         a.dataUrl.length > best.dataUrl.length ? a : best
       );
-      c.aerial_image = biggest.dataUrl;
+      c.aerialImage = biggest.dataUrl;            // camelCase to match readers
       c._aerial_page = biggest.page;
       c._aerial_source = 'boundary-scoped';
       aerialsAttached++;
     }
     console.log(
       `[boundary] aerial attribution: ${aerialsAttached}/${allComps.length} comps ` +
-      `got thumbnails (${aerialsPerPage.length} aerials across ${images.length} pages)`
+      `got thumbnails (${aerialsPerPage.length} aerials total, ${compAerials.length} after subject filter)`
     );
 
     // ─── Phase 2a sanity layer (runs BEFORE auto-locate) ─────────────
@@ -2475,9 +2534,13 @@ export default function ImportPage() {
 
           // 1. Vision classifier — the primary path. Cheap, fast, and
           // works regardless of whether headers are live text or
-          // rasterized graphics.
+          // rasterized graphics. The classifier renders its own
+          // low-resolution page images internally so the request body
+          // stays well under Vercel's 4.5MB serverless limit, without
+          // affecting the high-resolution images used downstream for
+          // extraction.
           try {
-            compMap = await detectCompBoundariesViaVision(images);
+            compMap = await detectCompBoundariesViaVision(file);
             if (compMap && compMap.comps.length >= 2) {
               console.log(
                 `[import] using VISION boundary detection: ${compMap.comps.length} comps ` +
