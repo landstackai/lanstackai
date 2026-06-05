@@ -1799,7 +1799,7 @@ export default function VaultPage() {
                                 )}
                                 {(comp as any).needs_extraction_review && (
                                   <span
-                                    title="Extracted acres × $/acre doesn't match the sale price. At least one of these values is likely wrong — verify before using this comp in a CMA."
+                                    title="Check per-acre math: Acres × $/Ac doesn't equal the sale price. Compare these three numbers with the source document — one of them is likely off."
                                     className="inline-flex items-center"
                                   >
                                     <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />

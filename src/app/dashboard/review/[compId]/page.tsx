@@ -2068,9 +2068,12 @@ export default function ReviewPage() {
               </span>
             )}
             {comp.needs_extraction_review && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1">
+              <span
+                title="Acres × $/Ac doesn't equal the sale price. Compare these three numbers with the source document — one of them is likely off."
+                className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-1"
+              >
                 <AlertTriangle size={11} />
-                Math issue
+                Check per-acre math
               </span>
             )}
             {comp.needs_location_review && hasPin && (
