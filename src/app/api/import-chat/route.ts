@@ -10,6 +10,10 @@ import {
   mergeFeatures,
   selectBoundaryByAcreage,
 } from '@/lib/utils/countyParcels';
+import {
+  IMPORT_RESPONSE_FORMAT,
+  isSchemaExtractionEnabled,
+} from '@/lib/utils/compExtractionSchema';
 
 export const maxDuration = 120; // vision + multi-page extraction can run up to 60–90s
 
@@ -348,12 +352,28 @@ export async function POST(request: NextRequest) {
       return { role: m.role as 'user' | 'assistant', content: m.content };
     });
 
+    // Phase 2b.2 — feature-flagged schema-locked extraction. When
+    // USE_SCHEMA_EXTRACTION is set, the model is bound to a strict
+    // JSON Schema (src/lib/utils/compExtractionSchema.ts) that enforces
+    // field types at the model level: numeric fields must be numbers,
+    // enum fields must use one of the allowed strings, etc. Kills the
+    // "AI returned '$1.2M' for sale_price" class of bug deterministically.
+    //
+    // Off by default. Flip USE_SCHEMA_EXTRACTION=1 in Vercel env vars
+    // to enable for a small test window, watch a few uploads, then
+    // promote to default.
+    const useSchema = isSchemaExtractionEnabled();
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       max_tokens: 4000,
-      response_format: { type: 'json_object' },
+      response_format: useSchema
+        ? IMPORT_RESPONSE_FORMAT
+        : { type: 'json_object' },
       messages: [...systemMessages, ...processedMessages],
     });
+    if (useSchema) {
+      console.log('[import-chat] used schema-locked extraction format');
+    }
 
     const responseText = completion.choices[0]?.message?.content || '{}';
 
