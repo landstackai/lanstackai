@@ -41,3 +41,7 @@ next-env.d.ts
 .test-render-mid/
 .test-render-fix/
 .test-render-png10/
+
+# All test render directories — local-only debug artifacts.
+# Catches future .test-anything dirs without needing per-name entries.
+.test-*/
