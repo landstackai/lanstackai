@@ -235,6 +235,18 @@ export async function detectCompBoundaries(file: File): Promise<CompMap | null> 
   const totalPages = perPageText.length;
   if (totalPages === 0) return null;
 
+  // Diagnostic logging (Phase 2.5 patch). Dumps the first ~200 chars of
+  // each page so we can see exactly what text the regex is scanning
+  // against when boundary detection fails on a known-good appraisal
+  // format. Cheap to log (10 pages × 200 chars) — leaving it on
+  // permanently for now so brokers can paste console output when an
+  // import goes sideways.
+  console.log(`[boundary] scanning ${totalPages} pages for boundary markers`);
+  for (let i = 0; i < perPageText.length; i++) {
+    const preview = perPageText[i].slice(0, 200).replace(/\s+/g, ' ');
+    console.log(`[boundary]   page ${i + 1} text (first 200 chars): "${preview}"`);
+  }
+
   // First pass: find every page that has a boundary marker.
   const boundaries: Array<{
     page: number; // 1-indexed
@@ -249,12 +261,19 @@ export async function detectCompBoundaries(file: File): Promise<CompMap | null> 
     const detected = detectBoundaryOnPage(perPageText[i]);
     if (detected) {
       boundaries.push({ page: i + 1, ...detected });
+      console.log(`[boundary]   page ${i + 1}: MATCHED "${detected.label}" (evidence: "${detected.evidence}")`);
     }
   }
 
   // Need at least 2 boundaries to make a map. With <2, fall back to AI —
   // single-comp PDFs work fine on the legacy single-shot path.
-  if (boundaries.length < 2) return null;
+  if (boundaries.length < 2) {
+    console.warn(
+      `[boundary] only ${boundaries.length} boundary marker(s) found across ` +
+      `${totalPages} pages — need ≥2 to build a comp map. Falling back to AI chunked path.`
+    );
+    return null;
+  }
 
   // Sanity check: boundary indices should be roughly monotonic. If we
   // detected "Sale 1", "Sale 2", "Sale 3", etc. — that's what we want.
