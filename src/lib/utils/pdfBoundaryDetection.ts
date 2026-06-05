@@ -173,9 +173,47 @@ async function extractPerPageText(file: File): Promise<string[]> {
 }
 
 /**
+ * Aggressive text normalization for boundary regex matching.
+ *
+ * pdf.js gives us text in document-order with whatever whitespace the PDF
+ * embedded — which can include:
+ *   • Non-breaking spaces ( ) between "Land" and "Sale"
+ *   • Soft hyphens (­), zero-width joiners, BOM markers
+ *   • Multiple spaces, tabs, or newlines within a header
+ *   • Ligatures (rare but possible in stylized fonts)
+ *
+ * Our boundary patterns use \s+ which only matches plain ASCII whitespace,
+ * so any of the above would cause a missed match on a perfectly valid
+ * "Land Sale 1" header. Normalize them all to plain spaces before
+ * matching. This is the most common cause of false-negative boundary
+ * detection.
+ */
+function normalizeForBoundaryMatch(text: string): string {
+  return text
+    .replace(/[   ​‌‍﻿]/g, ' ')  // exotic spaces → plain
+    .replace(/[­]/g, '')                                       // soft hyphens → drop
+    .replace(/[‐-―]/g, '-')                               // unicode dashes → plain
+    .replace(/\s+/g, ' ')                                           // collapse runs of WS
+    .trim();
+}
+
+/**
  * Scan a page's text for any boundary marker. Returns the first match (by
  * pattern priority) or null if no marker is present. Confidence escalates
  * to 'high' if the same page also contains an ID-page section header.
+ *
+ * Previously scanned only the first 500 chars to avoid false-positive
+ * matches in narrative paragraphs. That window was too tight: many
+ * appraisal PDFs have a letterhead/logo/contact block at the top of every
+ * page, which can push the actual section header below the 500-char
+ * boundary. Widened to scan the FIRST 4000 chars — captures the header
+ * even on heavily-decorated pages, while still excluding the deep
+ * narrative prose (typically pages 2+ of a 2-page comp).
+ *
+ * Trade-off: a false-positive match in mid-page text would create a
+ * spurious boundary. Mitigated by the monotonic-index sanity check
+ * downstream — if "Sale 1" appears spuriously after "Sale 3", we throw
+ * out the whole map and fall back to AI extraction.
  */
 function detectBoundaryOnPage(pageText: string): {
   label: string;
@@ -184,11 +222,12 @@ function detectBoundaryOnPage(pageText: string): {
   confidence: 'high' | 'medium';
   evidence: string;
 } | null {
-  // Only scan the FIRST ~500 chars of the page — boundary headers always
-  // sit at the top. This avoids matching "Sale 1" inside a narrative
-  // paragraph like "in the prior sale 1 year ago." A header on page 5
-  // doesn't help us split page 5 mid-comp anyway.
-  const top = pageText.slice(0, 500);
+  // Normalize first, then scan widened window. Both changes are
+  // independently important — normalization handles the "invisible
+  // unicode broke the regex" case; window-widening handles the
+  // "letterhead pushed the header off the scan area" case.
+  const normalized = normalizeForBoundaryMatch(pageText);
+  const top = normalized.slice(0, 4000);
 
   for (const pat of BOUNDARY_PATTERNS) {
     const match = top.match(pat.pattern);
@@ -197,13 +236,13 @@ function detectBoundaryOnPage(pageText: string): {
     // Escalate to high confidence if an ID-page header is also present
     // somewhere on the page. This is the structural confirmation that
     // this is a comp's first page (not a stray mention).
-    const hasIdSection = ID_PAGE_HEADERS.some((re) => re.test(pageText));
+    const hasIdSection = ID_PAGE_HEADERS.some((re) => re.test(normalized));
     const confidence = hasIdSection ? 'high' : pat.confidence;
 
     return {
       label: pat.extractLabel(match),
       index: pat.extractIndex(match),
-      saleId: extractSaleId(pageText),
+      saleId: extractSaleId(normalized),
       confidence,
       evidence: match[0],
     };
@@ -235,16 +274,15 @@ export async function detectCompBoundaries(file: File): Promise<CompMap | null> 
   const totalPages = perPageText.length;
   if (totalPages === 0) return null;
 
-  // Diagnostic logging (Phase 2.5 patch). Dumps the first ~200 chars of
-  // each page so we can see exactly what text the regex is scanning
-  // against when boundary detection fails on a known-good appraisal
-  // format. Cheap to log (10 pages × 200 chars) — leaving it on
-  // permanently for now so brokers can paste console output when an
-  // import goes sideways.
+  // Diagnostic logging. Dumps the first ~300 chars of each page (after
+  // normalization — matches what detectBoundaryOnPage actually sees) so
+  // we can debug failed-to-fire cases. Cheap to log; leave on
+  // permanently so brokers can paste console output when imports fail.
   console.log(`[boundary] scanning ${totalPages} pages for boundary markers`);
   for (let i = 0; i < perPageText.length; i++) {
-    const preview = perPageText[i].slice(0, 200).replace(/\s+/g, ' ');
-    console.log(`[boundary]   page ${i + 1} text (first 200 chars): "${preview}"`);
+    const normalized = normalizeForBoundaryMatch(perPageText[i]);
+    const preview = normalized.slice(0, 300);
+    console.log(`[boundary]   page ${i + 1} normalized (first 300): "${preview}"`);
   }
 
   // First pass: find every page that has a boundary marker.
