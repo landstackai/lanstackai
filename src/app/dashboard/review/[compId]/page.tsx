@@ -1566,12 +1566,36 @@ export default function ReviewPage() {
     if (!mapLoaded || !map.current || mode !== 'draw') return;
     const m = map.current;
 
+    // Custom direct_select mode: identical to MapboxDraw's built-in
+    // direct_select (the vertex-editing mode you get after drawing a
+    // polygon) BUT with feature-drag disabled. Without this override,
+    // clicking the polygon's interior and dragging would translate the
+    // ENTIRE polygon — easy to do accidentally while trying to adjust
+    // a vertex, and almost never the broker's intent (they're tracing
+    // a boundary against parcel lines, not picking the whole shape up
+    // to move it 30 meters east).
+    //
+    // The dragFeature method on direct_select is what handles
+    // "click-on-polygon-body and drag." Overriding it to a no-op means
+    // vertex drags still work (those go through dragVertex), but body
+    // drags become inert. Mid-segment midpoint drags also still work
+    // since they go through their own path.
+    const BuiltInDirectSelect = (MapboxDraw as any).modes.direct_select;
+    const NoFeatureDragDirectSelect = {
+      ...BuiltInDirectSelect,
+      dragFeature() { /* intentionally disabled */ },
+    };
+
     // Create a fresh Draw instance each time we enter draw mode. Custom
     // styles match the gold theme used for selected parcels in reselect.
     const GOLD = '#facc15';
     const draw = new MapboxDraw({
       displayControlsDefault: false,
       defaultMode: 'draw_polygon',
+      modes: {
+        ...(MapboxDraw as any).modes,
+        direct_select: NoFeatureDragDirectSelect,
+      },
       styles: [
         // Polygon fill (active/in-progress)
         { id: 'gl-draw-polygon-fill-active', type: 'fill', filter: ['all', ['==', '$type', 'Polygon'], ['==', 'active', 'true']], paint: { 'fill-color': GOLD, 'fill-opacity': 0.25 } },
@@ -1599,8 +1623,14 @@ export default function ReviewPage() {
       const feature = e?.features?.[0];
       if (feature) {
         setDrawnFeature(feature);
-        // Switch to simple_select so broker can adjust vertices if needed
-        try { draw.changeMode('simple_select', { featureIds: [feature.id] }); } catch {}
+        // Switch to direct_select (vertex-edit) instead of simple_select
+        // (whole-feature select). direct_select shows the vertex
+        // handles + midpoint handles so the broker can refine the
+        // polygon precisely; simple_select would let them accidentally
+        // drag the whole shape. Our override above also disables
+        // direct_select's built-in feature-drag, so the polygon body
+        // is firmly anchored — only vertices and midpoints move.
+        try { draw.changeMode('direct_select', { featureId: feature.id }); } catch {}
       }
     };
     const handleUpdate = (e: any) => {
