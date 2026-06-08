@@ -1,48 +1,27 @@
-'use client';
+// Signup page — INVITE ONLY.
+//
+// Landstack runs as an invite-only product right now. Brokers and their
+// teams get accounts by being invited from the Supabase dashboard, which
+// sends a magic-link email. Clicking that link signs them in directly
+// (via /auth/callback) — they never see this page.
+//
+// Someone who lands HERE (typed /auth/signup, clicked a stale link,
+// found us in search) doesn't get a tempting empty form that'll error
+// the moment they submit. They get a clean "we're invite-only" message
+// + a path to log in if they already have an account, + a contact path
+// if they want to request access.
+//
+// This is the UI half of "closing public signup." The matching server
+// half is the Supabase setting:
+//   Supabase → Authentication → Providers → Email → "Allow new users
+//   to sign up" = OFF
+// Even if that toggle is somehow on, this page doesn't show a form, so
+// no one can sign up by accident.
 
-import { useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import toast from 'react-hot-toast';
-import { Layers } from 'lucide-react';
+import { Layers, Lock } from 'lucide-react';
 
 export default function SignupPage() {
-  const [formData, setFormData] = useState({
-    full_name: '',
-    email: '',
-    password: '',
-    brokerage_name: '',
-  });
-  const [loading, setLoading] = useState(false);
-  const router = useRouter();
-  const supabase = createClient();
-
-  const handleSignup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-
-    const { error } = await supabase.auth.signUp({
-      email: formData.email,
-      password: formData.password,
-      options: {
-        data: {
-          full_name: formData.full_name,
-          brokerage_name: formData.brokerage_name,
-        },
-      },
-    });
-
-    if (error) {
-      toast.error(error.message);
-      setLoading(false);
-    } else {
-      toast.success('Account created! Welcome to Landstack AI.');
-      router.push('/dashboard/map');
-      router.refresh();
-    }
-  };
-
   return (
     <div className="min-h-screen bg-cream flex items-center justify-center p-4">
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
@@ -59,90 +38,40 @@ export default function SignupPage() {
               landstack<span className="text-olive-2">.ai</span>
             </span>
           </div>
-          <h1 className="text-2xl font-bold text-ink mb-1">Create account</h1>
-          <p className="text-sm text-ink-2">Start your 14-day free trial</p>
         </div>
 
-        <div className="bg-white border border-beige rounded-2xl p-6">
-          <form onSubmit={handleSignup} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
-                Full Name
-              </label>
-              <input
-                type="text"
-                value={formData.full_name}
-                onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-                placeholder="Louie Swope"
-                required
-                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
-                Brokerage Name
-              </label>
-              <input
-                type="text"
-                value={formData.brokerage_name}
-                onChange={(e) => setFormData({ ...formData, brokerage_name: e.target.value })}
-                placeholder="Your Brokerage"
-                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
-                Email
-              </label>
-              <input
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                placeholder="you@example.com"
-                required
-                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-ink-2 uppercase tracking-wider mb-1.5">
-                Password
-              </label>
-              <input
-                type="password"
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                placeholder="Min 8 characters"
-                required
-                minLength={8}
-                className="w-full bg-cream border border-beige rounded-lg px-3 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive transition-colors"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-olive hover:bg-olive-2 text-white font-bold py-2.5 rounded-lg text-sm transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Creating account...' : 'Create Account — Free'}
-            </button>
-          </form>
-
-          <div className="mt-4 text-center">
-            <p className="text-xs text-ink-3">
-              Already have an account?{' '}
-              <Link href="/auth/login" className="text-olive-2 hover:underline font-semibold">
-                Sign in
-              </Link>
-            </p>
+        <div className="bg-white border border-beige rounded-2xl p-8 text-center">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-olive-tint mb-4">
+            <Lock size={18} className="text-olive-2" />
           </div>
-        </div>
 
-        <p className="text-center text-xs text-ink-3 mt-4">
-          No credit card required · 14-day free trial
-        </p>
+          <h1 className="text-xl font-bold text-ink mb-2">
+            Invite only
+          </h1>
+
+          <p className="text-sm text-ink-2 leading-relaxed mb-6">
+            Landstack is currently available by invitation. If you&rsquo;ve been
+            invited, check your email for a sign-in link. If you already have
+            an account, sign in below.
+          </p>
+
+          <Link
+            href="/auth/login"
+            className="block w-full bg-olive hover:bg-olive-2 text-white font-bold py-2.5 rounded-lg text-sm transition-colors"
+          >
+            Sign in
+          </Link>
+
+          <p className="text-xs text-ink-3 mt-4">
+            Want to request access?{' '}
+            <a
+              href="mailto:hello@landstack.ai?subject=Landstack%20access%20request"
+              className="text-olive-2 hover:underline font-semibold"
+            >
+              Get in touch
+            </a>
+          </p>
+        </div>
       </div>
     </div>
   );
