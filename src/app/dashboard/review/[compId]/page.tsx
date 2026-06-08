@@ -630,8 +630,23 @@ export default function ReviewPage() {
   //     no add/remove churn.
 
   // Effect 1: layer setup + teardown
+  //
+  // Runs in BOTH reselect mode AND draw mode. Brokers need the TxGIO
+  // parcel grid + owner-name labels visible underneath them while
+  // drawing a custom boundary — otherwise they're tracing freehand on
+  // raw satellite imagery, which is much harder than tracing against
+  // the public parcel lines (subdivision lots in particular have
+  // recognizable shapes that are easy to align to when visible).
+  //
+  // The DIFFERENCE between the two modes is just interactivity:
+  //   • reselect → parcels are CLICKABLE (toggle in/out of cluster)
+  //   • draw     → parcels are READ-ONLY background (hover tooltips
+  //                still work, but clicks go to MapboxDraw for vertex
+  //                placement, not to parcel selection)
   useEffect(() => {
-    if (!mapLoaded || !map.current || mode !== 'reselect') return;
+    if (!mapLoaded || !map.current) return;
+    if (mode !== 'reselect' && mode !== 'draw') return;
+    const isInteractive = mode === 'reselect';
     const m = map.current;
 
     // Defensive cleanup of any leftover layers from a previous mount
@@ -831,12 +846,19 @@ export default function ReviewPage() {
     const handleLeave = () => {
       if (m.getCanvas()) m.getCanvas().style.cursor = '';
     };
-    m.on('click', 'nearby-parcels-fill', handleClick);
-    m.on('mouseenter', 'nearby-parcels-fill', handleEnter);
-    m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
-    m.on('click', 'owner-matches-fill', handleClick);
-    m.on('mouseenter', 'owner-matches-fill', handleEnter);
-    m.on('mouseleave', 'owner-matches-fill', handleLeave);
+    // Click handlers — ONLY in reselect mode. In draw mode, clicks
+    // belong to MapboxDraw (vertex placement); intercepting them for
+    // parcel toggling would break the drawing flow entirely. Cursor
+    // hover effects also skipped in draw mode since MapboxDraw sets
+    // its own crosshair cursor.
+    if (isInteractive) {
+      m.on('click', 'nearby-parcels-fill', handleClick);
+      m.on('mouseenter', 'nearby-parcels-fill', handleEnter);
+      m.on('mouseleave', 'nearby-parcels-fill', handleLeave);
+      m.on('click', 'owner-matches-fill', handleClick);
+      m.on('mouseenter', 'owner-matches-fill', handleEnter);
+      m.on('mouseleave', 'owner-matches-fill', handleLeave);
+    }
 
     // Parcel hover tooltips — restored per broker feedback. Always-
     // visible labels surface the owner name even when you're not
@@ -869,12 +891,17 @@ export default function ReviewPage() {
       // time cleanup runs (e.g. saveReselect updates comp, which used
       // to re-init the map). Wrap EVERY mapbox call in try/catch so a
       // destroyed-map state can't propagate as a React error.
-      try { m.off('click', 'nearby-parcels-fill', handleClick); } catch {}
-      try { m.off('mouseenter', 'nearby-parcels-fill', handleEnter); } catch {}
-      try { m.off('mouseleave', 'nearby-parcels-fill', handleLeave); } catch {}
-      try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
-      try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
-      try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
+      // Click handlers were only attached in reselect mode; m.off()
+      // on a never-attached handler is a no-op so safe to call either
+      // way, but the conditional makes the intent explicit.
+      if (isInteractive) {
+        try { m.off('click', 'nearby-parcels-fill', handleClick); } catch {}
+        try { m.off('mouseenter', 'nearby-parcels-fill', handleEnter); } catch {}
+        try { m.off('mouseleave', 'nearby-parcels-fill', handleLeave); } catch {}
+        try { m.off('click', 'owner-matches-fill', handleClick); } catch {}
+        try { m.off('mouseenter', 'owner-matches-fill', handleEnter); } catch {}
+        try { m.off('mouseleave', 'owner-matches-fill', handleLeave); } catch {}
+      }
       try { detachNearbyHover?.(); } catch {}
       try { detachOwnerHover?.(); } catch {}
       try { detachSelectedHover?.(); } catch {}
