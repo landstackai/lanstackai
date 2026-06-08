@@ -1237,6 +1237,16 @@ export default function ReviewPage() {
     setOwnerSearchError(null);
   }, []);
 
+  // ── Mode-switcher helpers ───────────────────────────────────────────
+  // Let the broker jump between reselect / draw / verify in one click,
+  // without backing all the way out to view mode first. Each helper
+  // cancels whichever mode is currently active (discarding any
+  // in-progress work — the broker can always click Save before
+  // switching if they want to keep changes) then enters the new mode.
+  //
+  // Verify is a one-shot action, not a mode — it just marks the comp
+  // verified and returns the user to view mode.
+
   // ── Auto-expand Reselect Mode on page load for comps that need
   // location review. The broker came here to FIX the location, so
   // surfacing Reselect Mode immediately saves a click and signals
@@ -1482,6 +1492,41 @@ export default function ReviewPage() {
     setMode('view');
     setDrawnFeature(null);
   }, []);
+
+  // ── Mode-switcher click handlers ───────────────────────────────────
+  // Single-click jumps between modes without going through view mode.
+  // If the broker is mid-edit (vertices placed, parcels selected) and
+  // clicks another mode, the in-progress work is discarded. They can
+  // always click Save in the current mode first if they want to keep
+  // changes before switching.
+  const switchToReselect = useCallback(() => {
+    if (mode === 'reselect') return;
+    if (mode === 'draw') {
+      setMode('view');     // tear down draw mode first (its useEffect cleanup
+      setDrawnFeature(null); // removes the MapboxDraw control)
+    }
+    // Defer enterReselectMode to next tick so the draw-mode teardown
+    // happens cleanly before the reselect-mode setup runs. Otherwise
+    // both effects' add/remove map-layer calls can race.
+    setTimeout(() => { enterReselectMode(); }, 0);
+  }, [mode, enterReselectMode]);
+
+  const switchToDraw = useCallback(() => {
+    if (mode === 'draw') return;
+    if (mode === 'reselect') {
+      cancelReselect();
+    }
+    setTimeout(() => { enterDrawMode(); }, 0);
+  }, [mode, cancelReselect, enterDrawMode]);
+
+  const switchToVerify = useCallback(() => {
+    // Verify is a one-shot action that returns to view mode. If the
+    // broker is mid-edit, cancel the edit first so we don't trigger
+    // a state-update on an unmounted mode banner.
+    if (mode === 'reselect') cancelReselect();
+    else if (mode === 'draw') cancelDraw();
+    setTimeout(() => { handleMarkVerified(); }, 0);
+  }, [mode, cancelReselect, cancelDraw, handleMarkVerified]);
 
   const saveDraw = useCallback(async () => {
     if (!comp || !drawnFeature || drawSaving) return;
@@ -2254,13 +2299,62 @@ export default function ReviewPage() {
           )}
 
           {/* ─── Workflow section ────────────────────────────────────
-              ONE slot, three possible renders:
-                view  → action-row buttons (Reselect / Draw / Verify)
-                reselect → Reselect Mode banner (with owner search, stats)
-                draw  → Draw Mode banner (with vertex/area stats)
-              All three render in the SAME vertical position so the
-              property info above (Acres / Description / Grantor) stays
-              stable regardless of mode. */}
+              Persistent 3-button mode-switcher at the TOP, identical
+              across all three modes. Mode-specific banner (reselect
+              parcel search, draw vertex stats, etc.) renders BELOW
+              the switcher. Single click to switch modes — the broker
+              doesn't have to cancel back to view first.
+              The Delete-comp action lives at the very bottom in view
+              mode only (it's destructive, not a mode). */}
+
+          {/* MODE SWITCHER — persistent, visible in view/reselect/draw */}
+          <div className="border-t border-beige pt-3">
+            <div className="grid grid-cols-3 gap-1 bg-cream-2 p-1 rounded-lg">
+              <button
+                onClick={switchToReselect}
+                disabled={!map.current}
+                title="Pick parcels from the public records to define this comp's boundary"
+                className={`py-2 px-1.5 rounded text-[10px] font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  mode === 'reselect'
+                    ? 'bg-olive-tint border border-olive-border text-olive-2'
+                    : 'border border-transparent text-ink-2 hover:bg-white hover:text-ink'
+                }`}
+              >
+                <Edit3 size={11} />
+                Reselect
+              </button>
+              <button
+                onClick={switchToDraw}
+                disabled={!map.current}
+                title="Draw a custom boundary by clicking points on the map"
+                className={`py-2 px-1.5 rounded text-[10px] font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  mode === 'draw'
+                    ? 'bg-olive-tint border border-olive-border text-olive-2'
+                    : 'border border-transparent text-ink-2 hover:bg-white hover:text-ink'
+                }`}
+              >
+                <Pencil size={11} />
+                Draw
+              </button>
+              <button
+                onClick={switchToVerify}
+                disabled={saving || !comp.needs_location_review}
+                title={
+                  !comp.needs_location_review
+                    ? 'This comp is already verified'
+                    : 'Mark this comp as visually verified — clears the gray clock badge'
+                }
+                className={`py-2 px-1.5 rounded text-[10px] font-bold transition-colors flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+                  !comp.needs_location_review
+                    ? 'bg-olive-tint border border-olive-border text-olive-2'
+                    : 'border border-transparent text-ink-2 hover:bg-white hover:text-ink'
+                }`}
+              >
+                <Check size={11} />
+                {comp.needs_location_review ? 'Verify' : 'Verified'}
+              </button>
+            </div>
+          </div>
 
           {/* RESELECT MODE BANNER */}
           {mode === 'reselect' && (
@@ -2462,47 +2556,17 @@ export default function ReviewPage() {
             </div>
           )}
 
-          {/* VIEW MODE ACTIONS — only when not actively reselecting/drawing */}
+          {/* DELETE-COMP SECTION (view mode only).
+              The three primary mode actions (Reselect / Draw / Verify)
+              now live in the persistent switcher above — this section
+              only carries the destructive action, separated by its own
+              divider so the eye registers it as a different category.
+              2-step confirm (click "Delete comp" → "Confirm delete?"
+              pill → click again to commit, auto-reverts in 5s). On
+              confirm we delete + bounce the broker back to the vault
+              since there's nothing to review anymore. */}
           {mode === 'view' && (
-            <div className="border-t border-beige pt-3 space-y-2">
-              <button
-                onClick={enterReselectMode}
-                disabled={!map.current}
-                title="Re-pick the parcels that make up this comp — click parcels on the map to add/remove"
-                className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Edit3 size={12} />
-                Reselect parcels
-              </button>
-              <button
-                onClick={enterDrawMode}
-                disabled={!map.current}
-                title="Draw a new boundary from scratch — for unrecorded subdivisions, carve-outs, or anything TxGIO doesn't have"
-                className="w-full py-2 bg-olive-tint hover:bg-olive-tint border border-olive-border text-olive-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Pencil size={12} />
-                Draw new boundary
-              </button>
-              <button
-                onClick={handleMarkVerified}
-                disabled={saving || !comp.needs_location_review}
-                title={
-                  !comp.needs_location_review
-                    ? 'This comp is already verified'
-                    : 'Mark this comp as visually verified — clears the gray clock badge'
-                }
-                className="w-full py-2 bg-white hover:bg-cream border border-beige hover:border-beige-2 text-ink-2 hover:text-ink rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <Check size={12} />
-                {comp.needs_location_review ? 'Mark verified' : 'Verified'}
-              </button>
-              {/* Destructive action — separated from the constructive
-                  buttons above by a tight dotted divider so the eye
-                  registers it as a different category. 2-step confirm
-                  (click "Delete comp" → "Confirm delete?" pill → click
-                  again to commit, auto-reverts in 5s). On confirm we
-                  delete + bounce the broker back to the vault since
-                  there's nothing to review anymore. */}
+            <div className="border-t border-beige pt-3">
               <div className="pt-2 mt-1 border-t border-dashed border-beige flex justify-center">
                 <DeleteConfirmButton
                   variant="label"
