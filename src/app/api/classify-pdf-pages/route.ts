@@ -44,6 +44,42 @@ import OpenAI from 'openai';
 
 export const maxDuration = 60;
 
+// Retry with exponential backoff for transient OpenAI errors (429 rate
+// limits, 500-level transient failures). Cap at 3 attempts so we don't
+// burn the entire serverless function timeout on retries.
+//
+// 429 from OpenAI usually means "TPM saturated in last 60s." The error
+// message often includes a "try again in X" hint we honor when present.
+// For other transient codes, exponential backoff (5s → 10s → 20s).
+async function callOpenAIWithRetry<T>(fn: () => Promise<T>, attempt = 1): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    const status = err?.status ?? err?.response?.status;
+    const isRetryable = status === 429 || (status >= 500 && status < 600);
+    if (!isRetryable || attempt >= 3) throw err;
+
+    let waitMs = 5_000 * Math.pow(2, attempt - 1); // 5s, 10s, 20s
+    // If the error message includes a "try again in X" hint, honor it.
+    const errMsg = err?.message ?? '';
+    const waitMatch = errMsg.match(/try again in (\d+\.?\d*)([ms])/i);
+    if (waitMatch) {
+      const n = parseFloat(waitMatch[1]);
+      const hinted = waitMatch[2].toLowerCase() === 's' ? n * 1000 : n;
+      waitMs = Math.max(waitMs, hinted);
+    }
+    // Cap the wait so we don't blow the 60s function timeout.
+    waitMs = Math.min(waitMs, 30_000);
+
+    console.warn(
+      `[classify-pdf-pages] OpenAI ${status} on attempt ${attempt}, ` +
+      `retrying in ${(waitMs / 1000).toFixed(1)}s`
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+    return callOpenAIWithRetry(fn, attempt + 1);
+  }
+}
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Per-page classification. See SYSTEM_PROMPT for the semantics of each
@@ -192,24 +228,33 @@ export async function POST(request: NextRequest) {
       })),
     ];
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      // Generous budget — each page classification is ~50-80 tokens out;
-      // 6000 covers 30 pages comfortably plus structural overhead.
-      max_tokens: 6000,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'pdf_page_classifications',
-          strict: true,
-          schema: RESPONSE_SCHEMA,
+    // Retry with backoff on OpenAI rate limits. The TPM cap is a rolling
+    // 60s window; when long-appraisal classification fans out into
+    // multiple parallel batches (visionBoundaryDetection batches 60+
+    // page PDFs), it's possible to spike past the limit for a moment.
+    // Backing off and retrying is the right behavior — fail-fast would
+    // turn what's actually a transient slowdown into a no-result-found
+    // for the broker.
+    const completion = await callOpenAIWithRetry(async () =>
+      openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        // Generous budget — each page classification is ~50-80 tokens out;
+        // 6000 covers 30 pages comfortably plus structural overhead.
+        max_tokens: 6000,
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'pdf_page_classifications',
+            strict: true,
+            schema: RESPONSE_SCHEMA,
+          },
         },
-      },
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userContent },
-      ],
-    });
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ],
+      })
+    );
 
     const text = completion.choices[0]?.message?.content || '{"pages":[]}';
     let parsed: { pages: PageClassification[] };

@@ -53,7 +53,28 @@ interface PageClassification {
 // doesn't care about lossless compression artifacts on document text.
 const CLASSIFIER_RENDER_SCALE = 1.0;
 const CLASSIFIER_JPEG_QUALITY = 0.85;
-const CLASSIFIER_MAX_PAGES = 20;
+
+// Long-appraisal support: real broker appraisals often run 50-80 pages
+// with the actual comparable sales not appearing until page 30-50. The
+// previous 20-page cap meant we'd silently miss all comps on documents
+// like the Thorndale appraisal (71pp, comps on pp37-48) and fall back
+// to the less-reliable chunked extractor.
+//
+// New strategy: render up to 80 pages, then BATCH the classifier into
+// multiple parallel API calls. Each batch is 20 pages with 5-page
+// overlap so multi-page comps that span batch boundaries get classified
+// by at least one batch in full. The OpenAI vision API call per batch
+// is well under Vercel's 4.5MB request body limit (~80KB per page × 20
+// pages = 1.6MB).
+//
+// Per-batch comp_index values get offset to prevent collision when
+// merging (e.g., batch 1's "comp 1" and batch 2's "comp 1" are
+// different comps from different parts of the document). buildCompMap
+// renumbers correctly by document order regardless of the offset
+// values.
+const CLASSIFIER_MAX_PAGES = 80;
+const CLASSIFIER_BATCH_SIZE = 20;
+const CLASSIFIER_BATCH_OVERLAP = 5;
 
 /**
  * Classify the PDF's pages via the vision endpoint and assemble a
@@ -86,22 +107,83 @@ export async function detectCompBoundariesViaVision(
   }
   if (classifierImages.length === 0) return null;
 
-  // ─── 2. Call the classifier (single batched request) ──────────────
-  let pages: PageClassification[] = [];
-  try {
-    const res = await fetch('/api/classify-pdf-pages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ images: classifierImages }),
-    });
-    if (!res.ok) {
-      console.warn(`[vision-boundary] classifier HTTP ${res.status}`);
-      return null;
+  // ─── 2. Batch the classifier calls ──────────────────────────────
+  // Split into overlapping batches so we can classify documents longer
+  // than the per-call API page limit (and parallel-process to keep
+  // wall-clock time roughly equal to a single call).
+  const batches: Array<{ startPage: number; images: string[] }> = [];
+  {
+    let start = 0;
+    while (start < classifierImages.length) {
+      const end = Math.min(start + CLASSIFIER_BATCH_SIZE, classifierImages.length);
+      batches.push({
+        startPage: start + 1, // 1-indexed
+        images: classifierImages.slice(start, end),
+      });
+      if (end === classifierImages.length) break;
+      // Step forward by batch-size minus overlap so the next batch
+      // starts within the tail of the previous one. Multi-page comps
+      // that straddle a batch boundary will land entirely within the
+      // overlap window of at least one batch.
+      start = end - CLASSIFIER_BATCH_OVERLAP;
     }
-    const data = await res.json();
-    pages = Array.isArray(data?.pages) ? data.pages : [];
+  }
+  console.log(
+    `[vision-boundary] classifying ${classifierImages.length} pages ` +
+      `in ${batches.length} parallel batch(es)`
+  );
+
+  // Run all batches in parallel. Each batch's results come back with
+  // page numbers local to the batch (1-N) and comp_index values local
+  // to the batch — we remap both to global values before merging.
+  let pages: PageClassification[];
+  try {
+    const batchResults = await Promise.all(
+      batches.map(async (batch, batchIdx) => {
+        const res = await fetch('/api/classify-pdf-pages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images: batch.images }),
+        });
+        if (!res.ok) {
+          console.warn(
+            `[vision-boundary] batch ${batchIdx + 1} HTTP ${res.status}`
+          );
+          return [] as PageClassification[];
+        }
+        const data = await res.json();
+        const batchPages: PageClassification[] = Array.isArray(data?.pages)
+          ? data.pages
+          : [];
+        // Remap local page numbers to global; offset comp_index to
+        // prevent same-numbered comps from different batches from being
+        // merged into one group. The offset value is arbitrary — buildCompMap
+        // renumbers comps by document order downstream, so the temporary
+        // offset is just a uniqueness device.
+        return batchPages.map((p) => ({
+          ...p,
+          page: batch.startPage + p.page - 1,
+          comp_index:
+            p.comp_index != null ? batchIdx * 1000 + p.comp_index : null,
+        }));
+      })
+    );
+
+    // Merge batches, deduplicating overlapping page numbers. When the
+    // same page appears in two batches (the overlap window), prefer
+    // the first occurrence — both batches should classify identically,
+    // but if they disagree, the earlier batch's verdict wins
+    // arbitrarily. This is fine because the overlap exists to catch
+    // boundary-spanning comps, not to reconcile disagreements.
+    const byPage = new Map<number, PageClassification>();
+    for (const batchPages of batchResults) {
+      for (const p of batchPages) {
+        if (!byPage.has(p.page)) byPage.set(p.page, p);
+      }
+    }
+    pages = Array.from(byPage.values()).sort((a, b) => a.page - b.page);
   } catch (err: any) {
-    console.warn('[vision-boundary] classifier call threw:', err?.message);
+    console.warn('[vision-boundary] batched classifier call threw:', err?.message);
     return null;
   }
 
