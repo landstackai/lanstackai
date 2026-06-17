@@ -2511,7 +2511,7 @@ export default function ImportPage() {
     };
     setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
-    setLoadingStatus('Reading the appraisal with Claude…');
+    setLoadingStatus('Reading the appraisal with GPT + Claude in parallel…');
 
     // 95-second client cap. Server's own AbortController fires at 90s,
     // Vercel kills the function at 120s. The client's 95 leaves a
@@ -2524,7 +2524,13 @@ export default function ImportPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('/api/import-pdf-claude', {
+      // Orchestrator runs GPT (primary, preserves months of broker-tested
+      // prompt) + Claude (shadow, instant fallback) in parallel. The
+      // broker sees ONE result — whichever passed the failure-condition
+      // ladder. Both engines write to extraction_runs telemetry for the
+      // long-term comparison data we'll use to build an evidence-based
+      // router (~30-60 days from now).
+      const response = await fetch('/api/import-pdf-orchestrator', {
         method: 'POST',
         body: formData,
         signal: controller.signal,

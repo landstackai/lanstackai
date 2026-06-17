@@ -63,6 +63,13 @@ const COMP_SCHEMA = {
     sale_price_source: { type: ['string', 'null'] },
     price_land_only: { type: ['number', 'null'] },
     improvements_value: { type: ['number', 'null'] },
+    // Required citation paired with improvements_value. Added 2026-06-17
+    // after the Fritz Farm production bug: $190k saved when the correct
+    // value was $765k. Root cause was zero accountability for where the
+    // model grabbed the dollar figure from. Now every improvements_value
+    // must be itemized with arithmetic in this source string (e.g.
+    // "p2 · Remarks · irrigation $575,000 + hay barn $190,000 = $765,000").
+    improvements_value_source: { type: ['string', 'null'] },
     price_per_acre: { type: ['number', 'null'] },
     price_per_acre_source: { type: ['string', 'null'] },
     ppa_land_only: { type: ['number', 'null'] },
@@ -124,7 +131,7 @@ const COMP_SCHEMA = {
   required: [
     'property_name', 'county', 'state',
     'acres', 'acres_source', 'sale_price', 'sale_price_source',
-    'price_land_only', 'improvements_value',
+    'price_land_only', 'improvements_value', 'improvements_value_source',
     'price_per_acre', 'price_per_acre_source',
     'ppa_land_only', 'ppa_land_only_source',
     'sale_date', 'address', 'latitude', 'longitude',

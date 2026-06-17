@@ -19,7 +19,11 @@ export const maxDuration = 120; // vision + multi-page extraction can run up to 
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const IMPORT_SYSTEM_PROMPT = `You are Landstack AI — a land and ranch real estate data extraction specialist built for Texas land brokers.
+// Exported so the orchestrator route (which runs GPT + Claude in
+// parallel on every PDF upload) can reuse the same prompt that powers
+// the legacy /api/import-chat path. Single source of truth for GPT's
+// extraction behavior across both endpoints.
+export const IMPORT_SYSTEM_PROMPT = `You are Landstack AI — a land and ranch real estate data extraction specialist built for Texas land brokers.
 
 Your job is to:
 1. Read property documents, appraisals, closing statements, and descriptions
@@ -136,25 +140,63 @@ IMPROVEMENT VALUE — actively extract this. The downstream UI uses it to
 adjust per-acre pricing for land-only comparison, and a missing
 improvement value silently hides that adjustment from the broker.
 
+  WHAT COUNTS AS AN IMPROVEMENT — read this list twice:
+    STRUCTURES:
+      * House / dwelling / residence (any sf)
+      * Barn / hay barn / horse barn / metal barn
+      * Outbuildings / sheds / workshops / hangars
+      * Garages / carports
+    AGRICULTURAL INFRASTRUCTURE (BROKER-CRITICAL — easy to miss):
+      * Center-pivot irrigation systems (Valley, Reinke, etc.)
+      * Drip irrigation, flood irrigation
+      * Water wells with pumps (irrigation-capable)
+      * Livestock handling facilities (cattle pens, scales, chutes)
+      * Equipment sheds, hay storage
+    LAND IMPROVEMENTS:
+      * Cross-fencing / perimeter fencing
+      * Internal roads / paved drives
+      * Gated entries / cattle guards
+    RECREATIONAL:
+      * Hunting blinds / food plots / deer feeders
+      * Lodge facilities / shooting houses
+
   Field labels to look for (any document type):
     * "Improvement Value" / "Improved Value" / "Value of Improvements"
-    * "Improvements Contributory Value" / "ECV"
+    * "contributory value of $X" / "estimated contributory value"
+    * "Improvements Contributory Value" / "ECV" / "CV"
     * "Building Value" / "Dwelling Value" / "House Value"
-    * "Structures Value" / "Outbuildings Value" (sum these if separate)
+    * "Structures Value" / "Outbuildings Value"
     * MLS: "Improvement Value", "Imp Value", or the appraisal-district
-      line items quoted on the sheet — these are authoritative.
-    * Appraisal-district printouts referenced on MLS: "Improvement
-      Market Value", "Improvement Appraised Value".
+      line items quoted on the sheet.
 
-  When you find one of these → set improvements_value to that dollar
-  amount AND set has_improvements: true AND describe what's improved
-  in improvements_notes (e.g. "3,200 sf house + barn + cross-fencing").
+  HOW TO EXTRACT — three rules:
 
-  If multiple improvement values are itemized (house + barn + well
-  house), sum them. If only TOTAL appraised value and LAND value are
-  given separately, compute   improvements_value = total - land_value.
+  1. SUM EVERY CONTRIBUTORY VALUE. If the document mentions ANY phrase
+     like "contributory value of $X" or "ECV of $X" or "estimated value
+     of $X" anywhere — including separately for different features in
+     dense prose paragraphs apart — sum them all.
 
-  Do NOT confuse improvement_value with:
+     Real example (the Fritz Farm case): "The farm includes (4) Valley
+     center pivot irrigation systems with the estimated contributory
+     value of $575,000. Structural improvements include a hay barn with
+     the estimated contributory value of $190,000."
+     → improvements_value = $575,000 + $190,000 = $765,000
+     → NOT just $190,000 (barn only)
+     → NOT just $575,000 (irrigation only)
+     → improvements_notes lists BOTH features
+
+  2. NEVER USE A PER-ACRE FIGURE AS THE TOTAL. "$1,073 per acre" for
+     irrigation on a 536-acre property is the per-acre rate; the total
+     contributory value is $575,000. The per-acre figure is for
+     comparison, not for improvements_value.
+
+  3. ALWAYS PAIR WITH improvements_value_source. The source must
+     ITEMIZE every component and show the arithmetic. e.g.
+     "p2 · Remarks · irrigation $575,000 + hay barn $190,000 = $765,000"
+     NOT "p2 · Remarks · improvements"
+     NOT "estimated from context"
+
+  Do NOT confuse improvements_value with:
     * "Improvement Cost" / "Replacement Cost" — that's what it WOULD
       cost to rebuild, not the contributory value baked into the sale
       price. Skip unless the doc explicitly equates the two.
@@ -167,16 +209,33 @@ improvement value silently hides that adjustment from the broker.
   present — let the DB derive it. Only extract ppa_land_only when the
   document explicitly prints a land-only price-per-acre.
 
+PRIOR SALES — do not confuse with the documented transaction.
+
+  Many comp sheets mention a PRIOR sale of the same property at the
+  bottom of the Remarks (e.g. "The 536.01 acres was purchased by the
+  Grantor from Marsha Powell, Trustee of the Powell Family Trust in
+  October 2020 for $1,980,466 or $3,695 per acre"). The CURRENT
+  transaction's sale_price / sale_date / grantor / grantee are at the
+  TOP of the document in the Transaction Information block — NOT the
+  prior sale.
+
+  Never use prior-sale numbers in any field of the current comp.
+
 CITE THE SOURCE — every numeric field must include a paired _source string
 identifying the EXACT location in the document the value came from. This is
 the strongest defense against silent wrong extractions like saving 9 acres
 for a 796-acre property.
 
 Required _source fields:
-  acres_source           — for "acres"
-  sale_price_source      — for "sale_price"
-  price_per_acre_source  — for "price_per_acre"
-  ppa_land_only_source   — for "ppa_land_only"
+  acres_source                — for "acres"
+  sale_price_source           — for "sale_price"
+  price_per_acre_source       — for "price_per_acre"
+  ppa_land_only_source        — for "ppa_land_only"
+  improvements_value_source   — for "improvements_value" (NEW — added after
+                                Fritz Farm $190k bug: format must itemize
+                                each component with arithmetic, e.g.
+                                "p2 · Remarks · irrigation $575,000 +
+                                hay barn $190,000 = $765,000")
 
 Source format examples (preferred → acceptable → unacceptable):
 

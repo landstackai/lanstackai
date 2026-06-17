@@ -78,7 +78,9 @@ const anthropic = new Anthropic({
 //      can route on it later (extraction_runs.doc_type).
 //   3. evidence_pages on each comp lets us deep-link from the vault back
 //      into the specific pages this comp was drawn from.
-const SUBMIT_COMPS_TOOL: Anthropic.Tool = {
+// Exported so the orchestrator route can reuse the same tool schema.
+// Single source of truth for Claude's structured-output contract.
+export const SUBMIT_COMPS_TOOL: Anthropic.Tool = {
   name: 'submit_comps',
   description:
     'Submit the structured comps extracted from this PDF. Call this tool exactly once after reading the entire document.',
@@ -251,7 +253,8 @@ const SUBMIT_COMPS_TOOL: Anthropic.Tool = {
   },
 };
 
-const SYSTEM_PROMPT = `You are Landstack AI — a land and ranch real estate data extraction specialist for Texas land brokers.
+// Exported so the orchestrator route can reuse Claude's prompt.
+export const CLAUDE_PDF_SYSTEM_PROMPT = `You are Landstack AI — a land and ranch real estate data extraction specialist for Texas land brokers.
 
 You receive a PDF of a real-estate document (most often a Stouffer-style appraisal report or a single-property comp sheet). Read every page, identify what kind of document it is, and extract all comparable sales using the submit_comps tool.
 
@@ -462,7 +465,7 @@ export async function POST(request: NextRequest) {
           // Long appraisals (Thorndale = 6 comps) stay under 8k tokens
           // out empirically. Bumped to 16k to leave headroom.
           max_tokens: 16000,
-          system: SYSTEM_PROMPT,
+          system: CLAUDE_PDF_SYSTEM_PROMPT,
           tools: [SUBMIT_COMPS_TOOL],
           tool_choice: { type: 'tool', name: 'submit_comps' },
           messages: [
