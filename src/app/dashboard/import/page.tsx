@@ -2528,34 +2528,26 @@ export default function ImportPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      // Start aerial extraction IN PARALLEL with the AI extraction.
-      // extractLargestAerialPerPage scans PDFs for embedded raster
-      // XObjects (the actual aerial photo bytes already inside the
-      // PDF) — it does NOT render full pages. That's why it doesn't
-      // have the Thorndale-stall problem the legacy pdfToImages path
-      // had: 71 pages, 6 embedded images, ~3 seconds total instead
-      // of 10 minutes.
-      const aerialsPromise = extractLargestAerialPerPage(file).catch(
-        (e) => {
-          console.warn('[import] aerial extraction threw:', e);
-          return [] as Array<{ page: number; dataUrl: string }>;
-        },
-      );
-
-      // Orchestrator runs GPT (primary, preserves months of broker-tested
-      // prompt) + Claude (shadow, instant fallback) in parallel. The
-      // broker sees ONE result — whichever passed the failure-condition
-      // ladder. Both engines write to extraction_runs telemetry for the
-      // long-term comparison data we'll use to build an evidence-based
-      // router (~30-60 days from now).
-      const [response, sourceAerials] = await Promise.all([
-        fetch('/api/import-pdf-orchestrator', {
-          method: 'POST',
-          body: formData,
-          signal: controller.signal,
-        }),
-        aerialsPromise,
-      ]);
+      // Client-side aerial extraction was removed here. The previous
+      // version ran extractLargestAerialPerPage in parallel with the
+      // orchestrator fetch via Promise.all — but pdfjs's XObject scan
+      // on a 71-page PDF held the browser hostage long enough to look
+      // like a stuck upload to the broker. Same root cause as the
+      // legacy pdfToImages stall, just smaller in magnitude.
+      //
+      // Source-document context (the broker's "let me verify this
+      // extraction against the actual page") is being rebuilt as a
+      // server-side per-comp page extraction → Supabase Storage flow.
+      // See /api/import-pdf-orchestrator (next iteration) for the
+      // pdf-lib-based slice + upload pipeline. The verification card
+      // gains a "Source pages" section that loads the saved per-comp
+      // PDF on demand. No client-side PDF rendering on the upload
+      // path means no stall.
+      const response = await fetch('/api/import-pdf-orchestrator', {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+      });
 
       const data = await response.json();
 
@@ -2572,21 +2564,14 @@ export default function ImportPage() {
         return;
       }
 
-      // Aerial attribution — bind each extracted comp to its source
-      // photo from the PDF using the citation page numbers the AI
-      // returned in *_source fields. attachAerialsToComps handles the
-      // letterhead-vs-real-aerial filtering (subject thumbnail repeats
-      // across pages) so we don't accidentally paste the same image on
-      // every comp.
-      if (data.comps.length > 0 && sourceAerials.length > 0) {
-        const { attached, missed } = attachAerialsToComps(
-          data.comps,
-          sourceAerials,
-        );
-        console.log(
-          `[import] aerial attribution: ${attached}/${data.comps.length} comps got a thumbnail (${missed} missed)`,
-        );
-      }
+      // Aerial attribution removed alongside the client-side aerial
+      // extraction. The next iteration of the orchestrator extracts
+      // each comp's evidence_pages server-side via pdf-lib and uploads
+      // the slice to Supabase Storage; the verification card pulls the
+      // saved per-comp PDF on demand. Until that ships, comps still
+      // include the original source-document URL on the orchestrator's
+      // response so the broker can click through to the appraisal in
+      // a new tab to verify visually.
 
       // Location resolution — ALWAYS run the full autoLocate pipeline,
       // even when the AI already returned lat/lng.
