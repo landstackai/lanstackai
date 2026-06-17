@@ -16,6 +16,7 @@ import {
   attachSourceDocumentToComps,
 } from '@/lib/utils/compDocuments';
 import { extractLargestAerial, extractLargestAerialPerPage } from '@/lib/utils/pdfExtractAerial';
+import { getCountyParcels, findParcelAt, getCountySource } from '@/lib/utils/countyParcels';
 import { mapboxStaticUrl } from '@/lib/utils/mapboxStaticImage';
 import { normalizeCountyForStorage } from '@/lib/utils/normalizeCounty';
 import { findDuplicateCandidates, type DuplicateMatch } from '@/lib/utils/findDuplicates';
@@ -2527,17 +2528,34 @@ export default function ImportPage() {
       const formData = new FormData();
       formData.append('file', file);
 
+      // Start aerial extraction IN PARALLEL with the AI extraction.
+      // extractLargestAerialPerPage scans PDFs for embedded raster
+      // XObjects (the actual aerial photo bytes already inside the
+      // PDF) — it does NOT render full pages. That's why it doesn't
+      // have the Thorndale-stall problem the legacy pdfToImages path
+      // had: 71 pages, 6 embedded images, ~3 seconds total instead
+      // of 10 minutes.
+      const aerialsPromise = extractLargestAerialPerPage(file).catch(
+        (e) => {
+          console.warn('[import] aerial extraction threw:', e);
+          return [] as Array<{ page: number; dataUrl: string }>;
+        },
+      );
+
       // Orchestrator runs GPT (primary, preserves months of broker-tested
       // prompt) + Claude (shadow, instant fallback) in parallel. The
       // broker sees ONE result — whichever passed the failure-condition
       // ladder. Both engines write to extraction_runs telemetry for the
       // long-term comparison data we'll use to build an evidence-based
       // router (~30-60 days from now).
-      const response = await fetch('/api/import-pdf-orchestrator', {
-        method: 'POST',
-        body: formData,
-        signal: controller.signal,
-      });
+      const [response, sourceAerials] = await Promise.all([
+        fetch('/api/import-pdf-orchestrator', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        }),
+        aerialsPromise,
+      ]);
 
       const data = await response.json();
 
@@ -2554,11 +2572,37 @@ export default function ImportPage() {
         return;
       }
 
-      // Browser-side auto-locate for comps Claude didn't already pin.
-      // Most appraisal comp sheets include an explicit "Geographic
-      // Location" lat/lng (Thorndale: every comp had one); we keep
-      // those as-is. Only comps without coords run through the parcel
-      // matcher.
+      // Aerial attribution — bind each extracted comp to its source
+      // photo from the PDF using the citation page numbers the AI
+      // returned in *_source fields. attachAerialsToComps handles the
+      // letterhead-vs-real-aerial filtering (subject thumbnail repeats
+      // across pages) so we don't accidentally paste the same image on
+      // every comp.
+      if (data.comps.length > 0 && sourceAerials.length > 0) {
+        const { attached, missed } = attachAerialsToComps(
+          data.comps,
+          sourceAerials,
+        );
+        console.log(
+          `[import] aerial attribution: ${attached}/${data.comps.length} comps got a thumbnail (${missed} missed)`,
+        );
+      }
+
+      // Location resolution — three cases:
+      //
+      //   1. AI returned lat/lng but NO geometry (typical: appraiser's
+      //      "Geographic Location" lat/lng was in the doc):
+      //      → Keep AI coords. Look up the parcel polygon AT those
+      //        coords so the boundary draws on the map. This was the
+      //        KWO bug — the pin showed but no boundary because we
+      //        skipped autolocate entirely when AI had coords.
+      //
+      //   2. AI returned NO coords at all:
+      //      → Fall back to full autoLocate (parcel match by owner +
+      //        geocode by address). Same behavior the legacy path had.
+      //
+      //   3. AI returned coords AND geometry (rare):
+      //      → Keep both. Trust the AI.
       if (data.comps.length > 0) {
         setLoadingStatus(
           `Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`,
@@ -2566,16 +2610,55 @@ export default function ImportPage() {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
           const label = c.property_name || c.county || 'comp';
-          if (c.latitude != null && c.longitude != null) {
-            console.log(
-              `[import-claude] ${label}: AI-extracted coords (${c.latitude}, ${c.longitude}) — skipping auto-locate`,
-            );
+          const hasCoords = c.latitude != null && c.longitude != null;
+          const hasGeometry = c.geometry != null;
+
+          if (hasCoords && hasGeometry) {
+            continue; // both present, nothing to do
+          }
+
+          if (hasCoords && !hasGeometry) {
+            // Case 1: trust AI coords, add the polygon via point-in-polygon
+            // against the county parcel features. No risk of overwriting
+            // the AI's lat/lng since we only touch geometry + parcel_id.
+            try {
+              const countyKey = String(c.county || '').toLowerCase().trim();
+              if (countyKey && getCountySource(countyKey)) {
+                const parcelData = await getCountyParcels(countyKey);
+                const features = parcelData?.features ?? [];
+                if (Array.isArray(features) && features.length > 0) {
+                  const parcel = findParcelAt(c.latitude, c.longitude, features);
+                  if (parcel) {
+                    data.comps[i] = {
+                      ...c,
+                      geometry: parcel.geometry,
+                      parcel_id: c.parcel_id ?? parcel.properties?.parcel_id ?? null,
+                    };
+                    console.log(
+                      `[import] ${label}: AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) → matched parcel polygon in ${countyKey}`,
+                    );
+                  } else {
+                    console.warn(
+                      `[import] ${label}: AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) — no parcel polygon at those coords in ${countyKey}. Pin only, no boundary.`,
+                    );
+                  }
+                }
+              } else {
+                console.warn(
+                  `[import] ${label}: county "${c.county}" not in parcel source registry. Pin only, no boundary.`,
+                );
+              }
+            } catch (e: any) {
+              console.error(`[import] parcel polygon lookup threw for ${label}:`, e);
+            }
             continue;
           }
+
+          // Case 2: no coords at all → full autoLocate pipeline.
           try {
             const located = await locateCompForImport(c);
             if (located) {
-              console.log(`[import-claude] auto-locate ✓ ${label}: ${located.match_reason}`);
+              console.log(`[import] auto-locate ✓ ${label}: ${located.match_reason}`);
               toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
               data.comps[i] = {
                 ...c,
@@ -2587,7 +2670,7 @@ export default function ImportPage() {
               };
             }
           } catch (e: any) {
-            console.error(`[import-claude] auto-locate threw for ${label}:`, e);
+            console.error(`[import] auto-locate threw for ${label}:`, e);
           }
         }
       }
