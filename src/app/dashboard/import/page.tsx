@@ -1134,11 +1134,35 @@ export default function ImportPage() {
   // be more confusing than useful.
   const SESSION_STORAGE_KEY = 'import-session';
 
-  // Restore on first mount. Wrapped in try/catch because malformed
-  // sessionStorage (manual user edit, version mismatch) shouldn't crash
-  // the import page — fall back to the empty-greeting initial state.
+  // Restore on first mount. Distinguish navigation TYPE so refresh
+  // means "start fresh":
+  //
+  //   • `reload` (Cmd+R or Cmd+Shift+R) → clear sessionStorage and
+  //     start with a clean page. Broker expectation: refresh = wipe.
+  //     Previously, refresh kept four stacked [Document uploaded]
+  //     messages from failed/repeated uploads, which was confusing.
+  //
+  //   • `navigate` or `back_forward` (Christina clicked into
+  //     /dashboard/review/<id> and hit Back, or used the in-app
+  //     nav to return) → RESTORE state. She still has unreviewed
+  //     comps from the batch she just imported; losing them on a
+  //     simple navigation would be infuriating.
+  //
+  // The Performance Navigation Timing API gives us a clean "what
+  // brought you to this page" signal: `navEntry.type`.
   useEffect(() => {
     try {
+      const navEntry = (typeof performance !== 'undefined'
+        ? (performance.getEntriesByType('navigation')[0] as
+            | PerformanceNavigationTiming
+            | undefined)
+        : undefined);
+      const isReload = navEntry?.type === 'reload';
+      if (isReload) {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+
       const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (!raw) return;
       const restored = JSON.parse(raw);
