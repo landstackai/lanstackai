@@ -493,9 +493,29 @@ export default function VaultPage() {
               Comp Vault
             </h1>
             <p className="text-[13px] text-ink-2 mt-2 font-normal">
-              {stats.total === 1
-                ? 'One property in your land sales database.'
-                : `${stats.total.toLocaleString()} properties in your land sales database.`}
+              {(() => {
+                // stats.total reflects the CURRENT QUERY result, which
+                // shrinks as filters are applied. Showing "0 properties
+                // in your land sales database" when the database has
+                // comps but a filter excluded them is misleading — looks
+                // like the vault is broken.
+                //
+                // When filters are active, qualify the count: "N matches
+                // in your land sales database" instead of "N properties."
+                const hasFilter = !!(
+                  filters.search || filters.county || filters.status || filters.water ||
+                  filters.min_acres || filters.max_acres || filters.visibility || aiQuery || aiCriteria
+                );
+                const n = stats.total.toLocaleString();
+                if (hasFilter) {
+                  return stats.total === 1
+                    ? '1 match in your current filter.'
+                    : `${n} matches in your current filter.`;
+                }
+                return stats.total === 1
+                  ? 'One property in your land sales database.'
+                  : `${n} properties in your land sales database.`;
+              })()}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -550,11 +570,20 @@ export default function VaultPage() {
               placeholder='Ask: "Live water Kerr, Kendall, Comal" or "500+ acres in Frio County"'
               value={aiQuery || filters.search}
               onChange={(e) => {
+                // Type into the AI bar without committing a filter. The
+                // ask-AI handler (Enter / Ask button) decides whether the
+                // text becomes structured aiCriteria OR a plain-text
+                // filters.search — based on what /api/ai-search returns.
+                //
+                // Why we don't mirror to filters.search on every keystroke:
+                // typing "500+" or "live water Frio" was firing a literal
+                // ILIKE substring search BEFORE the AI parser saw the
+                // string. None of those substrings exist in any
+                // property_name / county / description, so the query
+                // returned zero rows and the UI rendered "0 properties in
+                // your database" + "No comps yet" — even though the vault
+                // was full and the user just hadn't pressed Enter yet.
                 setAiQuery(e.target.value);
-                // Mirror to filters.search so plain-text fallback keeps
-                // working as the user types — the AI handler clears it
-                // when it takes over.
-                setFilters({ ...filters, search: e.target.value });
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -923,29 +952,60 @@ export default function VaultPage() {
             <div className="w-6 h-6 border-2 border-olive border-t-transparent rounded-full animate-spin" />
           </div>
         ) : comps.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-center">
-            <div className="w-12 h-12 rounded-xl bg-cream border border-beige flex items-center justify-center mb-3">
-              <FileText size={20} className="text-ink-2" />
-            </div>
-            <p className="text-sm font-semibold text-ink mb-1">No comps yet</p>
-            <p className="text-xs text-ink-2 mb-4">
-              Add your first comp or import from a PDF
-            </p>
-            <div className="flex gap-2">
+          // Distinguish TWO empty states:
+          //   • "No matches" — vault has comps but the current filter
+          //     produced zero rows. The fix is "clear the filter," NOT
+          //     "go add comps." Showing the "Add your first comp" CTA
+          //     here was a false-positive — it gaslit users who DO have
+          //     comps and just have an active query that excluded them.
+          //   • "Truly empty" — the database query came back zero rows
+          //     AND no filter / search / AI criteria is active. That's
+          //     the real "go add comps" state.
+          (filters.search || filters.county || filters.status || filters.water ||
+            filters.min_acres || filters.max_acres || filters.visibility || aiQuery || aiCriteria) ? (
+            <div className="flex flex-col items-center justify-center h-64 text-center">
+              <div className="w-12 h-12 rounded-xl bg-cream border border-beige flex items-center justify-center mb-3">
+                <Search size={20} className="text-ink-2" />
+              </div>
+              <p className="text-sm font-semibold text-ink mb-1">No matches</p>
+              <p className="text-xs text-ink-2 mb-4">
+                Your vault has comps, but none match the current filter.
+              </p>
               <button
-                onClick={() => setShowQuickCapture(true)}
+                onClick={() => {
+                  clearAiFilter();
+                  setFilters(defaultFilters);
+                }}
                 className="px-4 py-2 bg-white border border-beige text-xs font-semibold text-ink rounded-lg hover:border-olive transition-colors"
               >
-                Quick Add
-              </button>
-              <button
-                onClick={() => setShowAddModal(true)}
-                className="px-4 py-2 bg-olive text-white text-xs font-semibold rounded-lg hover:bg-olive-2 transition-colors"
-              >
-                Add Comp
+                Clear filter
               </button>
             </div>
-          </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-64 text-center">
+              <div className="w-12 h-12 rounded-xl bg-cream border border-beige flex items-center justify-center mb-3">
+                <FileText size={20} className="text-ink-2" />
+              </div>
+              <p className="text-sm font-semibold text-ink mb-1">No comps yet</p>
+              <p className="text-xs text-ink-2 mb-4">
+                Add your first comp or import from a PDF
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowQuickCapture(true)}
+                  className="px-4 py-2 bg-white border border-beige text-xs font-semibold text-ink rounded-lg hover:border-olive transition-colors"
+                >
+                  Quick Add
+                </button>
+                <button
+                  onClick={() => setShowAddModal(true)}
+                  className="px-4 py-2 bg-olive text-white text-xs font-semibold rounded-lg hover:bg-olive-2 transition-colors"
+                >
+                  Add Comp
+                </button>
+              </div>
+            </div>
+          )
         ) : viewMode === 'grid' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {comps.map((comp) => (
