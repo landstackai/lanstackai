@@ -16,7 +16,11 @@
 
 // @ts-expect-error — turf v6.5 types not exposed via package "exports"
 import * as turf from '@turf/turf';
-import { mergeFeatures } from './countyParcels';
+import {
+  mergeFeatures,
+  normalizeParcelFeature,
+  normalizeParcelFeatures,
+} from './countyParcels';
 
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
@@ -130,7 +134,9 @@ async function queryByCountyAndAcreage(
       return [];
     }
     const json = await res.json();
-    const features = Array.isArray(json?.features) ? json.features : [];
+    const features = normalizeParcelFeatures(
+      Array.isArray(json?.features) ? json.features : [],
+    );
     console.log(`TxGIO: county=${county} acres=${minAcres.toFixed(0)}-${maxAcres.toFixed(0)} → ${features.length}`);
     return features;
   } catch (e: any) {
@@ -165,7 +171,9 @@ async function queryBboxAllParcels(
     });
     if (!res.ok) return [];
     const json = await res.json();
-    const features = Array.isArray(json?.features) ? json.features : [];
+    const features = normalizeParcelFeatures(
+      Array.isArray(json?.features) ? json.features : [],
+    );
     console.log(`TxGIO: bbox ${radiusMiles}mi → ${features.length} parcels`);
     return features;
   } catch (e: any) {
@@ -203,7 +211,9 @@ async function queryBboxAndAcreage(
     });
     if (!res.ok) return [];
     const json = await res.json();
-    return Array.isArray(json?.features) ? json.features : [];
+    return normalizeParcelFeatures(
+      Array.isArray(json?.features) ? json.features : [],
+    );
   } catch {
     return [];
   }
@@ -546,7 +556,15 @@ async function fetchOwnerParcels(
       return [];
     }
     const data = await res.json();
-    const features = Array.isArray(data?.features) ? data.features : [];
+    // Apply gis_area fallback before we hand to downstream consumers
+    // (tight-filter, cluster-spatially, multi-parcel-sum). For counties
+    // like Williamson where TxGIO returns gis_area=0 across the board,
+    // this is the difference between "owner search returned 37 parcels
+    // we can't disambiguate" and "owner search returned 37 parcels
+    // with real acreage that cluster cleanly into the target tract."
+    const features = normalizeParcelFeatures(
+      Array.isArray(data?.features) ? data.features : [],
+    );
 
     // Client-side AND-filter: every token (≥3 chars) must appear in owner_name
     const tight = features.filter((f: any) => {

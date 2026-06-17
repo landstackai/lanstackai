@@ -107,7 +107,12 @@ async function tryTxGIO(lat: number, lng: number): Promise<{ parcel: Parcel | nu
   }
   if (!data) return { parcel: null, error: lastErr || 'no_data' };
 
-  const f = data.features?.[0];
+  // Normalize gis_area at ingestion. For TX counties whose CADs don't
+  // populate the acreage field (Williamson is the documented case),
+  // computes acres from polygon geometry as a fallback. Pass-through
+  // when the field is already valid.
+  const { normalizeParcelFeature } = await import('@/lib/utils/countyParcels');
+  const f = normalizeParcelFeature(data.features?.[0]);
   if (!f) return { parcel: null, error: 'no_match' };
   const p = f.properties || {};
   const acres = parseFloat(p.gis_area);

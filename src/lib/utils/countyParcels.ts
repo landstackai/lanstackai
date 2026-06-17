@@ -87,7 +87,12 @@ async function fetchAllPages(source: CountySource) {
   let offset = 0;
   for (;;) {
     const page = await fetchPage(source.queryBase, source.outFields, offset, source.pageSize);
-    const got = (page.features || []) as any[];
+    // Apply gis_area fallback at ingestion. For counties whose CADs
+    // populate the field correctly (Blanco), this is a no-op pass-
+    // through. For ones that don't, the computed area gets stored on
+    // the feature so downstream consumers (findContiguousSameOwner,
+    // cluster code) see a real number.
+    const got = normalizeParcelFeatures(page.features || []) as any[];
     features.push(...got);
     if (got.length < source.pageSize) break;
     offset += source.pageSize;
@@ -130,6 +135,64 @@ export async function getCountyParcels(countyKey: string): Promise<any> {
 
 export function getCountySource(countyKey: string): CountySource | null {
   return COUNTY_SOURCES[countyKey.toLowerCase()] || null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Parcel feature normalization.
+//
+// Some county records (Williamson is the canonical example, but the same
+// pattern shows up sporadically across Texas) return parcels through
+// TxGIO with a fully populated geometry but a NULL or 0 `gis_area`
+// field. autoLocate's clustering, multi-parcel-sum, and confidence
+// ladder all gate on acreage — so without a real number, even a
+// perfectly-matched owner can't get corroborated and no boundary draws.
+//
+// The fix is a single fallback applied at INGESTION: if `gis_area` is
+// missing OR zero, compute it from the polygon geometry using turf's
+// geodesic area (in square meters), convert to acres. When `gis_area`
+// is valid, return the feature byte-for-byte unchanged — no impact on
+// the counties that already worked. The downstream code (cluster,
+// corroboration, confidence tiers, multi-parcel sum) is untouched.
+//
+// SAFETY GUARANTEES:
+//   • Feature with gis_area > 0   → returned identical to input
+//   • Feature with gis_area null  → returned with computed acres in
+//                                    the same field (consumers don't know)
+//   • Feature with bad geometry   → returned as-is (we don't make things
+//                                    up out of nothing)
+//   • _gis_area_computed: true     → debug marker so we can find the
+//                                    cases where we filled in a value
+//
+// Variance note: computed area via turf is the actual polygon area in
+// WGS84. Stated acreage may differ from this by 0.5-5% on irregular
+// parcels (survey methodology, ROW exclusions, etc.). The fallback is
+// only used when the stated value is missing entirely — we don't
+// overwrite good data with worse.
+const SQ_METERS_PER_ACRE = 4046.8564224;
+
+export function normalizeParcelFeature(feature: any): any {
+  if (!feature || !feature.properties || !feature.geometry) return feature;
+  const stated = +feature.properties.gis_area || 0;
+  if (stated > 0) return feature; // ── working case: pass through unchanged
+  try {
+    const acres = turf.area(feature) / SQ_METERS_PER_ACRE;
+    if (!Number.isFinite(acres) || acres <= 0) return feature;
+    return {
+      ...feature,
+      properties: {
+        ...feature.properties,
+        gis_area: acres,
+        _gis_area_computed: true,
+      },
+    };
+  } catch {
+    return feature; // malformed geometry — can't help, return as-is
+  }
+}
+
+export function normalizeParcelFeatures(features: any[]): any[] {
+  if (!Array.isArray(features)) return [];
+  return features.map(normalizeParcelFeature);
 }
 
 export function findParcelAt(lat: number, lng: number, features: any[]): any | null {
