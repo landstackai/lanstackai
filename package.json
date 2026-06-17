@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.2",
     "@hookform/resolvers": "^3.9.0",
     "@mapbox/mapbox-gl-draw": "^1.5.1",
     "@react-pdf/renderer": "^4.5.1",

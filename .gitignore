@@ -45,3 +45,11 @@ next-env.d.ts
 # All test render directories — local-only debug artifacts.
 # Catches future .test-anything dirs without needing per-name entries.
 .test-*/
+
+# Test corpus PDFs are broker/appraiser source documents — often
+# confidential. Ground-truth JSON labels we hand-author ARE committed
+# (test-corpus/ground-truth/*.json) so every prompt change can run
+# regression against them. The PDFs themselves stay local-only.
+test-corpus/*.pdf
+test-corpus/**/*.pdf
+test-corpus-results/

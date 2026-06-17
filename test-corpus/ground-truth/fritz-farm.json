@@ -1,0 +1,55 @@
+{
+  "_meta": {
+    "source_file": "June2022.536.01Acres.$8489Acre.Farm.pdf",
+    "document_type": "comp_sheet",
+    "doc_format": "single-page-comp narrative with prose remarks",
+    "added_by": "Louie",
+    "added_at": "2026-06-17",
+    "why_it_matters": "Tests improvements_value extraction when multiple contributory values are buried in prose remarks (not in a labeled table). Tests prior-sale disambiguation. Tests irrigation-as-improvement recognition.",
+    "failure_modes_to_catch": [
+      "AI grabs only the hay barn ($190,000) and misses the irrigation",
+      "AI grabs only the irrigation ($575,000) and misses the barn",
+      "AI confuses per-acre improvement value ($1,073 or $354) with total improvement value",
+      "AI confuses the 2020 prior sale ($1,980,466 / $3,695 per acre) with the current sale"
+    ]
+  },
+  "expected_comps": [
+    {
+      "property_name": "Fritz Farm",
+      "county": "Frio",
+      "state": "TX",
+      "acres": 536.01,
+      "acres_source_must_contain": "Property Size",
+      "sale_price": 4550000,
+      "sale_price_source_must_contain": "Sale Price",
+      "sale_date": "2022-06-29",
+      "price_per_acre": 8489,
+      "price_per_acre_source_must_contain": "Sale Price Per Acre",
+      "improvements_value": 765000,
+      "improvements_value_source_must_contain_all": ["irrigation", "barn"],
+      "improvements_value_breakdown": {
+        "irrigation_systems": 575000,
+        "hay_barn": 190000
+      },
+      "price_land_only": 3785000,
+      "ppa_land_only_approx": 7062,
+      "has_improvements": true,
+      "improvements_notes_must_contain": ["irrigation", "barn"],
+      "grantor": "Gary W. & April N. Fritz",
+      "grantee": "9L Farms, LLC",
+      "recording_number": "Volume No. 332, Page No. 423",
+      "water": "Strong",
+      "irrigation": "Strong",
+      "has_water_rights": true,
+      "minerals_sold": "Surface Only",
+      "is_subject_property": false,
+      "is_comparable": true
+    }
+  ],
+  "must_NOT_appear": {
+    "reason": "These are prior-sale values that the model must NOT confuse with the documented transaction.",
+    "wrong_sale_price": 1980466,
+    "wrong_price_per_acre": 3695,
+    "wrong_sale_date_year": 2020
+  }
+}
