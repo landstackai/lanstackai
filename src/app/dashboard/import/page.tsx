@@ -2475,117 +2475,193 @@ export default function ImportPage() {
     }
   };
 
+  // ═══════════════════════════════════════════════════════════════════
+  // Claude PDF route — the new default for all PDF imports.
+  //
+  // Replaces the legacy client-side pdf.js → vision-classifier →
+  // chunked-extraction pipeline. Solves two production-confirmed bugs
+  // in one move:
+  //
+  //   1. 60+ page appraisals hung at "Rendering PDF pages…" forever
+  //      because Safari throttled the tab while pdf.js held every
+  //      rendered page image in browser memory. Confirmed June 17 on
+  //      the Thorndale 71-page appraisal — 10 minutes of stuck spinner
+  //      before the broker gave up.
+  //
+  //   2. Fritz Farm's improvements_value came back as $190k (the hay
+  //      barn alone) and silently dropped the $575k irrigation system.
+  //      The legacy prompt didn't require an improvements_value_source
+  //      citation, so the model could be vague about which dollar figure
+  //      it picked. The Claude route's tool schema makes that citation
+  //      mandatory and the system prompt explicitly teaches Claude that
+  //      irrigation/wells/fencing are improvements (not just structures).
+  //
+  // PDF bytes go straight from the browser to /api/import-pdf-claude
+  // (no client-side render), which forwards base64 to Anthropic and
+  // returns the SAME { message, comps, diagnostic } shape that the
+  // legacy /api/import-chat returns. We then run the SAME
+  // post-extraction pipeline that sendMessage runs after the fetch
+  // (browser-side auto-locate, dedupe, auto-save, push to chat).
+  // ═══════════════════════════════════════════════════════════════════
+  const processPdfWithClaude = async (file: File) => {
+    const userMessage: Message = {
+      role: 'user',
+      content: `[Document uploaded]\n${file.name}`,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setLoading(true);
+    setLoadingStatus('Reading the appraisal with Claude…');
+
+    // 95-second client cap. Server's own AbortController fires at 90s,
+    // Vercel kills the function at 120s. The client's 95 leaves a
+    // narrow gap to receive the server's clean "timeout" response
+    // rather than racing the network and showing a generic abort.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 95_000);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('/api/import-pdf-claude', {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !Array.isArray(data.comps)) {
+        toast.error(data?.message || 'Failed to extract from PDF');
+        const errorMessage: Message = {
+          role: 'assistant',
+          content:
+            data?.message ||
+            "Couldn't read this PDF. Try a different file or split it into smaller sections.",
+          timestamp: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+        return;
+      }
+
+      // Browser-side auto-locate for comps Claude didn't already pin.
+      // Most appraisal comp sheets include an explicit "Geographic
+      // Location" lat/lng (Thorndale: every comp had one); we keep
+      // those as-is. Only comps without coords run through the parcel
+      // matcher.
+      if (data.comps.length > 0) {
+        setLoadingStatus(
+          `Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`,
+        );
+        for (let i = 0; i < data.comps.length; i++) {
+          const c = data.comps[i];
+          const label = c.property_name || c.county || 'comp';
+          if (c.latitude != null && c.longitude != null) {
+            console.log(
+              `[import-claude] ${label}: AI-extracted coords (${c.latitude}, ${c.longitude}) — skipping auto-locate`,
+            );
+            continue;
+          }
+          try {
+            const located = await locateCompForImport(c);
+            if (located) {
+              console.log(`[import-claude] auto-locate ✓ ${label}: ${located.match_reason}`);
+              toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
+              data.comps[i] = {
+                ...c,
+                latitude: located.latitude,
+                longitude: located.longitude,
+                parcel_id: located.parcel_id ?? c.parcel_id,
+                geometry: located.geometry,
+                _auto_located_confidence: located.match_confidence,
+              };
+            }
+          } catch (e: any) {
+            console.error(`[import-claude] auto-locate threw for ${label}:`, e);
+          }
+        }
+      }
+
+      // Dedupe vs the user's existing vault.
+      if (data.comps.length > 0) {
+        setLoadingStatus('Checking your vault for duplicates…');
+        await runDuplicateCheck(data.comps, supabase);
+        await autoSaveExtracted(data.comps);
+      }
+
+      const assistantMessage: Message = {
+        role: 'assistant',
+        content:
+          data.message ||
+          (data.comps.length === 0
+            ? 'No comparable sales found in this document.'
+            : `Extracted ${data.comps.length} ${data.comps.length === 1 ? 'comp' : 'comps'} from your PDF.`),
+        comps: data.comps,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      if (data.comps.length > 0) {
+        setPendingComps((prev) => [...prev, ...data.comps]);
+      }
+
+      // Telemetry — log timing + token usage server-returned in diagnostic.
+      if (data.diagnostic) {
+        console.log(
+          `[import-claude] ${file.name} · ${data.comps.length} comps in ` +
+            `${(data.diagnostic.elapsed_ms / 1000).toFixed(1)}s · ` +
+            `tokens in=${data.diagnostic.input_tokens} out=${data.diagnostic.output_tokens}`,
+        );
+      }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        toast.error(
+          'PDF extraction took longer than 90 seconds and was cancelled. Try splitting the PDF into smaller sections.',
+        );
+        const errorMessage: Message = {
+          role: 'assistant',
+          content:
+            'That PDF took too long to process and was cancelled. If it has a separate Sales Comparison section, try uploading just those pages.',
+          timestamp: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      } else {
+        console.error('[import-claude] error:', error);
+        toast.error(error?.message || 'Failed to process PDF');
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      setLoading(false);
+      setLoadingStatus(null);
+    }
+  };
+
   const handleFileUpload = async (file: File) => {
     if (!file) return;
     setLoading(true);
 
     try {
-      // PDFs: render pages client-side and send as images for vision extraction.
-      // Images (jpg/png): pass straight through as a single-image array.
+      // PDFs: route to Claude (server-side, no client render). Bypasses
+      // the legacy pdf.js render path entirely — fixes the Safari stall
+      // bug AND the improvements_value undercount bug in one move.
+      // See processPdfWithClaude above for the full rationale.
       if (file.type === 'application/pdf') {
-        toast.loading('Rendering PDF pages…', { id: 'pdf-render' });
-        // Higher quality now that we chunk — no token-budget worry per call.
-        // Extract the largest embedded aerial in PARALLEL with page rendering
-        // — both operations parse the PDF, but pdfjs caches the parse so the
-        // second open is cheap, and the network/AI call is the dominant cost
-        // anyway. Aerial extraction returns an array of per-page aerials
-        // (or [] when no qualifying images exist — text-only PDFs,
-        // scanned-as-raster appraisals). sendMessage handles both:
-        //   - Single-comp result → attaches the best aerial (largest)
-        //   - Multi-comp result → attributes each aerial to the comp
-        //     whose citations reference that page
-        const [images, sourceAerialPages] = await Promise.all([
-          pdfToImages(file, { scale: 1.5, maxPages: 60 }),
-          extractLargestAerialPerPage(file).catch(() => [] as Array<{ page: number; dataUrl: string }>),
-        ]);
-        // Pass the per-page array if we have multiple aerials, OR the
-        // single best (largest) when only one page yielded an image —
-        // keeps the single-comp single-aerial fast path working.
-        const sourceAerial: string | null | Array<{ page: number; dataUrl: string }> =
-          sourceAerialPages.length === 0
-            ? null
-            : sourceAerialPages.length === 1
-              ? sourceAerialPages[0].dataUrl
-              : sourceAerialPages;
-        toast.dismiss('pdf-render');
-        if (images.length === 0) {
-          toast.error('Could not render PDF');
-          return;
-        }
-        // For PDFs with >5 pages: try boundary-aware extraction first.
-        //
-        // Priority cascade:
-        //   1. VISION classifier — sends each page image to a vision
-        //      model that returns role + comp_index. Format-agnostic,
-        //      handles rasterized headers (the common case where pdf.js
-        //      sees no "Land Sale 1" text because it's a graphic).
-        //   2. REGEX classifier — fast and free, works on PDFs with
-        //      live-text headers. Kept as a fallback for when vision
-        //      classification fails (network error, model rate-limit,
-        //      etc.) so we never regress against the prior behavior.
-        //   3. CHUNKED — the legacy path. Last resort when the PDF
-        //      can't be cleanly partitioned into comps.
-        //
-        // Each step has a clear "did this work?" check. We log loudly
-        // when one step falls through so production failures are
-        // diagnosable from the console alone.
-        if (images.length > 5) {
-          let compMap: CompMap | null = null;
-
-          // 1. Vision classifier — the primary path. Cheap, fast, and
-          // works regardless of whether headers are live text or
-          // rasterized graphics. The classifier renders its own
-          // low-resolution page images internally so the request body
-          // stays well under Vercel's 4.5MB serverless limit, without
-          // affecting the high-resolution images used downstream for
-          // extraction.
-          try {
-            compMap = await detectCompBoundariesViaVision(file);
-            if (compMap && compMap.comps.length >= 2) {
-              console.log(
-                `[import] using VISION boundary detection: ${compMap.comps.length} comps ` +
-                `(confidence: ${compMap.overallConfidence})`
-              );
-              await extractFromBoundaryMap(file, images, compMap);
-              return;
-            }
-          } catch (e) {
-            console.warn('[import] vision boundary detection threw, trying regex:', e);
-          }
-
-          // 2. Regex classifier — fallback when vision didn't qualify.
-          // Useful for cases where vision is unavailable but the PDF
-          // happens to have live-text headers our patterns match.
-          try {
-            compMap = await detectCompBoundaries(file);
-            if (
-              compMap &&
-              compMap.comps.length >= 2 &&
-              compMap.overallConfidence !== 'low'
-            ) {
-              console.log(
-                `[import] using REGEX boundary detection: ${compMap.comps.length} comps ` +
-                `(confidence: ${compMap.overallConfidence})`
-              );
-              await extractFromBoundaryMap(file, images, compMap);
-              return;
-            }
-            console.log(
-              `[import] regex boundary detection didn't qualify (${
-                compMap ? `${compMap.comps.length} comps, ${compMap.overallConfidence} confidence` : 'null'
-              }) — falling back to chunked extraction`
-            );
-          } catch (e) {
-            console.warn('[import] regex boundary detection threw, falling back:', e);
-          }
-
-          // 3. Chunked — legacy path. Last resort.
-          await extractFromChunkedPdf(file, images);
-          return;
-        }
-        await sendMessage(`Uploaded: ${file.name} (${images.length} pages)`, undefined, images, sourceAerial);
+        setLoading(false); // processPdfWithClaude manages its own loading state
+        await processPdfWithClaude(file);
         return;
       }
+
+      // Legacy client-side PDF render + vision-classifier pipeline was
+      // removed when /api/import-pdf-claude went live. If Claude ever
+      // needs a fallback (outage, schema regression, etc.), recover the
+      // full pdfToImages → detectCompBoundariesViaVision →
+      // extractFromBoundaryMap → extractFromChunkedPdf chain from git
+      // history — any commit before the Claude route landed has it.
+      // extractFromBoundaryMap, extractFromChunkedPdf, pdfToImages,
+      // extractLargestAerialPerPage, detectCompBoundariesViaVision,
+      // detectCompBoundaries are still defined elsewhere in this file
+      // for batch-upload paths that haven't been migrated yet.
 
       if (file.type.startsWith('image/')) {
         const dataUrl = await new Promise<string>((resolve, reject) => {
