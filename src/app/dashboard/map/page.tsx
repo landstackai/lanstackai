@@ -3793,24 +3793,42 @@ export default function MapPage() {
       const isAiHighlighted = aiHighlightedCompIds?.has(id) ?? null;
       const isAiDimmed = aiHighlightedCompIds != null && !aiHighlightedCompIds.has(id);
 
-      // Hide non-matching pins entirely when an AI filter is active.
-      // Hover / AI-highlight states use box-shadow + border-color only.
-      // DO NOT touch el.style.transform — Mapbox uses it for positioning
-      // the marker (translate). Setting transform here would wipe the
-      // translate and snap the pin to (0,0) for a frame.
-      el.style.display = isAiDimmed ? 'none' : '';
+      // Visual treatment when an AI filter is active:
+      //   • Matching pins  → stronger slate-blue ring + full opacity + z above
+      //   • Non-matching   → dim to 0.15 opacity, no pointer events. NOT
+      //     display:none — we want the broker to keep spatial context
+      //     of "what else is in the area" even when filtered. Linear /
+      //     Figma / Notion all dim-but-keep filtered items for the same
+      //     reason. The screenshot earlier showed "3 comps" in the
+      //     banner but all 50 pins still rendered the same — the dim
+      //     wasn't strong enough to read as "these are not your answer."
+      //     0.15 + grayscale gives clear focus while preserving context.
+      // DO NOT touch el.style.transform — Mapbox uses it for marker
+      // positioning. Wiping it snaps the pin to (0,0) for a frame.
       if (isHovered) {
         el.style.boxShadow = '0 0 0 4px rgba(168,181,122,0.40), 0 8px 22px rgba(0,0,0,.55)';
         el.style.borderColor = '#C4CE96';
         el.style.color = '#F5F1E8';
         el.style.zIndex = '10';
         el.style.opacity = '1';
+        el.style.filter = 'none';
+        el.style.pointerEvents = 'auto';
       } else if (isAiHighlighted) {
-        el.style.boxShadow = '0 0 0 4px rgba(123,159,206,0.32), 0 4px 14px rgba(0,0,0,.5)';
+        el.style.boxShadow = '0 0 0 5px rgba(123,159,206,0.55), 0 6px 18px rgba(0,0,0,.6)';
         el.style.borderColor = '#7B9FCE';
         el.style.color = '#F5F1E8';
         el.style.zIndex = '5';
         el.style.opacity = '1';
+        el.style.filter = 'none';
+        el.style.pointerEvents = 'auto';
+      } else if (isAiDimmed) {
+        el.style.boxShadow = '0 1px 4px rgba(0,0,0,.25)';
+        el.style.borderColor = baseColor;
+        el.style.color = '#F5F1E8';
+        el.style.zIndex = '0';
+        el.style.opacity = '0.18';
+        el.style.filter = 'grayscale(0.6)';
+        el.style.pointerEvents = 'none';
       } else {
         el.style.boxShadow = isCmaSelected
           ? '0 0 0 3px rgba(196,206,150,0.25), 0 2px 10px rgba(0,0,0,.4)'
@@ -3819,6 +3837,8 @@ export default function MapPage() {
         el.style.color = '#F5F1E8';
         el.style.zIndex = '1';
         el.style.opacity = '1';
+        el.style.filter = 'none';
+        el.style.pointerEvents = 'auto';
       }
     });
   }, [hoveredCompId, aiHighlightedCompIds]);
@@ -4231,7 +4251,7 @@ export default function MapPage() {
                   askAi();
                 }
               }}
-              placeholder="Ask, owner name (Dale Crenwelge Gillespie), coords (30.2076, -98.824), or address"
+              placeholder='Ask, owner name (e.g., "Smith John"), coords (30.2076, -98.824), or address'
               className="w-full bg-white border border-beige-2 rounded-lg pl-9 pr-32 py-2.5 text-sm text-ink placeholder-ink-3 outline-none focus:border-olive focus:ring-2 focus:ring-olive/20 transition-all shadow-md shadow-black/10"
             />
             {searchQuery && (
@@ -4758,8 +4778,26 @@ export default function MapPage() {
         </div>
 
         {/* Stats bar */}
+        {/*
+            When an AI search is active, the broker cares about ONE
+            number: how many comps match the query. Before this fix the
+            counter read "On Map 50 / Total Comps 50" even after a
+            search returned "3 comps" — left the broker wondering if
+            the search filter was actually doing anything. Now the
+            counter prepends a "Matches" tile that disappears when no
+            AI filter is active, so the broker always sees a number
+            that lines up with the result banner.
+        */}
         <div className="absolute bottom-8 left-3 z-10">
           <div className="bg-white/90 backdrop-blur-sm border border-beige rounded-xl px-3 py-2 flex gap-4">
+            {aiHighlightedCompIds != null && (
+              <div>
+                <p className="text-[9px] font-bold text-slate-blue-2 uppercase tracking-wider">Matches</p>
+                <p className="text-sm font-bold text-slate-blue-2 font-mono">
+                  {aiHighlightedCompIds.size}
+                </p>
+              </div>
+            )}
             <div>
               <p className="text-[9px] font-bold text-ink-3 uppercase tracking-wider">On Map</p>
               <p className="text-sm font-bold text-olive-2 font-mono">
