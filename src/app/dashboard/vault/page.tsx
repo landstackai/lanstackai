@@ -1383,10 +1383,24 @@ export default function VaultPage() {
                                   const r = classifyReview(c);
                                   const isVerified = r === null;
                                   const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
+                                  // Verified comps with a pin: click → map (focused on the
+                                  // property, detail panel auto-opened). After review, the
+                                  // dominant job is "look it up" not "edit it." The review
+                                  // page is still reachable from the map detail panel.
+                                  // Anything not-yet-verified or pinless: click → review
+                                  // page (edit-first, broker needs to fix something).
+                                  const canJumpToMap = isVerified && c.latitude != null && c.longitude != null;
+                                  const handleRowClick = () => {
+                                    if (canJumpToMap) {
+                                      router.push(`/dashboard/map?focus=${c.latitude},${c.longitude},14&compId=${c.id}`);
+                                    } else {
+                                      router.push(`/dashboard/review/${c.id}`);
+                                    }
+                                  };
                                   return (
                                     <tr
                                       key={c.id}
-                                      onClick={() => router.push(`/dashboard/review/${c.id}`)}
+                                      onClick={handleRowClick}
                                       className={`border-t border-beige/60 hover:bg-orange-50/60 cursor-pointer transition-colors ${
                                         isVerified ? 'bg-emerald-50/40' : ''
                                       }`}

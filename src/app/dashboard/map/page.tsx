@@ -2693,6 +2693,18 @@ export default function MapPage() {
     }
   }, [mapLoaded, searchParams]);
 
+  // Honor ?compId=<id> — auto-select that comp's detail panel.
+  // Used by vault row clicks: clicking a verified comp in the vault
+  // navigates here with ?focus=lat,lng,14&compId=<id> so the broker
+  // lands on the map with the property pinned AND the detail panel
+  // already open showing acres/price/PPA/source docs — no second click.
+  useEffect(() => {
+    const compId = searchParams?.get('compId');
+    if (!compId || comps.length === 0) return;
+    const target = comps.find((c) => c.id === compId);
+    if (target) setSelectedComp(target);
+  }, [comps, searchParams]);
+
   const clearAiSearch = useCallback(() => {
     setAiHighlightedCompIds(null);
     setAiResultMessage(null);
@@ -7692,10 +7704,21 @@ export default function MapPage() {
             )}
 
             {selectedComp.created_by === currentUserId && (
-              <button onClick={() => setEditingComp(selectedComp)}
-                className="w-full py-2.5 bg-cream border border-beige hover:border-olive text-sm font-bold text-ink-2 hover:text-ink rounded-xl transition-colors flex items-center justify-center gap-2">
-                <Edit size={14} /> Edit all fields
-              </button>
+              <>
+                <button onClick={() => setEditingComp(selectedComp)}
+                  className="w-full py-2.5 bg-cream border border-beige hover:border-olive text-sm font-bold text-ink-2 hover:text-ink rounded-xl transition-colors flex items-center justify-center gap-2">
+                  <Edit size={14} /> Edit all fields
+                </button>
+                {/* Secondary action: open the full review page. The
+                    inline editor above handles light field tweaks.
+                    The review page is where source documents, parcel
+                    re-selection, boundary draw, and verification live —
+                    deeper work than the inline editor exposes. */}
+                <button onClick={() => router.push(`/dashboard/review/${selectedComp.id}`)}
+                  className="w-full py-2 text-xs font-semibold text-ink-3 hover:text-ink underline-offset-2 hover:underline transition-colors flex items-center justify-center gap-1.5">
+                  <ExternalLink size={12} /> Open review page
+                </button>
+              </>
             )}
           </div>
         </div>
