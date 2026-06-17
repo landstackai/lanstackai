@@ -2503,7 +2503,7 @@ export default function ImportPage() {
   // post-extraction pipeline that sendMessage runs after the fetch
   // (browser-side auto-locate, dedupe, auto-save, push to chat).
   // ═══════════════════════════════════════════════════════════════════
-  const processPdfWithClaude = async (file: File) => {
+  const processPdf = async (file: File) => {
     const userMessage: Message = {
       role: 'user',
       content: `[Document uploaded]\n${file.name}`,
@@ -2511,7 +2511,10 @@ export default function ImportPage() {
     };
     setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
-    setLoadingStatus('Reading the appraisal with GPT + Claude in parallel…');
+    // User-facing copy stays Landstack-branded — implementation
+    // details (which engines we use, how we route) live in server
+    // logs + the diagnostic block, not in the broker's UI.
+    setLoadingStatus('Reading your document…');
 
     // 95-second client cap. Server's own AbortController fires at 90s,
     // Vercel kills the function at 120s. The client's 95 leaves a
@@ -2651,10 +2654,10 @@ export default function ImportPage() {
       // PDFs: route to Claude (server-side, no client render). Bypasses
       // the legacy pdf.js render path entirely — fixes the Safari stall
       // bug AND the improvements_value undercount bug in one move.
-      // See processPdfWithClaude above for the full rationale.
+      // See processPdf above for the full rationale.
       if (file.type === 'application/pdf') {
-        setLoading(false); // processPdfWithClaude manages its own loading state
-        await processPdfWithClaude(file);
+        setLoading(false); // processPdf manages its own loading state
+        await processPdf(file);
         return;
       }
 

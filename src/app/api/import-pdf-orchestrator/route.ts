@@ -169,7 +169,11 @@ async function runGPT(text: string, fileName: string): Promise<EngineRun> {
       model: 'gpt-4o-mini',
       ok: true,
       result: {
-        message: parsed.message || `Extracted ${comps.length} comps via GPT.`,
+        // User-facing message — engine name stripped. Broker sees
+        // "Landstack extracted N comps," not which engine produced it.
+        // Engine identity stays in the diagnostic block + telemetry for
+        // our internal debugging only.
+        message: parsed.message || `Extracted ${comps.length} ${comps.length === 1 ? 'comp' : 'comps'} from your document.`,
         comps,
         diagnostic: { raw_extracted: rawComps.length, filtered_out: rawComps.length - comps.length },
       },
@@ -267,7 +271,7 @@ async function runClaude(pdfBuffer: Buffer, fileName: string): Promise<EngineRun
       model: 'claude-sonnet-4-5',
       ok: true,
       result: {
-        message: parsed.message || `Extracted ${comps.length} comps via Claude.`,
+        message: parsed.message || `Extracted ${comps.length} ${comps.length === 1 ? 'comp' : 'comps'} from your document.`,
         comps,
         diagnostic: {
           document_type: parsed.document_type,
@@ -577,19 +581,18 @@ export async function POST(request: NextRequest) {
     );
 
     // ─── Surface the chosen result ───────────────────────────────────
-    // Prepend a fallback note to the user-facing message when Claude
-    // was promoted from shadow. Helps Christina understand "why does
-    // this look different — that's because GPT couldn't read it."
-    let userMessage = chosen.message;
-    if (primary === 'claude' && routingReason !== 'gpt_primary_success') {
-      const note =
-        routingReason.includes('zero_comps')
-          ? '⚠️ GPT found no comps in this document — showing Claude\'s read instead. '
-          : routingReason.includes('timeout')
-            ? '⚠️ GPT timed out — showing Claude\'s read instead. '
-            : '⚠️ GPT errored — showing Claude\'s read instead. ';
-      userMessage = note + userMessage;
-    }
+    // The broker NEVER sees which engine produced the answer or that
+    // a fallback occurred — that's an implementation detail. They see
+    // a single Landstack response with the comps. We log the routing
+    // path in the diagnostic block + server console for our own
+    // debugging only.
+    //
+    // The earlier draft of this code prefixed the message with things
+    // like "⚠️ GPT timed out — showing Claude's read instead" which
+    // (a) leaked the engine names into Christina's UI, (b) read as a
+    // system error rather than a normal extraction, and (c) made
+    // engine swaps a breaking change to the user copy. Removed.
+    const userMessage = chosen.message;
 
     return NextResponse.json({
       message: userMessage,
