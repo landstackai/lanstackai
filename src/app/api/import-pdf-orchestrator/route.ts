@@ -131,9 +131,15 @@ async function runGPT(text: string, fileName: string): Promise<EngineRun> {
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      // 4k is comfortable for the schema-locked output; bumped to 6k
-      // for long appraisals (Thorndale = ~5 comps + summary).
-      max_tokens: 6000,
+      // 16k is the new floor. The previous 6k was right at the
+      // boundary for 6-comp appraisals (each fully-cited comp =
+      // ~1000 tokens × 6 = 6000) and got silently truncated:
+      // production Thorndale upload on 2026-06-17 dropped Land
+      // Sale 6 (Circle M 8) entirely because GPT ran out of
+      // budget mid-output. Schema-locked JSON is constrained
+      // enough that 16k still finishes fast on small docs;
+      // generous headroom kills the truncation class.
+      max_tokens: 16000,
       response_format: IMPORT_RESPONSE_FORMAT,
       messages: [
         { role: 'system', content: IMPORT_SYSTEM_PROMPT },
@@ -467,10 +473,37 @@ export async function POST(request: NextRequest) {
     let routingReason: string;
     let chosen: ExtractionResult;
 
-    const gptHasResults = gptRun.ok && (gptRun.result?.comps?.length ?? 0) > 0;
-    const claudeHasResults = claudeRun.ok && (claudeRun.result?.comps?.length ?? 0) > 0;
+    const gptCompCount = gptRun.result?.comps?.length ?? 0;
+    const claudeCompCount = claudeRun.result?.comps?.length ?? 0;
+    const gptHasResults = gptRun.ok && gptCompCount > 0;
+    const claudeHasResults = claudeRun.ok && claudeCompCount > 0;
 
-    if (gptHasResults) {
+    // When BOTH engines return comps, prefer the one with MORE comps if
+    // they materially disagree on count. Catches the silent-undercount
+    // class of bug (production 2026-06-17: Thorndale's Land Sale 6 was
+    // dropped by GPT because max_tokens=6000 was right at the schema's
+    // 6-comp output ceiling — GPT returned 5, Claude returned 6, the
+    // old logic blindly trusted GPT). max_tokens has since been bumped
+    // to 16000 to prevent this specific cause, but the smarter
+    // selection is a permanent guard against future "GPT silently
+    // truncated" failures regardless of root cause.
+    //
+    // "Materially disagree" = Claude found ≥2 more comps than GPT.
+    // A 1-comp delta is in the noise (one engine might count a
+    // borderline-comp as subject, vice versa). A 2+ delta means
+    // someone genuinely missed something.
+    const claudeFoundMoreComps =
+      claudeHasResults && claudeCompCount >= gptCompCount + 2;
+
+    if (claudeFoundMoreComps) {
+      primary = 'claude';
+      routingReason = `claude_preferred_${claudeCompCount}_vs_gpt_${gptCompCount}`;
+      chosen = claudeRun.result!;
+      console.warn(
+        `[orchestrator] Claude found ${claudeCompCount} comps, GPT only ${gptCompCount} — using Claude. ` +
+          `GPT may be silently truncating; investigate.`,
+      );
+    } else if (gptHasResults) {
       primary = 'gpt';
       routingReason = 'gpt_primary_success';
       chosen = gptRun.result!;

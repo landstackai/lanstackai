@@ -3079,6 +3079,19 @@ export default function ImportPage() {
     e.stopPropagation();
     setIsDraggingOver(false);
     dragCounterRef.current = 0;
+    // Block additional uploads while one is in flight. Previously the
+    // broker could drop the same PDF four times in a row while the
+    // first extraction was still running — each drop kicked off a
+    // separate fetch, stacked four "[Document uploaded]" messages,
+    // and confused both the broker (which one is processing?) and
+    // the backend (four parallel extractions on the same PDF).
+    if (loading) {
+      toast('Already processing a document — give it a moment.', {
+        icon: '⏳',
+        duration: 3000,
+      });
+      return;
+    }
     const files = Array.from(e.dataTransfer?.files || []).filter(
       (f) => f.type === 'application/pdf' || f.type.startsWith('image/')
     );
