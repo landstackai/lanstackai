@@ -2588,21 +2588,36 @@ export default function ImportPage() {
         );
       }
 
-      // Location resolution — three cases:
+      // Location resolution — ALWAYS run the full autoLocate pipeline,
+      // even when the AI already returned lat/lng.
       //
-      //   1. AI returned lat/lng but NO geometry (typical: appraiser's
-      //      "Geographic Location" lat/lng was in the doc):
-      //      → Keep AI coords. Look up the parcel polygon AT those
-      //        coords so the boundary draws on the map. This was the
-      //        KWO bug — the pin showed but no boundary because we
-      //        skipped autolocate entirely when AI had coords.
+      // Why: the appraiser-supplied lat/lng in the source document can
+      // be wrong. Stouffer's Thorndale appraisal Land Sale 1 (J-Bar
+      // Ranch, Burleson County) listed coords that actually fall in
+      // Milam County — a typo or copy/paste error in the appraisal
+      // template. Trusting that coord blindly puts the comp in the
+      // wrong market and corrupts every CMA built from it. Christina
+      // would never know.
       //
-      //   2. AI returned NO coords at all:
-      //      → Fall back to full autoLocate (parcel match by owner +
-      //        geocode by address). Same behavior the legacy path had.
+      // autoLocateInBrowser already has the right logic for this case:
+      // the "lat/lng-first seed path" uses the AI coords as a STARTING
+      // POINT, looks up the parcel at those coords, then CORROBORATES
+      // by checking whether the parcel's owner_name matches the
+      // appraisal's grantor/grantee/property_name OR whether the
+      // parcel's acreage matches within 15%. If neither matches, the
+      // seed is dropped and owner-name search takes over instead.
+      // (See src/lib/utils/autoLocate.ts lines 183-204 for the design.)
       //
-      //   3. AI returned coords AND geometry (rare):
-      //      → Keep both. Trust the AI.
+      // For J-Bar specifically:
+      //   1. Seed at the typo'd coords → finds some Milam parcel
+      //   2. That parcel owner ≠ "Jaecks", acreage ≠ 244.86 ac
+      //   3. Corroboration FAILS, seed dropped
+      //   4. Owner-name search in Burleson County for "Jaecks" → finds
+      //      the real J-Bar Ranch → returns the correct location
+      //
+      // The previous "trust AI coords, just find polygon at them"
+      // shortcut I added in the orchestrator migration bypassed this
+      // entire safety mechanism. Reverting to the full pipeline.
       if (data.comps.length > 0) {
         setLoadingStatus(
           `Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`,
@@ -2610,55 +2625,16 @@ export default function ImportPage() {
         for (let i = 0; i < data.comps.length; i++) {
           const c = data.comps[i];
           const label = c.property_name || c.county || 'comp';
-          const hasCoords = c.latitude != null && c.longitude != null;
-          const hasGeometry = c.geometry != null;
-
-          if (hasCoords && hasGeometry) {
-            continue; // both present, nothing to do
-          }
-
-          if (hasCoords && !hasGeometry) {
-            // Case 1: trust AI coords, add the polygon via point-in-polygon
-            // against the county parcel features. No risk of overwriting
-            // the AI's lat/lng since we only touch geometry + parcel_id.
-            try {
-              const countyKey = String(c.county || '').toLowerCase().trim();
-              if (countyKey && getCountySource(countyKey)) {
-                const parcelData = await getCountyParcels(countyKey);
-                const features = parcelData?.features ?? [];
-                if (Array.isArray(features) && features.length > 0) {
-                  const parcel = findParcelAt(c.latitude, c.longitude, features);
-                  if (parcel) {
-                    data.comps[i] = {
-                      ...c,
-                      geometry: parcel.geometry,
-                      parcel_id: c.parcel_id ?? parcel.properties?.parcel_id ?? null,
-                    };
-                    console.log(
-                      `[import] ${label}: AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) → matched parcel polygon in ${countyKey}`,
-                    );
-                  } else {
-                    console.warn(
-                      `[import] ${label}: AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) — no parcel polygon at those coords in ${countyKey}. Pin only, no boundary.`,
-                    );
-                  }
-                }
-              } else {
-                console.warn(
-                  `[import] ${label}: county "${c.county}" not in parcel source registry. Pin only, no boundary.`,
-                );
-              }
-            } catch (e: any) {
-              console.error(`[import] parcel polygon lookup threw for ${label}:`, e);
-            }
-            continue;
-          }
-
-          // Case 2: no coords at all → full autoLocate pipeline.
           try {
             const located = await locateCompForImport(c);
             if (located) {
-              console.log(`[import] auto-locate ✓ ${label}: ${located.match_reason}`);
+              const aiCoordsLabel =
+                c.latitude != null && c.longitude != null
+                  ? ` (AI seed ${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)} → ${located.match_confidence})`
+                  : '';
+              console.log(
+                `[import] auto-locate ✓ ${label}: ${located.match_reason}${aiCoordsLabel}`,
+              );
               toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
               data.comps[i] = {
                 ...c,
@@ -2668,6 +2644,16 @@ export default function ImportPage() {
                 geometry: located.geometry,
                 _auto_located_confidence: located.match_confidence,
               };
+            } else if (c.latitude != null && c.longitude != null) {
+              // autoLocate returned null but AI gave us coords.
+              // Possible reasons: corroboration failed AND owner search
+              // also struck out (rare). Keep the AI coords with a
+              // "needs_location_review" flag so the broker manually
+              // verifies on the verification card before save.
+              console.warn(
+                `[import] ${label}: autoLocate found no confident match. Keeping AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) but flagging for review.`,
+              );
+              data.comps[i] = { ...c, needs_location_review: true };
             }
           } catch (e: any) {
             console.error(`[import] auto-locate threw for ${label}:`, e);
