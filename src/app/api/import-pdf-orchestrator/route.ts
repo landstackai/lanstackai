@@ -11,6 +11,7 @@ import {
   CLAUDE_PDF_SYSTEM_PROMPT,
   SUBMIT_COMPS_TOOL,
 } from '@/app/api/import-pdf-claude/route';
+import { renderPdfPageToJpg } from '@/lib/extraction/convertapi';
 
 // ─────────────────────────────────────────────────────────────────────────
 // PDF extraction orchestrator — runs GPT + Claude in parallel on every
@@ -652,6 +653,61 @@ export async function POST(request: NextRequest) {
         `gpt: ${gptRun.ok ? `${gptRun.result?.comps.length ?? 0} comps in ${(gptRun.elapsed_ms / 1000).toFixed(1)}s` : `FAIL: ${gptRun.error}`} · ` +
         `claude: ${claudeRun.ok ? `${claudeRun.result?.comps.length ?? 0} comps in ${(claudeRun.elapsed_ms / 1000).toFixed(1)}s` : `FAIL: ${claudeRun.error}`} · ` +
         `total ${(elapsedMs / 1000).toFixed(1)}s`,
+    );
+
+    // ─── Aerial thumbnails (ConvertAPI, parallel, best-effort) ───────
+    // Render evidence_pages[0] for each comp as a JPG and inline as a
+    // data URL on the comp. The verification card uses this as the
+    // map-corner overlay so brokers can see the appraiser's aerial
+    // when refining a boundary on rural land (where parcel lines blend
+    // into the landscape).
+    //
+    // Trade-offs we picked:
+    //   - PARALLEL via Promise.allSettled: 6 ConvertAPI calls finish
+    //     in ~2s instead of ~12s sequential. Latency cost on a 6-comp
+    //     Thorndale extraction is ~2-3s added to the existing 73s
+    //     Claude time. Acceptable.
+    //   - INLINE base64 data URL (no Supabase Storage upload yet):
+    //     comps don't have DB IDs at this stage — they're draft data
+    //     the broker reviews. Persisting JPGs to Storage before the
+    //     broker decides to keep the comp would orphan files on
+    //     every "discard". Cleaner: ship the bytes inline now, persist
+    //     to Storage when the broker saves the comp.
+    //   - BEST-EFFORT: if a thumbnail fails (ConvertAPI 5xx, timeout,
+    //     missing evidence_pages), the comp ships without one. We
+    //     never let thumbnail rendering tank the extraction the broker
+    //     is waiting for.
+    //
+    // Cost: 1 ConvertAPI op per thumbnail. Christina's set (12 PDFs/mo
+    // × ~1 comp/PDF) = 12 ops/mo, well under the 1,500 cap.
+    const thumbnailStartMs = Date.now();
+    const thumbnailResults = await Promise.allSettled(
+      chosen.comps.map(async (comp: any) => {
+        const pages: number[] = Array.isArray(comp.evidence_pages)
+          ? comp.evidence_pages.filter((n: any) => Number.isInteger(n) && n > 0)
+          : [];
+        if (pages.length === 0) return null;
+        const jpgBuf = await renderPdfPageToJpg(buffer, pages[0]);
+        return `data:image/jpeg;base64,${jpgBuf.toString('base64')}`;
+      }),
+    );
+    let thumbnailsAttached = 0;
+    let thumbnailsFailed = 0;
+    chosen.comps.forEach((comp: any, i: number) => {
+      const r = thumbnailResults[i];
+      if (r.status === 'fulfilled' && r.value) {
+        comp.aerial_thumbnail_data_url = r.value;
+        thumbnailsAttached++;
+      } else {
+        comp.aerial_thumbnail_data_url = null;
+        if (r.status === 'rejected') {
+          thumbnailsFailed++;
+          console.warn(`[orchestrator] thumbnail render failed for comp ${i + 1}:`, r.reason?.message ?? r.reason);
+        }
+      }
+    });
+    console.log(
+      `[orchestrator] ${file.name} · thumbnails: ${thumbnailsAttached} attached, ${thumbnailsFailed} failed in ${((Date.now() - thumbnailStartMs) / 1000).toFixed(1)}s`,
     );
 
     // ─── Surface the chosen result ───────────────────────────────────

@@ -95,24 +95,29 @@ function decodeResult(fileData: string): Buffer {
  *
  * @param pdfBuffer  The PDF as a Buffer
  * @param pageNumber 1-indexed page number to render
- * @param opts.maxWidth  Optional pixel width cap (default 800px — small
- *                       enough to keep storage cheap, large enough to
- *                       be legible at thumbnail size in the verification
- *                       card map overlay)
- * @returns JPG image as a Buffer ready to upload to Supabase Storage
+ * @param opts.dpi   Render resolution in DPI (default 90 — yields
+ *                   ~770×1000px on a letter page, ~70KB JPG file.
+ *                   ConvertAPI's default 200 DPI gave 1700×2200px /
+ *                   ~370KB files, which is overkill for the map-corner
+ *                   thumbnail and bloats the inline-base64 response).
+ * @param opts.quality JPEG quality 1-100 (default 75 — visually
+ *                     indistinguishable from 85 at thumbnail size,
+ *                     ~30% smaller files).
+ * @returns JPG image as a Buffer
  */
 export async function renderPdfPageToJpg(
   pdfBuffer: Buffer,
   pageNumber: number,
-  opts: { maxWidth?: number } = {},
+  opts: { dpi?: number; quality?: number } = {},
 ): Promise<Buffer> {
   const params: Record<string, string> = {
     PageRange: String(pageNumber),
-    JpegQuality: '85',
-    // ScaleImage controls output dimensions. "true" = preserve aspect
-    // ratio, scale longest side to ScaleProportions value.
-    ScaleImage: 'true',
-    ScaleProportions: `${opts.maxWidth ?? 800}`,
+    JpegQuality: `${opts.quality ?? 75}`,
+    // ImageResolution is the render DPI. Lower DPI = smaller pixel
+    // dimensions = smaller JPG file. 90 DPI on letter paper is
+    // ~770×1000px which renders cleanly at the verification card's
+    // ~200×260px map-overlay slot (4x retina headroom).
+    ImageResolution: `${opts.dpi ?? 90}`,
   };
   const result = await postConvertApi(
     '/convert/pdf/to/jpg',

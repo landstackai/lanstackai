@@ -202,6 +202,21 @@ async function testThorndale() {
     fail(`evidence_pages missing/empty on some comp. Got: ${epReport.join(' ')}`);
   }
 
+  // aerial_thumbnail_data_url: ConvertAPI renders evidence_pages[0]
+  // as a JPG and inlines it as a base64 data URL on each comp. This
+  // is the map-corner overlay brokers use to compare the appraiser's
+  // aerial against the parcel they're refining. Catch regressions
+  // here (silently missing thumbnails would just leave a blank
+  // corner in the UI — exactly the failure mode we want to prevent).
+  const allHaveThumbs = data.comps.every((c) => typeof c.aerial_thumbnail_data_url === 'string' && c.aerial_thumbnail_data_url.startsWith('data:image/jpeg;base64,') && c.aerial_thumbnail_data_url.length > 5000);
+  if (allHaveThumbs) {
+    const totalKB = data.comps.reduce((s, c) => s + (c.aerial_thumbnail_data_url?.length ?? 0), 0) / 1024;
+    pass(`aerial thumbnails attached to all ${data.comps.length} comps (${totalKB.toFixed(0)}KB total inline payload)`);
+  } else {
+    const missing = data.comps.map((c, i) => `#${i + 1}=${c.aerial_thumbnail_data_url ? c.aerial_thumbnail_data_url.slice(0, 30) + '…' : 'null'}`).join(', ');
+    fail(`aerial_thumbnail_data_url missing/invalid on some comp: ${missing}`);
+  }
+
   // Diagnostic summary
   if (data.diagnostic) {
     console.log(`  · diagnostic: primary=${data.diagnostic.primary}, reason=${data.diagnostic.routing_reason}`);
@@ -267,6 +282,14 @@ async function testFritzFarm() {
     pass(`evidence_pages=[${ep.join(',')}]`);
   } else {
     fail(`evidence_pages missing/empty. Got: ${JSON.stringify(ep)}`);
+  }
+
+  // Aerial thumbnail attached as inline base64 data URL
+  const thumb = fritz.aerial_thumbnail_data_url;
+  if (typeof thumb === 'string' && thumb.startsWith('data:image/jpeg;base64,') && thumb.length > 5000) {
+    pass(`aerial thumbnail attached (${(thumb.length / 1024).toFixed(0)}KB inline)`);
+  } else {
+    fail(`aerial_thumbnail_data_url missing/invalid. Got: ${thumb ? thumb.slice(0, 60) + '…' : 'null'}`);
   }
 }
 
