@@ -348,10 +348,14 @@ For each comp, provide the *_source field for each numeric value with the EXACT 
 If you cannot cite a source for a numeric field, set both the value AND the _source to null. A missing value with a clear "no labeled value found" beats a fabricated number with a vague source.
 
 ═══════════════════════════════════════════════════════════════════
-EVIDENCE PAGES
+COORDINATES + EVIDENCE PAGES
 ═══════════════════════════════════════════════════════════════════
 
-evidence_pages = ACTUAL PDF page numbers where this comp's data lives. Most multi-comp appraisals dedicate 2 pages per comp (one with the aerial/identification table, one with property description + remarks). E.g. Land Sale 1 might be evidence_pages: [37, 38].
+latitude, longitude — extract EXACT numbers from labeled "Geographic Location: lat; lng", "Coordinates:", or "Lat/Lng:" fields. Set null if not explicitly labeled. NEVER infer from city names or distance descriptions.
+
+evidence_pages — PDF page numbers each comp's data lives on. Stouffer-style appraisals use 2 pages per comp, e.g. Land Sale 1 = [37, 38].
+
+EXTRACT EVERY NUMBERED COMP. Land Sale 1 through Land Sale N — do not stop early. Returning 5 when the document has 6 is a critical failure.
 
 ═══════════════════════════════════════════════════════════════════
 NORMALIZATION
