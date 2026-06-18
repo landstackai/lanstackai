@@ -54,7 +54,11 @@ TYPE A — Single-property appraiser comp sheet (~70% of uploads):
   → THE FACT THAT THERE'S ONLY ONE PROPERTY IS NOT A REASON TO RETURN EMPTY.
 
 TYPE B — Multi-comp appraisal report:
-  Has a subject property at the front + 3-5 "Comparable Sales" thereafter.
+  Has a subject property at the front + 3 OR MORE "Comparable Sales" /
+  "Land Sales" thereafter. Common counts are 3-8 but can be more.
+  Each "Land Sale N" / "Sale N" / "Comparable N" header is a SEPARATE
+  comp. Do NOT stop until you've extracted every numbered land sale
+  in the document.
   → Extract all comparable sales. Set is_comparable=true for each.
   → Skip the subject property (its sale isn't being recorded).
 
@@ -136,106 +140,58 @@ When you find comparable sales in a document:
 - Accuracy matters more than speed. If a value is illegible or missing, set
   it to null rather than guessing. Reflect uncertainty in confidence.per_field.
 
-IMPROVEMENT VALUE — actively extract this. The downstream UI uses it to
-adjust per-acre pricing for land-only comparison, and a missing
-improvement value silently hides that adjustment from the broker.
+IMPROVEMENTS — extract value AND source when present, leave both null when absent.
 
-  WHAT COUNTS AS AN IMPROVEMENT — read this list twice:
-    STRUCTURES:
-      * House / dwelling / residence (any sf)
-      * Barn / hay barn / horse barn / metal barn
-      * Outbuildings / sheds / workshops / hangars
-      * Garages / carports
-    AGRICULTURAL INFRASTRUCTURE (BROKER-CRITICAL — easy to miss):
-      * Center-pivot irrigation systems (Valley, Reinke, etc.)
-      * Drip irrigation, flood irrigation
-      * Water wells with pumps (irrigation-capable)
-      * Livestock handling facilities (cattle pens, scales, chutes)
-      * Equipment sheds, hay storage
-    LAND IMPROVEMENTS:
-      * Cross-fencing / perimeter fencing
-      * Internal roads / paved drives
-      * Gated entries / cattle guards
-    RECREATIONAL:
-      * Hunting blinds / food plots / deer feeders
-      * Lodge facilities / shooting houses
+  An improvement is anything affixed to the land that adds dollar value:
+  structures (house, barn, outbuildings), agricultural infrastructure
+  (center-pivot or other irrigation systems, water wells with pumps,
+  livestock pens), land improvements (cross-fencing, internal roads),
+  and recreational facilities (lodges, blinds). Raw land with none of
+  these has no improvements value.
 
-  Field labels to look for (any document type):
-    * "Improvement Value" / "Improved Value" / "Value of Improvements"
-    * "contributory value of $X" / "estimated contributory value"
-    * "Improvements Contributory Value" / "ECV" / "CV"
-    * "Building Value" / "Dwelling Value" / "House Value"
-    * "Structures Value" / "Outbuildings Value"
-    * MLS: "Improvement Value", "Imp Value", or the appraisal-district
-      line items quoted on the sheet.
+  Field labels: "Improvement Value", "Improved Value", "ECV",
+  "Estimated Contributory Value", "CV", "contributory value of $X",
+  "Building Value", "Structures Value", or the MLS/appraisal-district
+  improvement line items.
 
-  HOW TO EXTRACT — three rules:
+  RULES:
 
-  1. SUM EVERY CONTRIBUTORY VALUE. If the document mentions ANY phrase
-     like "contributory value of $X" or "ECV of $X" or "estimated value
-     of $X" anywhere — including separately for different features in
-     dense prose paragraphs apart — sum them all.
+  1. SUM every "contributory value of $X" or "ECV of $X" in the
+     document. They are often in separate paragraphs. Example: an
+     appraisal might say "(4) center-pivot irrigation systems with
+     contributory value of $575,000" and elsewhere "hay barn with
+     contributory value of $190,000" → improvements_value = $765,000,
+     not $190,000 or $575,000 alone.
 
-     Real example (the Fritz Farm case): "The farm includes (4) Valley
-     center pivot irrigation systems with the estimated contributory
-     value of $575,000. Structural improvements include a hay barn with
-     the estimated contributory value of $190,000."
-     → improvements_value = $575,000 + $190,000 = $765,000
-     → NOT just $190,000 (barn only)
-     → NOT just $575,000 (irrigation only)
-     → improvements_notes lists BOTH features
+  2. NEVER use a per-acre figure ("$1,073 per acre for irrigation") as
+     the total. That's the per-acre rate, not the dollar amount.
 
-  2. NEVER USE A PER-ACRE FIGURE AS THE TOTAL. "$1,073 per acre" for
-     irrigation on a 536-acre property is the per-acre rate; the total
-     contributory value is $575,000. The per-acre figure is for
-     comparison, not for improvements_value.
+  3. When improvements_value is NON-NULL, populate
+     improvements_value_source with the itemized arithmetic, e.g.
+     "p2 · Remarks · irrigation $575,000 + hay barn $190,000 = $765,000".
+     When improvements_value IS null (raw land, no improvements
+     described), improvements_value_source MAY ALSO be null.
 
-  3. ALWAYS PAIR WITH improvements_value_source. The source must
-     ITEMIZE every component and show the arithmetic. e.g.
-     "p2 · Remarks · irrigation $575,000 + hay barn $190,000 = $765,000"
-     NOT "p2 · Remarks · improvements"
-     NOT "estimated from context"
-
-  Do NOT confuse improvements_value with:
-    * "Improvement Cost" / "Replacement Cost" — that's what it WOULD
-      cost to rebuild, not the contributory value baked into the sale
-      price. Skip unless the doc explicitly equates the two.
-    * "Improved Acres" — that's a land subset, an acreage figure, not
-      a dollar figure.
-
-  When improvements_value is set, the database auto-computes
-  ppa_land_only = (sale_price - improvements_value) / acres. You do NOT
-  need to compute or extract ppa_land_only when improvements_value is
-  present — let the DB derive it. Only extract ppa_land_only when the
-  document explicitly prints a land-only price-per-acre.
+  4. Do NOT confuse with "Replacement Cost" or "Improved Acres"
+     (one is rebuild cost, not contributory value; the other is an
+     acreage subset, not a dollar figure).
 
 PRIOR SALES — do not confuse with the documented transaction.
 
-  Many comp sheets mention a PRIOR sale of the same property at the
-  bottom of the Remarks (e.g. "The 536.01 acres was purchased by the
-  Grantor from Marsha Powell, Trustee of the Powell Family Trust in
-  October 2020 for $1,980,466 or $3,695 per acre"). The CURRENT
-  transaction's sale_price / sale_date / grantor / grantee are at the
-  TOP of the document in the Transaction Information block — NOT the
-  prior sale.
+  Comp sheets often mention a prior sale of the same property at the
+  bottom of Remarks ("purchased by the Grantor from X in October 2020
+  for $Y"). NEVER use prior-sale numbers for sale_price, sale_date,
+  grantor, or grantee — those come from the Transaction Information
+  block at the top of the document.
 
-  Never use prior-sale numbers in any field of the current comp.
-
-CITE THE SOURCE — every numeric field must include a paired _source string
-identifying the EXACT location in the document the value came from. This is
-the strongest defense against silent wrong extractions like saving 9 acres
-for a 796-acre property.
+CITE THE SOURCE — every numeric field must include a paired _source
+identifying its exact document location. This is the strongest defense
+against silent wrong extractions.
 
 Required _source fields:
-  acres_source                — for "acres"
-  sale_price_source           — for "sale_price"
-  price_per_acre_source       — for "price_per_acre"
-  ppa_land_only_source        — for "ppa_land_only"
-  improvements_value_source   — for "improvements_value" (NEW — added after
-                                Fritz Farm $190k bug: format must itemize
-                                each component with arithmetic, e.g.
-                                "p2 · Remarks · irrigation $575,000 +
-                                hay barn $190,000 = $765,000")
+  acres_source, sale_price_source, price_per_acre_source,
+  ppa_land_only_source, improvements_value_source (only when
+  improvements_value is non-null per rule #3 above).
 
 Source format examples (preferred → acceptable → unacceptable):
 

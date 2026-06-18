@@ -2702,21 +2702,46 @@ export default function ImportPage() {
         );
       }
     } catch (error: any) {
+      // Surface every failure to the chat — not just AbortError.
+      //
+      // The previous version only added an assistant message on
+      // AbortError. For any other thrown error (network blip, fetch
+      // rejection mid-stream, JSON parse failure, a TypeError in
+      // post-extraction code) the user saw a 4-second toast and
+      // then nothing. They'd see their "[Document uploaded]" message
+      // hanging in chat with no AI response, assume the upload was
+      // still running, drop the same file again — and stack failed
+      // uploads. This is the diagnostic black hole that hid the
+      // GPT-truncation bug and the schema-strictness slowdown.
+      //
+      // Now: every failure adds a clear assistant message to chat
+      // showing what we know. Toast still fires for ephemeral
+      // attention; the chat message persists so the broker can
+      // refer back to it and we can debug from session transcripts.
+      console.error('[import-pdf-orchestrator] error:', error);
+
+      let chatMessage: string;
+      let toastMessage: string;
       if (error?.name === 'AbortError') {
-        toast.error(
-          'PDF extraction took longer than 90 seconds and was cancelled. Try splitting the PDF into smaller sections.',
-        );
-        const errorMessage: Message = {
-          role: 'assistant',
-          content:
-            'That PDF took too long to process and was cancelled. If it has a separate Sales Comparison section, try uploading just those pages.',
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, errorMessage]);
+        toastMessage =
+          'PDF extraction took longer than 90 seconds and was cancelled.';
+        chatMessage =
+          "That PDF took too long to process and was cancelled. If it has a separate Sales Comparison section, try uploading just those pages.";
+      } else if (typeof error?.message === 'string' && error.message.length > 0) {
+        toastMessage = `Failed to process PDF: ${error.message}`;
+        chatMessage = `Couldn't finish reading that PDF. Error: ${error.message}. Try again, or split the document into smaller sections.`;
       } else {
-        console.error('[import-claude] error:', error);
-        toast.error(error?.message || 'Failed to process PDF');
+        toastMessage = 'Failed to process PDF';
+        chatMessage =
+          "Couldn't finish reading that PDF. Try again, or split the document into smaller sections.";
       }
+      toast.error(toastMessage);
+      const errorAssistantMessage: Message = {
+        role: 'assistant',
+        content: chatMessage,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, errorAssistantMessage]);
     } finally {
       clearTimeout(timeoutId);
       setLoading(false);

@@ -457,14 +457,49 @@ export async function POST(request: NextRequest) {
 
     console.log(
       `[orchestrator] ${file.name} · ${sizeMB.toFixed(2)}MB · ${pageCount ?? '?'} pages · ` +
-        `live text ${hasLiveText ? '✓' : '✗'} · running GPT + Claude in parallel`,
+        `live text ${hasLiveText ? '✓' : '✗'} · GPT primary, Claude fallback`,
     );
 
-    // ─── Run both engines in parallel ────────────────────────────────
-    const [gptRun, claudeRun] = await Promise.all([
-      runGPT(pdfText, file.name),
-      runClaude(buffer, file.name),
-    ]);
+    // ─── GPT primary, Claude as actual fallback ──────────────────────
+    //
+    // Previously we ran both engines in parallel via Promise.all and
+    // waited for the slower of the two. That made every successful
+    // extraction wait an extra 20-30 seconds for Claude to finish even
+    // when GPT had already returned a clean result. The broker waited
+    // for max(GPT, Claude) instead of just GPT.
+    //
+    // New shape: GPT runs first. Claude is only invoked when GPT fails
+    // or returns zero comps. Net latency on the success path drops
+    // from ~max(GPT, Claude) to just GPT. The cost trade-off is we
+    // lose shadow-mode comparison data on success cases — acceptable
+    // for early-customer phase. Claude still runs (and contributes
+    // telemetry) when its safety value is real: GPT outright failed
+    // or returned nothing.
+    const gptRun = await runGPT(pdfText, file.name);
+
+    let claudeRun: EngineRun;
+    const gptCompsCount = gptRun.result?.comps?.length ?? 0;
+    const gptHasUsableResults = gptRun.ok && gptCompsCount > 0;
+
+    if (gptHasUsableResults) {
+      // GPT succeeded — skip Claude entirely. Stub a placeholder run so
+      // the telemetry + diagnostic shape doesn't need a separate path.
+      claudeRun = {
+        engine: 'claude',
+        model: 'claude-sonnet-4-5',
+        ok: false,
+        result: null,
+        error: 'skipped: GPT primary succeeded',
+        elapsed_ms: 0,
+        input_tokens: null,
+        output_tokens: null,
+      };
+    } else {
+      console.log(
+        `[orchestrator] ${file.name} · GPT ${gptRun.ok ? 'returned 0 comps' : `failed (${gptRun.error})`}, falling back to Claude`,
+      );
+      claudeRun = await runClaude(buffer, file.name);
+    }
 
     const elapsedMs = Date.now() - startTime;
 
