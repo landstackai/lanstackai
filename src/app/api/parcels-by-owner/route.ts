@@ -17,7 +17,11 @@ import { NextRequest, NextResponse } from 'next/server';
 
 // Pro plan: allow up to 60s. TxGIO can take 30-50s on bad afternoons;
 // successful response then caches for 24h on Vercel edge.
-export const maxDuration = 60;
+// 25s ceiling = 20s upstream fetch + a few seconds of headroom for
+// param parsing and response shaping. Previous 60s value let slow TxGIO
+// calls compound into multi-minute hangs on the client side when the
+// upstream was unreachable.
+export const maxDuration = 25;
 
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
@@ -102,21 +106,28 @@ export async function GET(req: NextRequest) {
 
   let data: any = null;
   let lastErr: any = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      // Bumped timeouts for slow TxGIO afternoons (Pro plan gives us 60s budget)
-      data = await fetchOnce(attempt === 0 ? 40000 : 50000);
-      break;
-    } catch (e: any) {
-      lastErr = e;
-    }
+  // Single fast attempt — 20s ceiling. When TxGIO is healthy it responds
+  // in 2-15s. When TxGIO is having a bad day (production 2026-06-18:
+  // confirmed direct 504s from feature.geographic.texas.gov within 60s)
+  // there is no point burning the user's wait time on retries — they'll
+  // just stack another 20-50 seconds of nothing onto an upstream that's
+  // already not responding. Fail fast, return clean 502, let the client
+  // surface a "TxGIO upstream slow/down — pin manually" prompt while
+  // the broker keeps working on other comps in parallel. The previous
+  // 40s+50s retry pattern compounded to 5+ minutes of dead time per
+  // upload when 3 comps each tried 3 fallback queries.
+  try {
+    data = await fetchOnce(20_000);
+  } catch (e: any) {
+    lastErr = e;
   }
 
   if (!data) {
     return NextResponse.json(
       {
-        error: 'TxGIO upstream failed',
-        detail: lastErr?.message || 'timeout',
+        error: 'TxGIO upstream slow or down',
+        detail: lastErr?.message || 'timeout after 20s',
+        hint: 'Texas state parcel service may be intermittently slow. Pin manually on the map and the comp will still save with all extracted fields.',
         query: q,
       },
       { status: 502 }
