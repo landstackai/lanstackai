@@ -2588,6 +2588,25 @@ export default function ImportPage() {
         return;
       }
 
+      // Server-side aerial thumbnails are back. The orchestrator now
+      // renders each comp's evidence_pages[0] via ConvertAPI and
+      // inlines the JPG as `aerial_thumbnail_data_url` (data: URL,
+      // ~100KB per comp). The verification-card UI reads from
+      // `comp.aerialImage` (camelCase, set by the legacy client-side
+      // pdf.js extractor that no longer runs), so we map the new
+      // field name onto the old one here. One alias keeps every
+      // downstream reader — the card thumbnail, the merge-patch
+      // builder, the save-to-DB flow — working without a refactor.
+      // Production bug 2026-06-18: Christina uploaded a 6-page
+      // Comanche appraisal and saw the verification cards with no
+      // thumbnails. Server had rendered them fine; UI just wasn't
+      // looking at the right field.
+      for (const c of data.comps) {
+        if (!c.aerialImage && c.aerial_thumbnail_data_url) {
+          c.aerialImage = c.aerial_thumbnail_data_url;
+        }
+      }
+
       // Aerial attribution removed alongside the client-side aerial
       // extraction. The next iteration of the orchestrator extracts
       // each comp's evidence_pages server-side via pdf-lib and uploads
