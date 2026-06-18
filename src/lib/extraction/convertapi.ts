@@ -53,7 +53,16 @@ async function postConvertApi(
 ): Promise<{ Files: Array<{ FileName: string; FileExt: string; FileSize: number; FileData: string }>; ConversionCost: number }> {
   const url = `${CONVERTAPI_BASE}${endpoint}?Secret=${encodeURIComponent(getToken())}`;
   const form = new FormData();
-  form.append('File', new Blob([pdfBuffer], { type: 'application/pdf' }), fileName);
+  // Wrap Buffer in Uint8Array to satisfy Blob's BlobPart type. TS 5.x
+  // typed Buffer as `Buffer<ArrayBufferLike>` (could be ArrayBuffer or
+  // SharedArrayBuffer), which Blob's constructor doesn't accept
+  // directly anymore. `new Uint8Array(buf)` gives a clean
+  // ArrayBufferView<ArrayBuffer> with no copy at runtime (Buffer
+  // already IS a Uint8Array — this is purely a type-level adapter).
+  // This caused every Vercel build to fail starting at commit 7d4bec5
+  // on 2026-06-18; bypassing the type by using a cast would've worked
+  // but obscures the actual constraint.
+  form.append('File', new Blob([new Uint8Array(pdfBuffer)], { type: 'application/pdf' }), fileName);
   for (const [k, v] of Object.entries(params)) {
     form.append(k, v);
   }
@@ -168,7 +177,9 @@ export function pagesToRange(pages: number[]): string {
     throw new Error('pagesToRange requires at least one page number');
   }
   // Sort + dedupe defensively (Claude usually returns sorted unique
-  // pages but the schema doesn't enforce it).
-  const sorted = [...new Set(pages)].sort((a, b) => a - b);
+  // pages but the schema doesn't enforce it). Array.from(new Set(...))
+  // instead of spread because this codebase's tsconfig targets an ES
+  // version that requires --downlevelIteration for Set spread.
+  const sorted = Array.from(new Set(pages)).sort((a, b) => a - b);
   return sorted.join(',');
 }
