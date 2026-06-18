@@ -216,6 +216,16 @@ async function runClaude(pdfBuffer: Buffer, fileName: string): Promise<EngineRun
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
       max_tokens: 16000,
+      // temperature: 0 for the same reason GPT got it — structured
+      // extraction needs deterministic output. Default Claude
+      // temperature (1.0) was giving us 5 comps on one Thorndale
+      // run and 6 on the next (production 2026-06-18, broker upload).
+      // Identical PDF, identical prompt, different result. That's the
+      // *completeness* bug, not a quality bug — the model gives up
+      // early sometimes when it could've kept going. For extraction
+      // we want the same input to produce the same output every time.
+      // Mirrors the GPT temperature: 0 fix from a64b2e2.
+      temperature: 0,
       system: CLAUDE_PDF_SYSTEM_PROMPT,
       tools: [SUBMIT_COMPS_TOOL],
       tool_choice: { type: 'tool', name: 'submit_comps' },
