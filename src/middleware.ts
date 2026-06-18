@@ -26,16 +26,31 @@ export async function middleware(request: NextRequest) {
   );
 
   const { data: { user } } = await supabase.auth.getUser();
+  const path = request.nextUrl.pathname;
 
-  // Protect dashboard routes
-  if (request.nextUrl.pathname.startsWith('/dashboard') && !user) {
+  // Protect dashboard routes — must be signed in.
+  if (path.startsWith('/dashboard') && !user) {
     const url = request.nextUrl.clone();
     url.pathname = '/auth/login';
     return NextResponse.redirect(url);
   }
 
-  // Redirect logged-in users away from auth pages
-  if (request.nextUrl.pathname.startsWith('/auth') && user) {
+  // Invite-only: kill the public signup page. Anyone who hits
+  // /auth/signup gets routed to /auth/login. Accounts are created
+  // only via the Supabase admin API (auth.admin.inviteUserByEmail
+  // or pre-created profiles), never self-serve. This pairs with
+  // the "Allow new users to sign up" toggle being OFF in the
+  // Supabase dashboard, which is the authoritative server-side
+  // lockdown — the middleware redirect is just UX so a curious
+  // visitor doesn't even see a signup form.
+  if (path.startsWith('/auth/signup')) {
+    const url = request.nextUrl.clone();
+    url.pathname = '/auth/login';
+    return NextResponse.redirect(url);
+  }
+
+  // Redirect logged-in users away from auth pages (login, etc.).
+  if (path.startsWith('/auth') && user) {
     const url = request.nextUrl.clone();
     url.pathname = '/dashboard/map';
     return NextResponse.redirect(url);
