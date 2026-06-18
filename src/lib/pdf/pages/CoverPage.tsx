@@ -96,19 +96,107 @@ export function CoverPage({ data }: { data: CmaPdfData }) {
           {subjectAcres != null ? ` · ${fmtAcres(subjectAcres)}` : ''}
         </Text>
 
-        {/* Broker block — anchored bottom-left */}
-        <View style={{ marginTop: 'auto', marginBottom: 8 }}>
-          <Text style={[styles.sectionLabel, { color: COLORS.ink4 }]}>Prepared by</Text>
-          <Text style={{ fontSize: TYPE.h3, color: COLORS.ink, marginBottom: 2 }}>
-            {broker.full_name || 'Your Land Broker'}
-          </Text>
-          {broker.brokerage_name ? (
-            <Text style={{ fontSize: TYPE.body, color: COLORS.ink2 }}>{broker.brokerage_name}</Text>
-          ) : null}
-          {broker.email || broker.phone ? (
-            <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 4 }}>
-              {[broker.email, broker.phone].filter(Boolean).join(' · ')}
+        {/* Broker + brokerage block — anchored bottom, two-column layout:
+            agent on the LEFT (name, title, license, email/phone),
+            brokerage on the RIGHT (logo, name, address, license).
+            When the broker isn't on a team, the right column is empty
+            and the agent column degrades to the legacy single-column UX. */}
+        <View
+          style={{
+            marginTop: 'auto',
+            marginBottom: 8,
+            flexDirection: 'row',
+            gap: 28,
+            alignItems: 'flex-end',
+          }}
+        >
+          {/* Agent (left) */}
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.sectionLabel, { color: COLORS.ink4 }]}>Prepared by</Text>
+            <Text style={{ fontSize: TYPE.h3, color: COLORS.ink, marginBottom: 2 }}>
+              {broker.full_name || 'Your Land Broker'}
             </Text>
+            {broker.title ? (
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink2 }}>
+                {broker.title}
+                {broker.license_number ? ` · TREC #${broker.license_number}` : ''}
+              </Text>
+            ) : broker.license_number ? (
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink2 }}>
+                TREC #{broker.license_number}
+              </Text>
+            ) : null}
+            {broker.email || broker.phone ? (
+              <Text style={{ fontSize: TYPE.small, color: COLORS.ink3, marginTop: 4 }}>
+                {[broker.email, broker.phone].filter(Boolean).join(' · ')}
+              </Text>
+            ) : null}
+          </View>
+
+          {/* Brokerage (right) — only renders when there's a team to brand for */}
+          {broker.brokerage_name ? (
+            <View style={{ flex: 1, alignItems: 'flex-end' }}>
+              {broker.brokerage_logo_url ? (
+                <Image
+                  src={broker.brokerage_logo_url}
+                  style={{
+                    width: 64,
+                    height: 64,
+                    objectFit: 'contain',
+                    marginBottom: 6,
+                  }}
+                />
+              ) : null}
+              <Text
+                style={{
+                  fontSize: TYPE.body,
+                  color: COLORS.ink,
+                  textAlign: 'right',
+                  marginBottom: 2,
+                }}
+              >
+                {broker.brokerage_name}
+              </Text>
+              {broker.brokerage_address ? (
+                <Text style={{ fontSize: TYPE.small, color: COLORS.ink2, textAlign: 'right' }}>
+                  {broker.brokerage_address}
+                </Text>
+              ) : null}
+              {broker.brokerage_city_state_zip ? (
+                <Text style={{ fontSize: TYPE.small, color: COLORS.ink2, textAlign: 'right' }}>
+                  {broker.brokerage_city_state_zip}
+                </Text>
+              ) : null}
+              {broker.brokerage_phone || broker.brokerage_website ? (
+                <Text
+                  style={{
+                    fontSize: TYPE.small,
+                    color: COLORS.ink3,
+                    textAlign: 'right',
+                    marginTop: 4,
+                  }}
+                >
+                  {[
+                    broker.brokerage_phone,
+                    broker.brokerage_website?.replace(/^https?:\/\//, ''),
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </Text>
+              ) : null}
+              {broker.brokerage_license_number ? (
+                <Text
+                  style={{
+                    fontSize: TYPE.tiny,
+                    color: COLORS.ink4,
+                    textAlign: 'right',
+                    marginTop: 2,
+                  }}
+                >
+                  Brokerage TREC #{broker.brokerage_license_number}
+                </Text>
+              ) : null}
+            </View>
           ) : null}
         </View>
 

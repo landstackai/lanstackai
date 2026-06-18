@@ -63,27 +63,79 @@ export async function GET(
     if (compData) comps = compData;
   }
 
-  // 3. Broker profile — full contact info (email/phone visible to the
-  // broker themselves under RLS).
+  // 3. Broker profile + team — the report is co-branded:
+  //   • Agent-level fields (full_name, title, license_number, email, phone)
+  //     come from the profile of whoever created the CMA. These appear in
+  //     the "Prepared by" block on the cover + the footer.
+  //   • Brokerage-level fields (name, logo, address, phone, website,
+  //     license_number) come from that profile's team (if linked). These
+  //     anchor the brand presence on the cover. When a broker isn't on a
+  //     team (solo accounts), the brokerage block degrades gracefully —
+  //     only the agent's contact info renders.
   let broker: CmaPdfBroker = {
     full_name: null,
-    brokerage_name: null,
+    title: null,
+    license_number: null,
     email: null,
     phone: null,
+    brokerage_name: null,
+    brokerage_logo_url: null,
+    brokerage_address: null,
+    brokerage_city_state_zip: null,
+    brokerage_phone: null,
+    brokerage_website: null,
+    brokerage_license_number: null,
   };
   if (cma.created_by) {
     const { data: prof } = await supabase
       .from('profiles')
-      .select('full_name, brokerage_name, email, phone')
+      .select(
+        'full_name, brokerage_name, email, phone, title, license_number, team_id',
+      )
       .eq('id', cma.created_by)
       .maybeSingle();
     if (prof) {
-      broker = {
-        full_name: prof.full_name ?? null,
-        brokerage_name: prof.brokerage_name ?? null,
-        email: (prof as any).email ?? null,
-        phone: (prof as any).phone ?? null,
-      };
+      broker.full_name = prof.full_name ?? null;
+      broker.title = (prof as any).title ?? null;
+      broker.license_number = (prof as any).license_number ?? null;
+      broker.email = (prof as any).email ?? null;
+      broker.phone = prof.phone ?? null;
+      // Legacy brokerage_name on profiles kept as a fallback for solo
+      // users who set it before the teams table existed.
+      broker.brokerage_name = prof.brokerage_name ?? null;
+
+      // Pull team-level branding when the profile is linked to a team.
+      const teamId = (prof as any).team_id as string | null | undefined;
+      if (teamId) {
+        const { data: team } = await supabase
+          .from('teams')
+          .select(
+            'name, logo_url, address, suite, city, state, zip, phone, website, license_number',
+          )
+          .eq('id', teamId)
+          .maybeSingle();
+        if (team) {
+          // Team name beats the legacy profile.brokerage_name when present.
+          broker.brokerage_name = (team as any).name ?? broker.brokerage_name;
+          broker.brokerage_logo_url = (team as any).logo_url ?? null;
+          broker.brokerage_phone = (team as any).phone ?? null;
+          broker.brokerage_website = (team as any).website ?? null;
+          broker.brokerage_license_number = (team as any).license_number ?? null;
+          // Compose address into the two display lines the cover renders.
+          // Line 1: "<street>, <suite>" (suite optional).
+          // Line 2: "<city>, <state> <zip>" (all-or-nothing — partial address
+          // looks broken on a report cover).
+          const street = (team as any).address as string | null;
+          const suite = (team as any).suite as string | null;
+          const city = (team as any).city as string | null;
+          const state = (team as any).state as string | null;
+          const zip = (team as any).zip as string | null;
+          broker.brokerage_address =
+            street ? [street, suite].filter(Boolean).join(', ') : null;
+          broker.brokerage_city_state_zip =
+            city && state && zip ? `${city}, ${state} ${zip}` : null;
+        }
+      }
     }
   }
 

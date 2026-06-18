@@ -19,10 +19,21 @@ export type OpinionMode = 'lump_sum' | 'breakdown' | null;
 export type OpinionPresentation = 'confirmed' | 'range' | 'discuss' | null;
 
 export type CmaPdfBroker = {
+  // ── Agent-level (the individual broker generating this report) ──
   full_name: string | null;
-  brokerage_name: string | null;
+  title: string | null;            // "Designated Broker", "REALTOR®", etc.
+  license_number: string | null;   // Agent's individual TREC license
   email: string | null;
   phone: string | null;
+
+  // ── Brokerage-level (the entity the agent works under, optional) ──
+  brokerage_name: string | null;
+  brokerage_logo_url: string | null;
+  brokerage_address: string | null;          // "8620 N New Braunfels Ave, Ste 115"
+  brokerage_city_state_zip: string | null;   // "San Antonio, TX 78217"
+  brokerage_phone: string | null;
+  brokerage_website: string | null;
+  brokerage_license_number: string | null;   // Entity TREC license
 };
 
 export type CmaPdfSubject = {
