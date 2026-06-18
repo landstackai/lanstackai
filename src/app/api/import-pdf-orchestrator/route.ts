@@ -131,15 +131,18 @@ async function runGPT(text: string, fileName: string): Promise<EngineRun> {
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      // 16k is the new floor. The previous 6k was right at the
-      // boundary for 6-comp appraisals (each fully-cited comp =
-      // ~1000 tokens × 6 = 6000) and got silently truncated:
-      // production Thorndale upload on 2026-06-17 dropped Land
-      // Sale 6 (Circle M 8) entirely because GPT ran out of
-      // budget mid-output. Schema-locked JSON is constrained
-      // enough that 16k still finishes fast on small docs;
-      // generous headroom kills the truncation class.
+      // 16k is the new floor — 6k was at the truncation boundary
+      // for 6-comp appraisals. 16k gives generous headroom.
       max_tokens: 16000,
+      // Temperature 0 for structured-extraction determinism. Without
+      // this, GPT was returning 5 comps on one run and 6 on the next
+      // for the same Thorndale PDF — same input, same prompt. The
+      // determinism dropoff isn't a quality issue (correctness was
+      // fine when it returned 6) — it's a *completeness* issue
+      // (sometimes stopped early). For extraction we want the same
+      // input to produce the same output every time. Trade-off: zero
+      // creative variation. For comp data, that's the right trade.
+      temperature: 0,
       response_format: IMPORT_RESPONSE_FORMAT,
       messages: [
         { role: 'system', content: IMPORT_SYSTEM_PROMPT },

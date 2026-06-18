@@ -2631,41 +2631,67 @@ export default function ImportPage() {
         setLoadingStatus(
           `Locating ${data.comps.length} ${data.comps.length === 1 ? 'property' : 'properties'} on the map…`,
         );
-        for (let i = 0; i < data.comps.length; i++) {
-          const c = data.comps[i];
-          const label = c.property_name || c.county || 'comp';
-          try {
-            const located = await locateCompForImport(c);
-            if (located) {
-              const aiCoordsLabel =
-                c.latitude != null && c.longitude != null
-                  ? ` (AI seed ${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)} → ${located.match_confidence})`
-                  : '';
-              console.log(
-                `[import] auto-locate ✓ ${label}: ${located.match_reason}${aiCoordsLabel}`,
-              );
-              toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
-              data.comps[i] = {
-                ...c,
-                latitude: located.latitude,
-                longitude: located.longitude,
-                parcel_id: located.parcel_id ?? c.parcel_id,
-                geometry: located.geometry,
-                _auto_located_confidence: located.match_confidence,
-              };
-            } else if (c.latitude != null && c.longitude != null) {
-              // autoLocate returned null but AI gave us coords.
-              // Possible reasons: corroboration failed AND owner search
-              // also struck out (rare). Keep the AI coords with a
-              // "needs_location_review" flag so the broker manually
-              // verifies on the verification card before save.
-              console.warn(
-                `[import] ${label}: autoLocate found no confident match. Keeping AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) but flagging for review.`,
-              );
-              data.comps[i] = { ...c, needs_location_review: true };
+        // Run all autoLocate lookups IN PARALLEL.
+        //
+        // Each comp's lookup is independent — different counties,
+        // different owners, no shared state. Sequential awaits added
+        // ~25 seconds to a 6-comp batch (each lookup hits TxGIO,
+        // routinely 3-6 seconds per call). Promise.all collapses that
+        // to ~max(any single lookup) = ~5-8 seconds.
+        //
+        // Risk consideration: TxGIO has API rate limits. We're hitting
+        // the same endpoint 6+ times concurrently. In practice TxGIO
+        // is generous on burst (we're not in a 100+ concurrent scenario
+        // for one broker's batch), so the upside dramatically outweighs
+        // the small risk of a transient 429.
+        const locateResults = await Promise.all(
+          data.comps.map(async (c: any, i: number) => {
+            const label = c.property_name || c.county || `comp ${i + 1}`;
+            try {
+              const located = await locateCompForImport(c);
+              return { index: i, label, located, error: null };
+            } catch (e: any) {
+              return { index: i, label, located: null, error: e?.message ?? 'unknown' };
             }
-          } catch (e: any) {
-            console.error(`[import] auto-locate threw for ${label}:`, e);
+          }),
+        );
+
+        // Apply results sequentially so toast ordering matches comp order
+        // (avoids 6 toasts firing simultaneously which would render in
+        // arbitrary order).
+        for (const { index: i, label, located, error } of locateResults) {
+          const c = data.comps[i];
+          if (error) {
+            console.error(`[import] auto-locate threw for ${label}:`, error);
+            continue;
+          }
+          if (located) {
+            const aiCoordsLabel =
+              c.latitude != null && c.longitude != null
+                ? ` (AI seed ${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)} → ${located.match_confidence})`
+                : '';
+            console.log(
+              `[import] auto-locate ✓ ${label}: ${located.match_reason}${aiCoordsLabel}`,
+            );
+            toast.success(`📍 ${label}: ${located.match_reason}`, { duration: 8000 });
+            data.comps[i] = {
+              ...c,
+              latitude: located.latitude,
+              longitude: located.longitude,
+              parcel_id: located.parcel_id ?? c.parcel_id,
+              geometry: located.geometry,
+              _auto_located_confidence: located.match_confidence,
+            };
+          } else if (c.latitude != null && c.longitude != null) {
+            // autoLocate returned null but AI gave us coords.
+            // Possible reasons: corroboration failed AND owner search
+            // also struck out (rare). Keep the AI coords with a
+            // "needs_location_review" flag so the broker manually
+            // verifies on the verification card before save.
+            console.warn(
+              `[import] ${label}: autoLocate found no confident match. Keeping AI coords (${c.latitude.toFixed(4)}, ${c.longitude.toFixed(4)}) but flagging for review.`,
+            );
+            data.comps[i] = { ...c, needs_location_review: true };
           }
         }
       }
