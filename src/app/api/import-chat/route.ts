@@ -319,11 +319,29 @@ Each comp should have these fields:
   "description": string or null,
   "is_subject_property": boolean,
   "is_comparable": boolean,
+  "evidence_pages": [int, int, ...],   // REQUIRED. See "EVIDENCE PAGES" below.
   "confidence": {
     "overall": number (0-100),
     "per_field": {}
   }
 }
+
+EVIDENCE PAGES — every comp must list the 1-indexed PDF page numbers
+its data was drawn from. This is how the system pulls the appraiser's
+aerial image for that comp and saves the source pages back to the comp.
+
+  * Multi-comp appraisals (TYPE B) typically dedicate 2 pages per
+    comp — one with the identification table + aerial photo, one with
+    property description + remarks. Example: Land Sale 1 lives on
+    pages 37-38 → evidence_pages: [37, 38].
+  * Single-property comp sheets (TYPE A) are often 1-3 pages. Include
+    every page that contributed data. Fritz Farm 2-page sheet →
+    evidence_pages: [1, 2].
+  * Non-contiguous is fine: if a sale's data spans pages 41 and 43,
+    return [41, 43].
+  * NEVER return an empty array. If you cannot pinpoint pages, give
+    your best estimate of the page range — we'd rather have an
+    approximate range than nothing.
 
 For conversational questions (not document extraction), still respond as JSON
 with empty comps array, e.g. {"message": "...", "comps": []}.

@@ -96,7 +96,17 @@ async function postPdf(filePath, name) {
     body: fd,
   });
   const elapsed_ms = Date.now() - t0;
-  const data = await res.json();
+  // Read text first so we can see what the server actually returned
+  // when it isn't valid JSON (500 HTML pages, empty bodies, etc.) —
+  // otherwise `await res.json()` throws an unhelpful "Unexpected end
+  // of JSON input" and hides the real failure mode.
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { __parseError: true, __bodyPreview: text.slice(0, 500) };
+  }
   return { res, data, elapsed_ms };
 }
 
@@ -176,6 +186,22 @@ async function testThorndale() {
     fail(`acreages off. Expected: [${f.expect.acres_in_order.join(', ')}], got: [${actualAcres.map((a) => a?.toFixed?.(2) ?? '?').join(', ')}]`);
   }
 
+  // evidence_pages: every comp must list ≥1 page number. This is what
+  // the ConvertAPI loop needs to render the aerial thumbnail + slice
+  // the source-pages PDF. If GPT returns [] or null for any comp, the
+  // ConvertAPI loop will skip it and the broker won't get an aerial
+  // overlay for that comp.
+  const epReport = data.comps.map((c, i) => {
+    const ep = c.evidence_pages;
+    return `#${i + 1}: ${Array.isArray(ep) ? `[${ep.join(',')}]` : String(ep)}`;
+  });
+  const allHavePages = data.comps.every((c) => Array.isArray(c.evidence_pages) && c.evidence_pages.length > 0 && c.evidence_pages.every((n) => Number.isInteger(n) && n > 0));
+  if (allHavePages) {
+    pass(`evidence_pages populated on all comps: ${epReport.join(' ')}`);
+  } else {
+    fail(`evidence_pages missing/empty on some comp. Got: ${epReport.join(' ')}`);
+  }
+
   // Diagnostic summary
   if (data.diagnostic) {
     console.log(`  · diagnostic: primary=${data.diagnostic.primary}, reason=${data.diagnostic.routing_reason}`);
@@ -232,6 +258,15 @@ async function testFritzFarm() {
   for (const must of f.expect.fritz_improvements_source_contains) {
     if (src.includes(must.toLowerCase())) pass(`improvements_value_source mentions "${must}"`);
     else fail(`improvements_value_source missing "${must}". Got: "${fritz.improvements_value_source}"`);
+  }
+
+  // evidence_pages on the Fritz comp — sheet is 2 pages so we expect
+  // at least [1] (typically [1, 2]).
+  const ep = fritz.evidence_pages;
+  if (Array.isArray(ep) && ep.length > 0 && ep.every((n) => Number.isInteger(n) && n > 0)) {
+    pass(`evidence_pages=[${ep.join(',')}]`);
+  } else {
+    fail(`evidence_pages missing/empty. Got: ${JSON.stringify(ep)}`);
   }
 }
 

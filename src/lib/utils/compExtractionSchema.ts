@@ -107,6 +107,23 @@ const COMP_SCHEMA = {
     is_subject_property: { type: 'boolean' },
     is_comparable: { type: 'boolean' },
 
+    // Provenance: 1-indexed PDF page numbers this comp's data was drawn
+    // from. E.g. Land Sale 1 typically lives on pages [37, 38] of a
+    // Stouffer appraisal (one aerial/identification page + one
+    // description/remarks page). Used post-extraction to:
+    //   1. Render the appraiser's aerial image (page[0]) as a thumbnail
+    //      that overlays the boundary-draw map for visual reference.
+    //   2. Slice those pages out as a standalone sub-PDF and save it to
+    //      comp_documents so the broker can re-open the source pages
+    //      later without scrolling the full 71-page appraisal.
+    // The Claude fallback path already populates this (see import-pdf-claude).
+    // Adding it to the GPT primary schema so the orchestrator can hand
+    // both engines' output to the same downstream ConvertAPI loop.
+    evidence_pages: {
+      type: 'array',
+      items: { type: 'integer' },
+    },
+
     confidence: {
       type: 'object',
       additionalProperties: false,
@@ -140,7 +157,7 @@ const COMP_SCHEMA = {
     'water', 'road_frontage', 'has_improvements', 'irrigation',
     'has_water_rights', 'improvements_notes', 'wildlife_notes',
     'flood_plain', 'description',
-    'is_subject_property', 'is_comparable', 'confidence',
+    'is_subject_property', 'is_comparable', 'evidence_pages', 'confidence',
   ],
 } as const;
 

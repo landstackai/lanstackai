@@ -460,48 +460,63 @@ export async function POST(request: NextRequest) {
 
     console.log(
       `[orchestrator] ${file.name} · ${sizeMB.toFixed(2)}MB · ${pageCount ?? '?'} pages · ` +
-        `live text ${hasLiveText ? '✓' : '✗'} · GPT primary, Claude fallback`,
+        `live text ${hasLiveText ? '✓' : '✗'} · Claude primary, GPT fallback`,
     );
 
-    // ─── GPT primary, Claude as actual fallback ──────────────────────
+    // ─── Claude primary, GPT as fallback ─────────────────────────────
     //
-    // Previously we ran both engines in parallel via Promise.all and
-    // waited for the slower of the two. That made every successful
-    // extraction wait an extra 20-30 seconds for Claude to finish even
-    // when GPT had already returned a clean result. The broker waited
-    // for max(GPT, Claude) instead of just GPT.
+    // History of this decision:
+    //   v1: parallel race (Stripe shadow pattern) — both engines run,
+    //       result waits for max(GPT, Claude). Robust but slow.
+    //   v2: GPT primary, Claude fallback only — fast on success but
+    //       silently dropped extraction on TYPE-A appraiser comp sheets
+    //       with 2-column layouts. The text pdf-parse spits out is
+    //       label-column-then-value-column, which text-only GPT can't
+    //       reliably align. We confirmed 4 of 12 Frio Farms PDFs
+    //       returned 0 comps via the GPT-text path (Wesla, Wright,
+    //       Bagan, VC5) — all of which were extracted correctly in May
+    //       by the legacy /api/import-chat vision path that's since
+    //       been deleted. Christina's exact use case was the
+    //       regression.
+    //   v3 (this): Claude primary. Claude reads the PDF binary
+    //       directly via Anthropic's native PDF support — it sees the
+    //       2-column layout the way a human does, not as a jumbled
+    //       text dump. Verified 12 of 12 Frio Farms + Thorndale all
+    //       extract cleanly via Claude. GPT remains the fallback for
+    //       the rare case Claude itself errors (auth, rate limit,
+    //       Anthropic outage).
     //
-    // New shape: GPT runs first. Claude is only invoked when GPT fails
-    // or returns zero comps. Net latency on the success path drops
-    // from ~max(GPT, Claude) to just GPT. The cost trade-off is we
-    // lose shadow-mode comparison data on success cases — acceptable
-    // for early-customer phase. Claude still runs (and contributes
-    // telemetry) when its safety value is real: GPT outright failed
-    // or returned nothing.
-    const gptRun = await runGPT(pdfText, file.name);
+    // Latency trade-off: Claude on a 2-page comp sheet runs ~27s vs
+    // GPT-text ~12s. The 15s extra is the price of reliability — the
+    // alternative is silently returning 0 comps to the broker on
+    // every other upload. We'll add per-comp progress streaming later
+    // to make the wait feel shorter, but never trade correctness for
+    // perceived speed.
+    const claudeRun = await runClaude(buffer, file.name);
 
-    let claudeRun: EngineRun;
-    const gptCompsCount = gptRun.result?.comps?.length ?? 0;
-    const gptHasUsableResults = gptRun.ok && gptCompsCount > 0;
+    let gptRun: EngineRun;
+    const claudeCompsCount = claudeRun.result?.comps?.length ?? 0;
+    const claudeHasUsableResults = claudeRun.ok && claudeCompsCount > 0;
 
-    if (gptHasUsableResults) {
-      // GPT succeeded — skip Claude entirely. Stub a placeholder run so
-      // the telemetry + diagnostic shape doesn't need a separate path.
-      claudeRun = {
-        engine: 'claude',
-        model: 'claude-sonnet-4-5',
+    if (claudeHasUsableResults) {
+      // Claude succeeded — skip GPT entirely. Stub a placeholder run
+      // so the telemetry + diagnostic shape doesn't need a separate
+      // path.
+      gptRun = {
+        engine: 'gpt',
+        model: 'gpt-4o-mini',
         ok: false,
         result: null,
-        error: 'skipped: GPT primary succeeded',
+        error: 'skipped: Claude primary succeeded',
         elapsed_ms: 0,
         input_tokens: null,
         output_tokens: null,
       };
     } else {
       console.log(
-        `[orchestrator] ${file.name} · GPT ${gptRun.ok ? 'returned 0 comps' : `failed (${gptRun.error})`}, falling back to Claude`,
+        `[orchestrator] ${file.name} · Claude ${claudeRun.ok ? 'returned 0 comps' : `failed (${claudeRun.error})`}, falling back to GPT-text`,
       );
-      claudeRun = await runClaude(buffer, file.name);
+      gptRun = await runGPT(pdfText, file.name);
     }
 
     const elapsedMs = Date.now() - startTime;
@@ -516,53 +531,41 @@ export async function POST(request: NextRequest) {
     const gptHasResults = gptRun.ok && gptCompCount > 0;
     const claudeHasResults = claudeRun.ok && claudeCompCount > 0;
 
-    // When BOTH engines return comps, prefer the one with MORE comps if
-    // they materially disagree on count. Catches the silent-undercount
-    // class of bug (production 2026-06-17: Thorndale's Land Sale 6 was
-    // dropped by GPT because max_tokens=6000 was right at the schema's
-    // 6-comp output ceiling — GPT returned 5, Claude returned 6, the
-    // old logic blindly trusted GPT). max_tokens has since been bumped
-    // to 16000 to prevent this specific cause, but the smarter
-    // selection is a permanent guard against future "GPT silently
-    // truncated" failures regardless of root cause.
-    //
-    // "Materially disagree" = Claude found ≥2 more comps than GPT.
-    // A 1-comp delta is in the noise (one engine might count a
-    // borderline-comp as subject, vice versa). A 2+ delta means
-    // someone genuinely missed something.
-    const claudeFoundMoreComps =
-      claudeHasResults && claudeCompCount >= gptCompCount + 2;
-
-    if (claudeFoundMoreComps) {
+    // Selection ladder: trust Claude when it returned comps (it's the
+    // primary engine — native PDF reader, layout-robust). Fall through
+    // to GPT only when Claude couldn't get the job done. The legacy
+    // "claudeFoundMoreComps" tiebreaker is gone — under the new shape
+    // GPT only runs when Claude already failed, so a comp-count
+    // disagreement isn't possible on the success path.
+    if (claudeHasResults) {
+      // Claude is the primary engine — if it returned comps, use them.
+      // Don't second-guess with GPT comparison: Claude reads the PDF
+      // natively (vision-equivalent), GPT reads pdf-parse text that
+      // breaks on 2-column layouts. When both ran (Claude succeeded
+      // AND GPT was somehow also invoked), we still trust Claude.
       primary = 'claude';
-      routingReason = `claude_preferred_${claudeCompCount}_vs_gpt_${gptCompCount}`;
+      routingReason = 'claude_primary_success';
       chosen = claudeRun.result!;
-      console.warn(
-        `[orchestrator] Claude found ${claudeCompCount} comps, GPT only ${gptCompCount} — using Claude. ` +
-          `GPT may be silently truncating; investigate.`,
-      );
     } else if (gptHasResults) {
+      // Claude empty or errored, GPT recovered with results.
       primary = 'gpt';
-      routingReason = 'gpt_primary_success';
-      chosen = gptRun.result!;
-    } else if (claudeHasResults) {
-      primary = 'claude';
-      if (!gptRun.ok) {
-        routingReason = `claude_fallback_after_gpt_${gptRun.error?.includes('timeout') ? 'timeout' : 'error'}`;
+      if (!claudeRun.ok) {
+        routingReason = `gpt_fallback_after_claude_${claudeRun.error?.includes('timeout') ? 'timeout' : 'error'}`;
       } else {
-        routingReason = 'claude_fallback_gpt_zero_comps';
+        routingReason = 'gpt_fallback_claude_zero_comps';
       }
-      chosen = claudeRun.result!;
-    } else if (gptRun.ok) {
-      // Both fulfilled with 0 comps. Show GPT's empty-result message.
-      primary = 'gpt';
-      routingReason = 'both_zero_comps';
       chosen = gptRun.result!;
     } else if (claudeRun.ok) {
-      // GPT errored, Claude returned a result (even 0). Use Claude.
+      // Both ran, both returned 0 comps. Show Claude's empty-result
+      // message (it's our primary engine).
       primary = 'claude';
-      routingReason = 'claude_fallback_gpt_error';
+      routingReason = 'both_zero_comps';
       chosen = claudeRun.result!;
+    } else if (gptRun.ok) {
+      // Claude errored, GPT returned a result (even 0). Use GPT.
+      primary = 'gpt';
+      routingReason = 'gpt_fallback_claude_error';
+      chosen = gptRun.result!;
     } else {
       // Both failed. Surface a clean error.
       console.error(

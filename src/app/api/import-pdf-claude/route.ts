@@ -60,6 +60,22 @@ import Anthropic from '@anthropic-ai/sdk';
 // internally to leave 30s headroom for Anthropic latency variance.
 export const maxDuration = 120;
 
+// Guard against the silent-empty-key gotcha: if the SDK constructor
+// gets `apiKey: ''`, it throws "Could not resolve authentication
+// method" at request time (not at startup) — making the failure look
+// like an auth-config issue when really the env var was just empty.
+// This is the failure mode that bit local dev when the shell exported
+// a blank ANTHROPIC_API_KEY that silently overrode .env.local. Fail
+// loudly at module-load instead.
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error(
+    '[import-pdf-claude] WARNING: ANTHROPIC_API_KEY is missing or empty. ' +
+      'Claude PDF extraction will fail. Check .env.local (local) or Vercel ' +
+      'env vars (prod). If running locally inside an environment that may ' +
+      'export a blank ANTHROPIC_API_KEY, restart the dev server with ' +
+      '`env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL npm run dev`.',
+  );
+}
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
