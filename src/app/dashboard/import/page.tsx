@@ -780,7 +780,10 @@ async function geocodeAddressFallback(comp: any): Promise<{
   if (!address || !/\d/.test(address) || address.length < 6) return null;
   try {
     const { geocodeAddress } = await import('@/lib/utils/geocodePlace');
-    const hit = await geocodeAddress(address);
+    // Pass the AI-extracted state so Mapbox is hard-bounded to that
+    // state's bbox. Vague rural addresses can no longer pull a wrong-
+    // state homonym (Hamilton-County-TX appraisal → San Jose, CA).
+    const hit = await geocodeAddress(address, comp?.state ?? 'TX');
     if (!hit) return null;
     return {
       latitude: hit.lat,
@@ -800,21 +803,39 @@ async function geocodeAddressFallback(comp: any): Promise<{
 // (good enough). Both call sites in the import pipeline should call
 // this rather than autoLocateInBrowserLogged directly.
 //
-// Phase 2b cross-check: when the locator falls through to geocode (parcel
-// match failed), Mapbox tells us which county the address actually sits
-// in. We cross-check that against the AI-extracted county and append a
-// warning to _sanity_warnings if they disagree — the broker sees this in
-// review. We DON'T overwrite the extracted county; that's a broker call.
+// County cross-check policy (changed 2026-06-19):
+//   When the parcel match fails and we fall through to address
+//   geocoding, Mapbox returns the county it thinks the address sits
+//   in. We compare that to the AI-extracted county. If they DISAGREE
+//   (extracted "Hamilton" but geocoded "Comal"), REJECT the geocode
+//   entirely — return null, leave the comp unlocated, broker pins
+//   manually. Previous behavior was warn-but-keep, which silently
+//   saved comps at wrong coords with a sanity warning the broker
+//   never saw.
 async function locateCompForImport(comp: any) {
   const located = await autoLocateInBrowserLogged(comp);
   if (located) return located;
   const fallback = await geocodeAddressFallback(comp);
-  if (fallback && fallback.geocoded_county) {
-    try {
-      const { crossCheckGeocodedCounty } = await import('@/lib/utils/extractionSanity');
-      crossCheckGeocodedCounty(comp, { county: fallback.geocoded_county });
-    } catch (e) {
-      console.warn('[locate] county cross-check failed:', e);
+  if (fallback && fallback.geocoded_county && comp?.county) {
+    const norm = (s: string) => String(s ?? '').toLowerCase().replace(/\s+county\s*$/i, '').trim();
+    const extracted = norm(comp.county);
+    const geocoded = norm(fallback.geocoded_county);
+    // Multi-county comps come back as "Frio, Medina" from extraction —
+    // accept if Mapbox's county matches ANY of them.
+    const extractedAny = extracted.split(',').map((s) => s.trim()).filter(Boolean);
+    if (extractedAny.length && !extractedAny.includes(geocoded)) {
+      console.warn(
+        `[locate] REJECTING geocode for ${comp.property_name ?? comp.county}: ` +
+        `extracted county "${comp.county}" but Mapbox resolved address to "${fallback.geocoded_county}". ` +
+        `Leaving comp unlocated.`,
+      );
+      try {
+        const { crossCheckGeocodedCounty } = await import('@/lib/utils/extractionSanity');
+        crossCheckGeocodedCounty(comp, { county: fallback.geocoded_county });
+      } catch (e) {
+        console.warn('[locate] county cross-check failed:', e);
+      }
+      return null;
     }
   }
   return fallback;
