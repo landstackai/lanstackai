@@ -1676,9 +1676,23 @@ export default function ImportPage() {
                 : outcome.kind === 'http_error'
                   ? `✗ ${file.name} — server error (HTTP ${outcome.status})`
                   : `✗ ${file.name} — network error`;
+        // Attach the extracted comps to the per-file message so the
+        // chat-card renderer (line 3290+) draws full verification cards
+        // — thumbnails, map snippet, sale details, merge controls —
+        // right under each file's outcome line. Without this the
+        // batch flow was silent: comps got saved to the vault but
+        // the broker never saw the cards on the import page, leaving
+        // them with a one-line "saved N comps" and forcing a context
+        // switch to the Vault to verify anything. Christina's two-file
+        // upload 2026-06-19 surfaced this gap.
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: line, timestamp: new Date().toISOString() },
+          {
+            role: 'assistant',
+            content: line,
+            comps: outcome.kind === 'ok' ? outcome.comps : undefined,
+            timestamp: new Date().toISOString(),
+          },
         ]);
       }
     } finally {
