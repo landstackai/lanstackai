@@ -17,11 +17,13 @@ import { NextRequest, NextResponse } from 'next/server';
 
 // Pro plan: allow up to 60s. TxGIO can take 30-50s on bad afternoons;
 // successful response then caches for 24h on Vercel edge.
-// 25s ceiling = 20s upstream fetch + a few seconds of headroom for
-// param parsing and response shaping. Previous 60s value let slow TxGIO
-// calls compound into multi-minute hangs on the client side when the
-// upstream was unreachable.
-export const maxDuration = 25;
+// 40s ceiling = 35s upstream fetch + 5s headroom for param parsing,
+// owner-name tokenization, response shaping, cache header writes.
+// History: 60s let slow TxGIO calls compound into 5-min hangs when the
+// upstream was hard-down (2026-06-18). 25s was too aggressive when
+// TxGIO came back slow-but-working (2026-06-19) and killed the
+// 28-second healthy queries. 40s is the empirical middle ground.
+export const maxDuration = 40;
 
 const TXGIO_QUERY =
   'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
@@ -106,18 +108,26 @@ export async function GET(req: NextRequest) {
 
   let data: any = null;
   let lastErr: any = null;
-  // Single fast attempt — 20s ceiling. When TxGIO is healthy it responds
-  // in 2-15s. When TxGIO is having a bad day (production 2026-06-18:
-  // confirmed direct 504s from feature.geographic.texas.gov within 60s)
-  // there is no point burning the user's wait time on retries — they'll
-  // just stack another 20-50 seconds of nothing onto an upstream that's
-  // already not responding. Fail fast, return clean 502, let the client
-  // surface a "TxGIO upstream slow/down — pin manually" prompt while
-  // the broker keeps working on other comps in parallel. The previous
-  // 40s+50s retry pattern compounded to 5+ minutes of dead time per
-  // upload when 3 comps each tried 3 fallback queries.
+  // Single attempt — 35s ceiling.
+  //
+  // History of this number:
+  //   60s + 50s retry → 5-min hangs when TxGIO went hard-down on
+  //                     2026-06-18 (no response at all in 60s)
+  //   20s single      → killed real successes on 2026-06-19 when TxGIO
+  //                     came back up but slow (FRITZ owner query
+  //                     completed in 28s, my 20s ceiling killed it)
+  //   35s single (here) → catches the slow-but-working queries (the
+  //                     28s neighborhood) while still capping the
+  //                     dead-letter queries (the ones TxGIO has no
+  //                     answer for and would burn 60s on).
+  //
+  // The right answer depends on TxGIO's mood that day. 35s is the
+  // empirically-tested middle ground: high enough to let slow-but-real
+  // queries finish, low enough that 3 parallel autoLocates (client-side
+  // Promise.all) total no more than ~35s of broker wait time even when
+  // every query is on the slow path.
   try {
-    data = await fetchOnce(20_000);
+    data = await fetchOnce(35_000);
   } catch (e: any) {
     lastErr = e;
   }
