@@ -1650,6 +1650,26 @@ export default function ImportPage() {
         setLoadingStatus(`${progressLabel} — extracting comps…`);
 
         const outcome = await extractCompsFromFile(file);
+
+        // Map the server-side aerial field onto the legacy client field
+        // name. The orchestrator returns each comp's aerial JPG as
+        // `aerial_thumbnail_data_url` (data: URL, ~100KB). Every
+        // downstream reader — the verification card thumbnail slot,
+        // the merge-patch builder, the save-to-DB column at line 1581 —
+        // reads from `aerialImage` (camelCase, what the legacy
+        // client-side pdf.js extractor used to set). The single-file
+        // flow does this alias at line 2619; the batch flow had no
+        // equivalent step and was rendering cards with empty thumbnail
+        // slots even when the server had attached real JPGs. Christina
+        // 2026-06-19: batch upload of 2 PDFs, 5 comps saved, zero
+        // thumbnails visible despite server sending them.
+        if (outcome.kind === 'ok') {
+          for (const c of outcome.comps as any[]) {
+            if (!c.aerialImage && c.aerial_thumbnail_data_url) {
+              c.aerialImage = c.aerial_thumbnail_data_url;
+            }
+          }
+        }
         outcomes.push({ file: file.name, outcome });
 
         if (outcome.kind === 'ok') {
