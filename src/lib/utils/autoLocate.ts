@@ -55,10 +55,28 @@ function normalizeOwner(s: string): string {
   // Strip more punctuation than [.,] — apostrophes (straight+curly), hyphens,
   // slashes, ampersands. Without this, tokens like "KIDS'" stay glued to the
   // apostrophe and never match TxGIO's "KIDS" stored without punctuation.
+  //
+  // ALSO strip generic corporate/category words that don't help distinguish
+  // owners in a county. Hit on real data: comp grantee was "Schwartz &
+  // Ralston Investments, LLC" — TxGIO's owner_name was "SCHWARTZ & RALSTON
+  // IVESTMENTS LLC" (with a typo, missing the 'N'). Before the strip,
+  // "INVESTMENTS" was the longest token → got used as the query AND demanded
+  // in the all-tokens filter → the typo'd record didn't pass .includes() →
+  // autolocate punted to manual reselect even though the parcel was right
+  // there with an exact acreage match.
+  //
+  // Stripping these means the query falls back to a surname (SCHWARTZ /
+  // RALSTON) which IS distinctive AND survives TxGIO data quality issues
+  // in the generic word. Net effect: more matches, fewer false negatives,
+  // no realistic false-positive risk (surnames disambiguate enough on
+  // their own).
   return s
     .toUpperCase()
     .replace(/[.,'’\-\/&]/g, ' ')
-    .replace(/\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING)\b/g, '')
+    .replace(
+      /\b(LLC|LTD|INC|TRUSTEE|TRUST|FAMILY|REVOCABLE|LIVING|INVESTMENTS|PROPERTIES|HOLDINGS|RANCH|RANCHES|FARM|FARMS|LAND|LANDS|ENTERPRISES|GROUP|PARTNERS|PARTNERSHIP|COMPANY|CO|CORP|CORPORATION)\b/g,
+      ''
+    )
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -73,7 +91,12 @@ function ownerMatches(haystack: string | null | undefined, needle: string): bool
   // single "FARMS" token over-matched every Farms-named owner in the county).
   const tokens = n.split(/\s+/).filter((t) => (t.length >= 3 || /\d/.test(t)) && !STOP_WORDS.has(t));
   if (tokens.length === 0) return false;
-  return tokens.every((t) => h.includes(t));
+  // Same N-1 relaxation as the fetchOwnerParcels client-side filter: when
+  // we have 3+ tokens, allow one to mismatch (typo/abbreviation absorption).
+  // For 1-2 tokens, stay strict because each token carries more weight.
+  const required = tokens.length >= 3 ? tokens.length - 1 : tokens.length;
+  const matched = tokens.filter((t) => h.includes(t)).length;
+  return matched >= required;
 }
 
 function sumAcres(parcels: any[]): number {
@@ -566,13 +589,27 @@ async function fetchOwnerParcels(
       Array.isArray(data?.features) ? data.features : [],
     );
 
-    // Client-side AND-filter: every token (≥3 chars) must appear in owner_name
+    // Client-side filter: tokens must appear in owner_name.
+    //
+    // For 1-2 token names, require EVERY token (strict — fewer tokens means
+    // each one is more discriminating, and a one-off mismatch on a 2-token
+    // name like "Smith Trust" would be too loose).
+    //
+    // For 3+ token names, require AT LEAST (N-1) tokens. Absorbs the one
+    // case that bit us repeatedly: a single typo / abbreviation / spelling
+    // variation in TxGIO's owner_name field (e.g., "IVESTMENTS" instead of
+    // "INVESTMENTS") was killing matches that would otherwise be obvious
+    // wins. With N-1 we tolerate one bad token and still pin the right
+    // parcel — risk of false positive is low because acreage matching
+    // (Phase 1, ±10%) is the gate that actually commits us.
+    const requiredMatches = allTokens.length >= 3 ? allTokens.length - 1 : allTokens.length;
     const tight = features.filter((f: any) => {
       const own = (f.properties?.owner_name || '').toString().toUpperCase();
-      return allTokens.every((t) => own.includes(t));
+      const matchCount = allTokens.filter((t) => own.includes(t)).length;
+      return matchCount >= requiredMatches;
     });
 
-    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} raw, ${tight.length} tight (query=${longestToken}, tokens=${JSON.stringify(allTokens)})`);
+    console.log(`[autoLocate] fetchOwnerParcels: "${owner}" → ${features.length} raw, ${tight.length} tight (query=${longestToken}, tokens=${JSON.stringify(allTokens)}, required=${requiredMatches}/${allTokens.length})`);
     return tight;
   } catch (e: any) {
     console.warn(`[autoLocate] fetchOwnerParcels failed for "${owner}": ${e?.message}`);
