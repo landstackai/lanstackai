@@ -53,3 +53,6 @@ next-env.d.ts
 test-corpus/*.pdf
 test-corpus/**/*.pdf
 test-corpus-results/
+
+# Downloaded parcel data (9GB, lives outside git)
+data/
