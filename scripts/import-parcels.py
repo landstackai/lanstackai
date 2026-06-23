@@ -108,29 +108,29 @@ PRIORITY_FIPS = {
 
 # ── Helpers ────────────────────────────────────────────────────────────
 def geometry_to_wkt(shape):
-    """Convert pyshp Shape → PostGIS WKT (MultiPolygon, EPSG:4326)."""
-    if shape is None or shape.shapeType not in (5, 15, 25):  # Polygon types
+    """Convert pyshp Shape → PostGIS WKT (MultiPolygon, EPSG:4326).
+    Each ring becomes its own polygon in the multipolygon. For parcels
+    with holes (rare), the hole gets filled — fine for autoLocate's
+    point-in-polygon use case."""
+    if shape is None or shape.shapeType not in (5, 15, 25):
         return None
     points = shape.points
     if not points:
         return None
-    # pyshp gives us `parts`: index where each ring starts
     parts = list(shape.parts) + [len(points)]
-    rings = []
+    polygons = []
     for i in range(len(parts) - 1):
-        ring_pts = points[parts[i]:parts[i + 1]]
-        if len(ring_pts) < 4:
+        ring = points[parts[i]:parts[i + 1]]
+        if len(ring) < 4:
             continue
-        rings.append(ring_pts)
-    if not rings:
+        # Close the ring if not already closed
+        if ring[0] != ring[-1]:
+            ring = list(ring) + [ring[0]]
+        ring_str = ','.join(f'{x:.7f} {y:.7f}' for x, y in ring)
+        polygons.append(f'(({ring_str}))')
+    if not polygons:
         return None
-    # Naive interpretation: all rings as one polygon. For complex multi-
-    # polygons this isn't strictly correct (we'd need ring orientation to
-    # group exterior/interior), but autoLocate only needs spatial intersect
-    # & convex-hull-style queries that this satisfies for ~99% of parcels.
-    ring_strs = ['(' + ','.join(f'{x:.7f} {y:.7f}' for x, y in r) + ')'
-                 for r in rings]
-    return f'SRID=4326;MULTIPOLYGON((({",".join(ring_strs).strip("()")})))'
+    return f'SRID=4326;MULTIPOLYGON({",".join(polygons)})'
 
 
 def escape_for_copy(v):
@@ -253,6 +253,32 @@ def import_county(conn, zip_path, force=False):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def ensure_connection(conn, db_url):
+    """Return a healthy connection. Reconnects if the existing one is dead.
+
+    Supabase Pro can close long-running connections from the server side
+    (idle timeout, pooler decisions, network blips). Without this check, a
+    single dropped connection cascades: every subsequent county's COPY
+    fails with "connection already closed". This guard is cheap (one
+    SELECT 1 per county) and the alternative is a 100+ county cascade.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1')
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        new_conn = psycopg2.connect(db_url)
+        with new_conn.cursor() as cur:
+            cur.execute('SET statement_timeout = 0')
+        new_conn.commit()
+        print('  ↻ reconnected to Supabase', flush=True)
+        return new_conn
+
+
 # ── Main ───────────────────────────────────────────────────────────────
 def main():
     args = sys.argv[1:]
@@ -284,6 +310,12 @@ def main():
 
     print(f'Connecting to Supabase...')
     conn = psycopg2.connect(db_url)
+    # Disable statement_timeout for this session. Large counties (e.g. Bexar
+    # ~700K parcels) exceed Supabase's default 2-minute statement_timeout
+    # during COPY FROM STDIN. Session-scoped, no effect on production traffic.
+    with conn.cursor() as cur:
+        cur.execute('SET statement_timeout = 0')
+    conn.commit()
     print('✓ Connected')
 
     zips = sorted(ZIPS_DIR.glob('*.zip'))
@@ -299,6 +331,9 @@ def main():
     total_rows = 0
 
     for i, zip_path in enumerate(zips, 1):
+        # Health-check + reconnect-on-dead. Cheap (SELECT 1); prevents a
+        # single connection drop from cascading into 100+ failed counties.
+        conn = ensure_connection(conn, db_url)
         try:
             result, info = import_county(conn, zip_path, force=force)
             if isinstance(info, str) and info.startswith('skipped'):
