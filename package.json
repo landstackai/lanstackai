@@ -50,6 +50,7 @@
     "@types/node": "^20",
     "@types/papaparse": "^5.3.14",
     "@types/pdf-parse": "^1.1.4",
+    "@types/pg": "^8.20.0",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.0.1",
