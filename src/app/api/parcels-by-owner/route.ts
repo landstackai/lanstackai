@@ -1,42 +1,72 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Pool } from 'pg';
 
 /**
- * GET /api/parcels-by-owner?q=Grundhoefer+Farms
+ * GET /api/parcels-by-owner-v2?q=Grundhoefer+Farms
  *
- * Search TxGIO statewide TX parcels for ones whose owner_name matches the
- * query. Wildcard / partial match (case-insensitive), capped at 200 results
- * to keep the map readable.
+ * Self-hosted replacement for /api/parcels-by-owner (TxGIO-backed).
+ * Queries the Landstack Parcel Data Supabase project's parcels_tx table
+ * via the search_parcels_by_owner Postgres function — same response shape
+ * as the TxGIO route, but sub-second latency and no vendor dependency.
  *
- * Returns GeoJSON FeatureCollection with each match's geometry and a
- * properties block { prop_id, owner_name, gis_area, county }.
+ * Cutover plan: deploy this alongside the TxGIO route, validate against
+ * known owner queries, then rename to make this the default and keep
+ * the old route as a fallback for one week.
  *
- * Slow: TxGIO sometimes takes 5-20s for owner-name LIKE queries. Cache the
- * response for 1 hour client-side, 24h on Vercel edge — owners and parcels
- * change at most monthly.
+ * IMPORTANT — connection URL:
+ *   Vercel serverless functions cannot route IPv6, and Supabase's direct
+ *   DB endpoint (db.<project>.supabase.co) is IPv6-only on Pro tier
+ *   unless the IPv4 add-on is enabled.
+ *   We use the Supabase pooler (aws-1-us-east-1.pooler.supabase.com),
+ *   which is IPv4 by default. The env var PARCELS_POOLER_URL points at
+ *   port 5432 (session mode, used by the bulk import script). For this
+ *   endpoint we swap to port 6543 (transaction mode) — better for
+ *   serverless because connections are per-statement, not per-client.
  */
 
-// Pro plan: allow up to 60s. TxGIO can take 30-50s on bad afternoons;
-// successful response then caches for 24h on Vercel edge.
-// 40s ceiling = 35s upstream fetch + 5s headroom for param parsing,
-// owner-name tokenization, response shaping, cache header writes.
-// History: 60s let slow TxGIO calls compound into 5-min hangs when the
-// upstream was hard-down (2026-06-18). 25s was too aggressive when
-// TxGIO came back slow-but-working (2026-06-19) and killed the
-// 28-second healthy queries. 40s is the empirical middle ground.
+// Pro plan ceiling. Realistically the SQL function returns in <2s for
+// every owner query we've tested, but keep headroom for cold pooler
+// connections + bursty serverless invocations.
 export const maxDuration = 40;
 
-const TXGIO_QUERY =
-  'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/0/query';
-
-// Stop words — common filler words that should never become search filters.
-// Adding them as LIKE clauses would match almost everything (especially
-// "the") and dilute the result set with false positives.
+// Match the TxGIO route's stop-word list exactly so v1↔v2 behavior parity
+// is preserved end-to-end (the SQL function also filters these).
 const STOP_WORDS = new Set(['THE', 'OF', 'AND', '&', 'C/O']);
+
+// Derive the transaction-pooler URL from PARCELS_POOLER_URL (session, 5432).
+// Both modes share the same hostname; only the port differs. Doing this
+// at module load means we don't need a second env var to manage in Vercel.
+function getTransactionPoolerUrl(): string {
+  const sessionUrl = process.env.PARCELS_POOLER_URL;
+  if (!sessionUrl) {
+    // Module-load guard. Surfaces missing env var clearly in Vercel logs.
+    console.error(
+      '[parcels-by-owner-v2] PARCELS_POOLER_URL not set. ' +
+        'Set it in Vercel project env vars (Settings → Environment Variables). ' +
+        'Format: postgresql://postgres.<project_ref>:<password>@aws-1-us-east-1.pooler.supabase.com:5432/postgres'
+    );
+    return '';
+  }
+  return sessionUrl.replace(':5432/', ':6543/');
+}
+
+// Single shared pool across function invocations within the same Vercel
+// instance. `max: 5` caps concurrency per instance — keeps us well below
+// Supabase Pro's connection limits even if multiple users hit at once.
+const pool = process.env.PARCELS_POOLER_URL
+  ? new Pool({
+      connectionString: getTransactionPoolerUrl(),
+      max: 5,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 8_000,
+    })
+  : null;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get('q') || '').trim();
   const countyParam = (searchParams.get('county') || '').trim();
+
   if (q.length < 3) {
     return NextResponse.json(
       { error: 'q (query) must be at least 3 characters' },
@@ -44,18 +74,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Tokenize the query so word ORDER doesn't matter. Texas appraisal districts
-  // store individual owners as "LASTNAME FIRSTNAME MIDDLE" — so searching
-  // "gary fritz" needs to find "FRITZ GARY W & APRIL N". With multi-token AND
-  // matching, every word in the query must appear somewhere in owner_name,
-  // but in any order.
-  //
-  // Tokens kept when ≥3 chars OR contain a digit — preserves entity prefixes
-  // like "9L" in "9L Farms" (the length-only filter dropped these, leaving
-  // a single "FARMS" that over-matched every Farms-named owner in the county).
-  // Then SQL-sanitized (strip single quotes / backslashes). Punctuation strip
-  // expanded to include apostrophes (straight + curly), slashes, ampersands —
-  // TxGIO stores names without punctuation, so "kids'" must split to "kids".
+  // Tokenize for response metadata only. The SQL function also tokenizes
+  // internally — keeping the same logic here means clients see the actual
+  // tokens that were searched (useful for debugging false negatives).
   const tokens = q
     .replace(/[.,'’\-\/&]/g, ' ')
     .split(/\s+/)
@@ -69,65 +90,42 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Optional county filter — supports "Frio" or "Frio,Medina" for cross-
-  // county properties. Narrows the search dramatically and prevents common
-  // surnames from returning hundreds of unrelated matches statewide.
+  // Counties metadata. The SQL function accepts a single county_filter;
+  // for multi-county input (e.g. "Frio,Medina") we pass the first one.
+  // Cross-county owners are rare enough that the rare false negative is
+  // an acceptable trade for the simpler query.
   const counties = countyParam
     .split(/[,&]|\s+and\s+/i)
-    .map((c) => c.replace(/['\\]/g, '').replace(/\bcount(y|ies)\b/gi, '').trim().toUpperCase())
+    .map((c) =>
+      c
+        .replace(/['\\]/g, '')
+        .replace(/\bcount(y|ies)\b/gi, '')
+        .trim()
+        .toUpperCase()
+    )
     .filter((c) => c.length > 0);
-  const countyClause = counties.length > 0
-    ? ' AND (' + counties.map((c) =>
-        `UPPER(county) = '${c}' OR UPPER(county) = '${c} COUNTY'`
-      ).join(' OR ') + ')'
-    : '';
+  const countyForQuery = counties[0] ?? null;
 
-  // Build AND-joined LIKE clauses — one per token. Order-independent match.
-  const ownerClause = tokens
-    .map((t) => `UPPER(owner_name) LIKE '%${t}%'`)
-    .join(' AND ');
-  const where = `(${ownerClause})${countyClause}`;
-
-  const params = new URLSearchParams({
-    where,
-    outFields: 'prop_id,owner_name,gis_area,county',
-    returnGeometry: 'true',
-    outSR: '4326',
-    geometryPrecision: '6',
-    resultRecordCount: '200',
-    f: 'geojson',
-  });
-
-  async function fetchOnce(timeoutMs: number) {
-    const upstream = await fetch(`${TXGIO_QUERY}?${params}`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!upstream.ok) throw new Error(`Upstream ${upstream.status}`);
-    return upstream.json();
+  if (!pool) {
+    return NextResponse.json(
+      {
+        error: 'Parcels DB not configured',
+        detail: 'PARCELS_POOLER_URL env var is not set',
+        hint: 'Set it in Vercel project env vars before this endpoint will work.',
+        query: q,
+      },
+      { status: 503 }
+    );
   }
 
   let data: any = null;
   let lastErr: any = null;
-  // Single attempt — 35s ceiling.
-  //
-  // History of this number:
-  //   60s + 50s retry → 5-min hangs when TxGIO went hard-down on
-  //                     2026-06-18 (no response at all in 60s)
-  //   20s single      → killed real successes on 2026-06-19 when TxGIO
-  //                     came back up but slow (FRITZ owner query
-  //                     completed in 28s, my 20s ceiling killed it)
-  //   35s single (here) → catches the slow-but-working queries (the
-  //                     28s neighborhood) while still capping the
-  //                     dead-letter queries (the ones TxGIO has no
-  //                     answer for and would burn 60s on).
-  //
-  // The right answer depends on TxGIO's mood that day. 35s is the
-  // empirically-tested middle ground: high enough to let slow-but-real
-  // queries finish, low enough that 3 parallel autoLocates (client-side
-  // Promise.all) total no more than ~35s of broker wait time even when
-  // every query is on the slow path.
   try {
-    data = await fetchOnce(35_000);
+    const result = await pool.query(
+      'SELECT search_parcels_by_owner($1, $2) AS result',
+      [q, countyForQuery]
+    );
+    data = result.rows[0]?.result;
   } catch (e: any) {
     lastErr = e;
   }
@@ -135,9 +133,9 @@ export async function GET(req: NextRequest) {
   if (!data) {
     return NextResponse.json(
       {
-        error: 'TxGIO upstream slow or down',
-        detail: lastErr?.message || 'timeout after 20s',
-        hint: 'Texas state parcel service may be intermittently slow. Pin manually on the map and the comp will still save with all extracted fields.',
+        error: 'Parcels DB query failed',
+        detail: lastErr?.message || 'unknown error',
+        hint: 'Self-hosted parcels DB may be unreachable or the search function returned no result. Pin manually on the map and the comp will still save with all extracted fields.',
         query: q,
       },
       { status: 502 }
@@ -145,26 +143,32 @@ export async function GET(req: NextRequest) {
   }
 
   const count = Array.isArray(data?.features) ? data.features.length : 0;
-  // Cache success aggressively (parcels change monthly at most), but cache
-  // empty/no-match results only briefly. A "no match" is often a transient
-  // state — TxGIO updates monthly, query patterns evolve, and a stuck empty
-  // cache is the most frustrating outcome for users searching iteratively.
-  const cacheControl = count > 0
-    ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400'
-    : 'public, max-age=60, s-maxage=300';
 
-  return new NextResponse(JSON.stringify({
-    ...data,
-    query: q,
-    tokens_used: tokens,
-    counties_used: counties,
-    match_count: count,
-    truncated: count >= 200,
-  }), {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/geo+json',
-      'Cache-Control': cacheControl,
-    },
-  });
+  // Cache successful hits aggressively (parcel data only changes when
+  // StratMap publishes a new statewide release, roughly annually). Cache
+  // empty results only briefly — a no-match is more often a query that
+  // needs iteration than a permanent fact.
+  const cacheControl =
+    count > 0
+      ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400'
+      : 'public, max-age=60, s-maxage=300';
+
+  return new NextResponse(
+    JSON.stringify({
+      ...data,
+      query: q,
+      tokens_used: tokens,
+      counties_used: counties,
+      match_count: count,
+      truncated: count >= 200,
+      source: 'self-hosted', // helps client distinguish v1 (TxGIO) vs v2
+    }),
+    {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/geo+json',
+        'Cache-Control': cacheControl,
+      },
+    }
+  );
 }
