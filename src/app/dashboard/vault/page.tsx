@@ -204,9 +204,9 @@ export default function VaultPage() {
   // comp qualifies under multiple categories. Returns null when no
   // review needed (comp is clean).
   type ReviewReason = {
-    key: 'no_location' | 'math' | 'flagged' | 'visibility' | 'low_confidence';
+    key: 'no_location' | 'math' | 'flagged' | 'low_confidence';
     label: string;
-    icon: 'red' | 'amber' | 'gray' | 'purple' | 'sky';
+    icon: 'red' | 'amber' | 'gray' | 'sky';
   };
   const classifyReview = (c: Comp): ReviewReason | null => {
     if (c.latitude == null || c.longitude == null) {
@@ -217,13 +217,6 @@ export default function VaultPage() {
     }
     if ((c as any).needs_location_review) {
       return { key: 'flagged', label: 'Marked for review', icon: 'gray' };
-    }
-    // Forced-selection visibility gate (migration 043). Existing comps were
-    // grandfathered to needs_visibility_review=false, so this only flags
-    // newly-imported comps where the broker hasn't picked Private/Team/Public
-    // yet on the review page.
-    if ((c as any).needs_visibility_review) {
-      return { key: 'visibility', label: 'Pick visibility', icon: 'purple' };
     }
     if (c.confidence === 'Unverified') {
       return { key: 'low_confidence', label: 'Low confidence', icon: 'sky' };
@@ -1363,7 +1356,6 @@ export default function VaultPage() {
               const cls = 'w-3.5 h-3.5';
               if (icon === 'red') return <MapPinOff className={`${cls} text-red-500`} />;
               if (icon === 'amber') return <AlertTriangle className={`${cls} text-amber-600`} />;
-              if (icon === 'purple') return <AlertTriangle className={`${cls} text-purple-600`} />;
               if (icon === 'sky') return <ShieldQuestion className={`${cls} text-slate-blue`} />;
               return <Clock className={`${cls} text-ink-2`} />;
             };

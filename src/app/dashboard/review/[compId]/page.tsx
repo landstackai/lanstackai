@@ -88,29 +88,25 @@ type Comp = {
 };
 
 // Compute the right confidence level from a comp's gate-state. Used by
-// every handler that clears one of the review flags so confidence stays
-// in sync with whether the broker has fully signed off.
+// every handler that clears a review flag so confidence stays in sync
+// with whether the broker has fully signed off.
 //
 // Rules:
-//   - lat/lng null         → 'Unverified'  (can't be on the map at all)
-//   - any flag still true  → 'Estimated'   (some uncertainty remains)
-//   - all gates cleared    → 'Verified'    (broker has signed off)
+//   - lat/lng null                            → 'Unverified'
+//   - either review flag (math/location) true → 'Estimated'
+//   - both cleared + lat/lng set              → 'Verified'
 //
-// The vault's classifyReview function uses confidence + the same flags
-// to decide which comps appear in "Needs review". Keeping computeConfidence
-// in lockstep with classifyReview's logic means a verified comp
-// reliably exits the needs-review list.
+// Visibility is NOT a gate here (migration 044 reverted the forced-
+// selection behavior — comps auto-default to team and the picker is
+// always available but not required).
 function computeConfidence(c: {
   latitude: number | null;
   longitude: number | null;
   needs_extraction_review: boolean | null;
   needs_location_review: boolean | null;
-  needs_visibility_review: boolean | null;
 }): 'Verified' | 'Estimated' | 'Unverified' {
   if (c.latitude == null || c.longitude == null) return 'Unverified';
-  if (c.needs_extraction_review || c.needs_location_review || c.needs_visibility_review) {
-    return 'Estimated';
-  }
+  if (c.needs_extraction_review || c.needs_location_review) return 'Estimated';
   return 'Verified';
 }
 
@@ -1130,39 +1126,25 @@ export default function ReviewPage() {
     }
   }, [comp, saving, supabase, autoReturnIfFromImport]);
 
-  // Visibility forced-selection: broker explicitly picks one of
-  // Private/Team/Public. Clears needs_visibility_review and persists the
-  // choice. Maps the UI labels to the schema's VisibilityLevel values
-  // (private | team | shared). See migration 043 for context.
+  // Visibility picker: broker changes between Private/Team/Public at will.
+  // Default is 'team' (auto-set at import time) — picker just persists
+  // the new choice. Migration 044 removed the forced-selection gate, so
+  // this no longer touches needs_visibility_review or confidence.
   const setVisibilityChoice = useCallback(
     async (level: 'private' | 'team' | 'shared') => {
       if (!comp || saving) return;
       setSaving(true);
       try {
-        const newConfidence = computeConfidence({
-          ...comp,
-          needs_visibility_review: false,
-        });
         const { error } = await supabase
           .from('comps')
-          .update({
-            visibility: level,
-            needs_visibility_review: false,
-            confidence: newConfidence,
-          })
+          .update({ visibility: level })
           .eq('id', comp.id);
         if (error) {
           toast.error(`Save failed: ${error.message}`);
         } else {
           const label = level === 'private' ? 'Private' : level === 'team' ? 'Team' : 'Public';
           toast.success(`Visibility set to ${label}`);
-          setComp({
-            ...comp,
-            visibility: level,
-            needs_visibility_review: false,
-            confidence: newConfidence,
-          });
-          autoReturnIfFromImport();
+          setComp({ ...comp, visibility: level });
         }
       } finally {
         setSaving(false);
@@ -2327,23 +2309,7 @@ export default function ReviewPage() {
                 Needs review
               </span>
             )}
-            {/* Visibility forced-selection — surfaces as a badge whenever the
-                broker hasn't picked yet. See migration 043 + setVisibilityChoice. */}
-            {comp.needs_visibility_review && (
-              <span
-                title="Pick Private, Team, or Public below before this comp leaves needs-review."
-                className="inline-flex items-center gap-1 text-[10px] font-bold text-purple-700 bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1"
-              >
-                <AlertTriangle size={11} />
-                Pick visibility
-              </span>
-            )}
-            {/* Fully-verified state requires ALL three gates cleared
-                (location + math + visibility) AND a pin. */}
-            {!comp.needs_location_review &&
-              !comp.needs_extraction_review &&
-              !comp.needs_visibility_review &&
-              hasPin && (
+            {!comp.needs_location_review && !comp.needs_extraction_review && hasPin && (
               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-olive-2 bg-olive-tint border border-olive-border rounded px-2 py-1">
                 <Check size={11} />
                 Verified
@@ -2356,65 +2322,58 @@ export default function ReviewPage() {
             )}
           </div>
 
-          {/* BROKER DECISIONS — inline action buttons for each open gate.
-              Surfaces only when the broker still needs to act on something.
-              See setVisibilityChoice + confirmExtractionReview handlers. */}
-          {(comp.needs_extraction_review || comp.needs_visibility_review) && (
-            <div className="border-t border-beige pt-3 space-y-3">
-              {comp.needs_extraction_review && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
-                    Math check
-                  </div>
-                  <button
-                    onClick={confirmExtractionReview}
-                    disabled={saving}
-                    className="w-full text-xs px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded text-amber-800 font-medium flex items-center justify-center gap-1.5 disabled:opacity-50"
-                    title="Click to confirm that the price ÷ acres = $/acre math checks out against the source document."
-                  >
-                    <Check size={12} />
-                    I verified the math is correct
-                  </button>
-                </div>
-              )}
-              {comp.needs_visibility_review && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
-                    Visibility — pick one
-                  </div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <button
-                      onClick={() => setVisibilityChoice('private')}
-                      disabled={saving}
-                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
-                      title="Only you can see this comp."
-                    >
-                      <span>🔒</span>
-                      <span className="text-[10px]">Private</span>
-                    </button>
-                    <button
-                      onClick={() => setVisibilityChoice('team')}
-                      disabled={saving}
-                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
-                      title="Everyone on your brokerage team sees this comp."
-                    >
-                      <span>👥</span>
-                      <span className="text-[10px]">Team</span>
-                    </button>
-                    <button
-                      onClick={() => setVisibilityChoice('shared')}
-                      disabled={saving}
-                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
-                      title="All Landstack users (across brokerages) see this comp."
-                    >
-                      <span>🌐</span>
-                      <span className="text-[10px]">Public</span>
-                    </button>
-                  </div>
-                </div>
-              )}
+          {/* MATH CHECK — only surfaces when math flag is on */}
+          {comp.needs_extraction_review && (
+            <div className="border-t border-beige pt-3">
+              <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
+                Math check
+              </div>
+              <button
+                onClick={confirmExtractionReview}
+                disabled={saving}
+                className="w-full text-xs px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded text-amber-800 font-medium flex items-center justify-center gap-1.5 disabled:opacity-50"
+                title="Click to confirm that the price ÷ acres = $/acre math checks out against the source document."
+              >
+                <Check size={12} />
+                I verified the math is correct
+              </button>
             </div>
           )}
+
+          {/* VISIBILITY — always available, not a forced gate. Default 'team';
+              broker can change to private or shared at any time. Highlighted
+              button shows current selection. See migration 044 for why this
+              isn't a needs-review gate anymore. */}
+          <div className="border-t border-beige pt-3">
+            <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
+              Visibility
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {([
+                { value: 'private' as const, emoji: '🔒', label: 'Private', title: 'Only you can see this comp.' },
+                { value: 'team' as const, emoji: '👥', label: 'Team', title: 'Your brokerage team sees this comp.' },
+                { value: 'shared' as const, emoji: '🌐', label: 'Public', title: 'All Landstack users see this comp.' },
+              ]).map((opt) => {
+                const selected = (comp.visibility ?? 'team') === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    onClick={() => !selected && setVisibilityChoice(opt.value)}
+                    disabled={saving || selected}
+                    className={`text-xs px-2 py-2 rounded font-medium flex flex-col items-center gap-0.5 transition-colors ${
+                      selected
+                        ? 'bg-olive-tint border border-olive-border text-olive-2 cursor-default'
+                        : 'bg-cream-2 hover:bg-beige border border-beige text-ink-2 hover:text-ink disabled:opacity-50'
+                    }`}
+                    title={opt.title}
+                  >
+                    <span>{opt.emoji}</span>
+                    <span className="text-[10px]">{opt.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {/* Headline metrics */}
           <div className="border-t border-beige pt-3 space-y-2 text-xs">
