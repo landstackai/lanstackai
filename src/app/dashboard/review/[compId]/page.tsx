@@ -67,6 +67,11 @@ type Comp = {
   boundary_geojson: any;
   aerial_image: string | null;
   source_page_image: string | null;
+  // Visibility forced-selection gate (migration 043). True until the broker
+  // explicitly clicks Private/Team/Public on the review page. Existing comps
+  // pre-migration are grandfathered to false.
+  needs_visibility_review: boolean | null;
+  visibility: 'private' | 'team' | 'shared' | null;
   needs_extraction_review: boolean | null;
   needs_location_review: boolean | null;
   source_type: string | null;
@@ -81,6 +86,33 @@ type Comp = {
   confidence: string | null;
   description: string | null;
 };
+
+// Compute the right confidence level from a comp's gate-state. Used by
+// every handler that clears one of the review flags so confidence stays
+// in sync with whether the broker has fully signed off.
+//
+// Rules:
+//   - lat/lng null         → 'Unverified'  (can't be on the map at all)
+//   - any flag still true  → 'Estimated'   (some uncertainty remains)
+//   - all gates cleared    → 'Verified'    (broker has signed off)
+//
+// The vault's classifyReview function uses confidence + the same flags
+// to decide which comps appear in "Needs review". Keeping computeConfidence
+// in lockstep with classifyReview's logic means a verified comp
+// reliably exits the needs-review list.
+function computeConfidence(c: {
+  latitude: number | null;
+  longitude: number | null;
+  needs_extraction_review: boolean | null;
+  needs_location_review: boolean | null;
+  needs_visibility_review: boolean | null;
+}): 'Verified' | 'Estimated' | 'Unverified' {
+  if (c.latitude == null || c.longitude == null) return 'Unverified';
+  if (c.needs_extraction_review || c.needs_location_review || c.needs_visibility_review) {
+    return 'Estimated';
+  }
+  return 'Verified';
+}
 
 export default function ReviewPage() {
   const params = useParams<{ compId: string }>();
@@ -241,13 +273,13 @@ export default function ReviewPage() {
       const SELECT_WITH_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
-        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, visibility, needs_visibility_review, ' +
         'needs_extraction_review, needs_location_review, source_type, source_url, confidence, description, ' +
         'acres_source, sale_price_source, price_per_acre_source, ppa_land_only_source';
       const SELECT_WITHOUT_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
-        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, visibility, needs_visibility_review, ' +
         'needs_extraction_review, needs_location_review, confidence, description';
 
       let { data, error } = await supabase
@@ -1046,15 +1078,23 @@ export default function ReviewPage() {
     if (!comp || saving) return;
     setSaving(true);
     try {
+      // Compute new confidence based on what gates would be cleared by this
+      // action. If both math + visibility are also clear, confidence becomes
+      // 'Verified' and the comp exits the needs-review list. Otherwise it
+      // stays at 'Estimated'.
+      const newConfidence = computeConfidence({
+        ...comp,
+        needs_location_review: false,
+      });
       const { error } = await supabase
         .from('comps')
-        .update({ needs_location_review: false })
+        .update({ needs_location_review: false, confidence: newConfidence })
         .eq('id', comp.id);
       if (error) {
         toast.error(`Save failed: ${error.message}`);
       } else {
         toast.success('Marked verified');
-        setComp({ ...comp, needs_location_review: false });
+        setComp({ ...comp, needs_location_review: false, confidence: newConfidence });
         setAerialCollapsed(true); // Hide the verification tool now that it's done
         autoReturnIfFromImport();
       }
@@ -1062,6 +1102,74 @@ export default function ReviewPage() {
       setSaving(false);
     }
   }, [comp, saving, supabase, autoReturnIfFromImport]);
+
+  // Math-verify confirmation: broker has eyeballed the math (price ÷ acres
+  // = PPA, etc.) and is signing off that it's correct. Clears
+  // needs_extraction_review and recomputes confidence.
+  const confirmExtractionReview = useCallback(async () => {
+    if (!comp || saving) return;
+    setSaving(true);
+    try {
+      const newConfidence = computeConfidence({
+        ...comp,
+        needs_extraction_review: false,
+      });
+      const { error } = await supabase
+        .from('comps')
+        .update({ needs_extraction_review: false, confidence: newConfidence })
+        .eq('id', comp.id);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+      } else {
+        toast.success('Math confirmed');
+        setComp({ ...comp, needs_extraction_review: false, confidence: newConfidence });
+        autoReturnIfFromImport();
+      }
+    } finally {
+      setSaving(false);
+    }
+  }, [comp, saving, supabase, autoReturnIfFromImport]);
+
+  // Visibility forced-selection: broker explicitly picks one of
+  // Private/Team/Public. Clears needs_visibility_review and persists the
+  // choice. Maps the UI labels to the schema's VisibilityLevel values
+  // (private | team | shared). See migration 043 for context.
+  const setVisibilityChoice = useCallback(
+    async (level: 'private' | 'team' | 'shared') => {
+      if (!comp || saving) return;
+      setSaving(true);
+      try {
+        const newConfidence = computeConfidence({
+          ...comp,
+          needs_visibility_review: false,
+        });
+        const { error } = await supabase
+          .from('comps')
+          .update({
+            visibility: level,
+            needs_visibility_review: false,
+            confidence: newConfidence,
+          })
+          .eq('id', comp.id);
+        if (error) {
+          toast.error(`Save failed: ${error.message}`);
+        } else {
+          const label = level === 'private' ? 'Private' : level === 'team' ? 'Team' : 'Public';
+          toast.success(`Visibility set to ${label}`);
+          setComp({
+            ...comp,
+            visibility: level,
+            needs_visibility_review: false,
+            confidence: newConfidence,
+          });
+          autoReturnIfFromImport();
+        }
+      } finally {
+        setSaving(false);
+      }
+    },
+    [comp, saving, supabase, autoReturnIfFromImport],
+  );
 
   // Delete this comp. Wrapped in DeleteConfirmButton's 2-step on the
   // UI side so brokers can't nuke it accidentally — by the time we get
@@ -1422,6 +1530,15 @@ export default function ReviewPage() {
         .filter(Boolean)
         .join(',');
 
+      // Recompute confidence with the post-save state (location flag cleared
+      // + new lat/lng). If math + visibility are also cleared, confidence
+      // becomes 'Verified' and the comp exits needs-review.
+      const newConfidence = computeConfidence({
+        ...comp,
+        latitude: pinLat,
+        longitude: pinLng,
+        needs_location_review: false,
+      });
       const { error } = await supabase
         .from('comps')
         .update({
@@ -1432,6 +1549,7 @@ export default function ReviewPage() {
           // Clear the location-review flag since broker has actively
           // re-picked the boundary — that IS the verification.
           needs_location_review: false,
+          confidence: newConfidence,
         })
         .eq('id', comp.id);
 
@@ -1446,6 +1564,7 @@ export default function ReviewPage() {
           latitude: pinLat,
           longitude: pinLng,
           needs_location_review: false,
+          confidence: newConfidence,
         });
         setMode('view');
         setSelectedPropIds(new Set());
@@ -1566,6 +1685,12 @@ export default function ReviewPage() {
         }
       } catch {}
 
+      const newConfidence = computeConfidence({
+        ...comp,
+        latitude: pinLat,
+        longitude: pinLng,
+        needs_location_review: false,
+      });
       const { error } = await supabase
         .from('comps')
         .update({
@@ -1578,6 +1703,7 @@ export default function ReviewPage() {
           longitude: pinLng,
           // Broker actively drew the boundary — that IS the verification.
           needs_location_review: false,
+          confidence: newConfidence,
         })
         .eq('id', comp.id);
 
@@ -1592,6 +1718,7 @@ export default function ReviewPage() {
           latitude: pinLat,
           longitude: pinLng,
           needs_location_review: false,
+          confidence: newConfidence,
         });
         setMode('view');
         setDrawnFeature(null);
@@ -2200,7 +2327,23 @@ export default function ReviewPage() {
                 Needs review
               </span>
             )}
-            {!comp.needs_location_review && !comp.needs_extraction_review && hasPin && (
+            {/* Visibility forced-selection — surfaces as a badge whenever the
+                broker hasn't picked yet. See migration 043 + setVisibilityChoice. */}
+            {comp.needs_visibility_review && (
+              <span
+                title="Pick Private, Team, or Public below before this comp leaves needs-review."
+                className="inline-flex items-center gap-1 text-[10px] font-bold text-purple-700 bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1"
+              >
+                <AlertTriangle size={11} />
+                Pick visibility
+              </span>
+            )}
+            {/* Fully-verified state requires ALL three gates cleared
+                (location + math + visibility) AND a pin. */}
+            {!comp.needs_location_review &&
+              !comp.needs_extraction_review &&
+              !comp.needs_visibility_review &&
+              hasPin && (
               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-olive-2 bg-olive-tint border border-olive-border rounded px-2 py-1">
                 <Check size={11} />
                 Verified
@@ -2212,6 +2355,66 @@ export default function ReviewPage() {
               </span>
             )}
           </div>
+
+          {/* BROKER DECISIONS — inline action buttons for each open gate.
+              Surfaces only when the broker still needs to act on something.
+              See setVisibilityChoice + confirmExtractionReview handlers. */}
+          {(comp.needs_extraction_review || comp.needs_visibility_review) && (
+            <div className="border-t border-beige pt-3 space-y-3">
+              {comp.needs_extraction_review && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
+                    Math check
+                  </div>
+                  <button
+                    onClick={confirmExtractionReview}
+                    disabled={saving}
+                    className="w-full text-xs px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded text-amber-800 font-medium flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    title="Click to confirm that the price ÷ acres = $/acre math checks out against the source document."
+                  >
+                    <Check size={12} />
+                    I verified the math is correct
+                  </button>
+                </div>
+              )}
+              {comp.needs_visibility_review && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
+                    Visibility — pick one
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      onClick={() => setVisibilityChoice('private')}
+                      disabled={saving}
+                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
+                      title="Only you can see this comp."
+                    >
+                      <span>🔒</span>
+                      <span className="text-[10px]">Private</span>
+                    </button>
+                    <button
+                      onClick={() => setVisibilityChoice('team')}
+                      disabled={saving}
+                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
+                      title="Everyone on your brokerage team sees this comp."
+                    >
+                      <span>👥</span>
+                      <span className="text-[10px]">Team</span>
+                    </button>
+                    <button
+                      onClick={() => setVisibilityChoice('shared')}
+                      disabled={saving}
+                      className="text-xs px-2 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded text-purple-800 font-medium flex flex-col items-center gap-0.5 disabled:opacity-50"
+                      title="All Landstack users (across brokerages) see this comp."
+                    >
+                      <span>🌐</span>
+                      <span className="text-[10px]">Public</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Headline metrics */}
           <div className="border-t border-beige pt-3 space-y-2 text-xs">
