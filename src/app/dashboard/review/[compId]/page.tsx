@@ -66,6 +66,7 @@ type Comp = {
   parcel_id: string | null;
   boundary_geojson: any;
   aerial_image: string | null;
+  source_page_image: string | null;
   needs_extraction_review: boolean | null;
   needs_location_review: boolean | null;
   source_type: string | null;
@@ -124,6 +125,11 @@ export default function ReviewPage() {
   // source aerial at full size against the map. Closes on backdrop click,
   // X button, or Escape key.
   const [aerialExpanded, setAerialExpanded] = useState(false);
+  // Full-screen source-page (comp card) modal — opened via the right-panel
+  // "Review Comp Card" thumbnail. Shows the full appraisal-page render so
+  // the broker can verify every extracted field against the original.
+  // Same close behavior as aerialExpanded.
+  const [sourceCardExpanded, setSourceCardExpanded] = useState(false);
   // Side panel collapsible — broker can hide to maximize map area, or
   // to make the page usable on narrow viewports / mobile. Default open
   // on first render; toggled via the button on the panel edge.
@@ -235,13 +241,13 @@ export default function ReviewPage() {
       const SELECT_WITH_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
-        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, ' +
         'needs_extraction_review, needs_location_review, source_type, source_url, confidence, description, ' +
         'acres_source, sale_price_source, price_per_acre_source, ppa_land_only_source';
       const SELECT_WITHOUT_SOURCE =
         'id, property_name, county, state, acres, sale_price, sale_date, ' +
         'improvements_value, ppa_land_only, price_per_acre, grantor, grantee, ' +
-        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, ' +
+        'address, latitude, longitude, parcel_id, boundary_geojson, aerial_image, source_page_image, ' +
         'needs_extraction_review, needs_location_review, confidence, description';
 
       let { data, error } = await supabase
@@ -480,6 +486,16 @@ export default function ReviewPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [aerialExpanded]);
+
+  // Same pattern for the source-page (comp card) modal.
+  useEffect(() => {
+    if (!sourceCardExpanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSourceCardExpanded(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sourceCardExpanded]);
 
   // Auto-expand effect moved below enterReselectMode's declaration to
   // avoid the "used before declaration" TS error. See line after the
@@ -1949,64 +1965,29 @@ export default function ReviewPage() {
           </button>
         )}
 
-        {/* FLOATING AERIAL PANEL — bottom-left corner of map area.
-            Source aerial extracted at import time. Collapses to a
-            toggle button once the comp is verified. Click the thumbnail
-            to expand to a full-screen modal for closer inspection. */}
+        {/* BOTTOM-LEFT AERIAL — bare image, no card chrome.
+            The aerial is cropped from the source appraisal page by the
+            import pipeline (lib/extraction/cropAerial). Broker glances
+            at it for reference while drawing/verifying the boundary on
+            the map. Click → fullscreen modal for closer inspection.
+            The FULL appraisal-page render (with all the Property
+            Identification + Transaction Data sections) lives in
+            source_page_image and is accessible via the "Review Comp
+            Card" thumbnail on the right panel. */}
         {comp.aerial_image ? (
-          <div className="absolute bottom-3 left-3 z-10">
-            {aerialCollapsed ? (
-              <button
-                onClick={() => setAerialCollapsed(false)}
-                className="bg-cream/90 backdrop-blur border border-beige rounded-lg px-3 py-2 text-xs text-ink-2 hover:text-ink flex items-center gap-1.5"
-                title="Show source aerial"
-              >
-                <span>📸</span>
-                Show aerial
-              </button>
-            ) : (
-              <div className="bg-cream/95 backdrop-blur border border-beige rounded-lg p-2 shadow-xl">
-                <div className="flex items-center justify-between mb-1.5 gap-3">
-                  <span className="text-[10px] uppercase tracking-wide text-ink-3">
-                    Source aerial
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setAerialExpanded(true)}
-                      className="text-ink-3 hover:text-ink p-0.5"
-                      title="Expand to full size"
-                      aria-label="Expand aerial"
-                    >
-                      <Maximize2 size={11} />
-                    </button>
-                    <button
-                      onClick={() => setAerialCollapsed(true)}
-                      className="text-ink-3 hover:text-ink text-[10px] p-0.5"
-                      title="Hide"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-                {/* Click the thumbnail itself to expand — saves the
-                    broker from hunting for the icon. Cursor + title hint
-                    that it's clickable. */}
-                <button
-                  onClick={() => setAerialExpanded(true)}
-                  className="block cursor-zoom-in"
-                  title="Click to expand"
-                  aria-label="Expand source aerial"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={comp.aerial_image}
-                    alt="Source aerial"
-                    className="w-[220px] h-[160px] object-cover rounded border border-beige bg-cream"
-                  />
-                </button>
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => setAerialExpanded(true)}
+            className="absolute bottom-3 left-3 z-10 block cursor-zoom-in rounded shadow-xl"
+            title="Click to expand"
+            aria-label="Expand source aerial"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={comp.aerial_image}
+              alt="Source aerial"
+              className="w-[220px] h-[160px] object-cover rounded border border-beige bg-cream"
+            />
+          </button>
         ) : (
           <div className="absolute bottom-3 left-3 z-10 bg-cream/80 backdrop-blur border border-beige rounded-lg px-3 py-2 text-[10px] text-ink-3 flex items-center gap-1.5">
             <ImageOff size={11} />
@@ -2046,6 +2027,41 @@ export default function ReviewPage() {
             alt="Source aerial (expanded)"
             onClick={(e) => e.stopPropagation()}
             className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border border-beige"
+          />
+        </div>
+      )}
+
+      {/* SOURCE COMP CARD MODAL — full-screen view of the entire appraisal
+          page render. Triggered by the right-panel "Review Comp Card"
+          thumbnail. Lets the broker eyeball-verify every extracted field
+          (acres, sale price, grantor, grantee, legal description, etc.)
+          against the original source page side-by-side with what's in the
+          right panel. Same close behavior as the aerial modal. */}
+      {sourceCardExpanded && comp.source_page_image && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-6"
+          onClick={() => setSourceCardExpanded(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Source comp card expanded"
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); setSourceCardExpanded(false); }}
+            className="absolute top-4 right-4 bg-cream/80 hover:bg-cream-2 border border-beige rounded-lg p-2 text-ink-2 hover:text-ink"
+            title="Close (Esc)"
+            aria-label="Close source comp card"
+          >
+            <X size={16} />
+          </button>
+          <div className="absolute top-4 left-4 bg-cream/80 border border-beige rounded-lg px-3 py-2 text-xs text-ink-2">
+            Source comp card — {label}
+          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={comp.source_page_image}
+            alt="Source comp card (expanded)"
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border border-beige bg-white"
           />
         </div>
       )}
@@ -2295,6 +2311,37 @@ export default function ReviewPage() {
               {comp.grantor && (
                 <KeyValue k="Grantor" v={comp.grantor} />
               )}
+            </div>
+          )}
+
+          {/* SOURCE COMP CARD THUMBNAIL — clickable preview of the full
+              appraisal-page render. Lets the broker cross-check every
+              extracted field above against what the appraiser actually
+              wrote, without leaving the review page. Only renders when
+              we have a source_page_image (migration 042 + new imports);
+              older comps (pre-migration) silently skip this. */}
+          {comp.source_page_image && (
+            <div className="border-t border-beige pt-3">
+              <div className="text-[10px] uppercase tracking-wide text-ink-3 mb-1.5">
+                Source comp card
+              </div>
+              <button
+                onClick={() => setSourceCardExpanded(true)}
+                className="block w-full cursor-zoom-in group"
+                title="Click to review the full source appraisal page"
+                aria-label="Review source comp card"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={comp.source_page_image}
+                  alt="Source comp card thumbnail"
+                  className="w-full h-32 object-cover object-top rounded border border-beige bg-white group-hover:border-ink-3 transition-colors"
+                />
+                <div className="mt-1 text-[11px] text-ink-3 group-hover:text-ink-2 flex items-center gap-1 justify-center">
+                  <Maximize2 size={10} />
+                  Review full source page
+                </div>
+              </button>
             </div>
           )}
 

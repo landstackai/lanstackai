@@ -1600,6 +1600,11 @@ export default function ImportPage() {
       // details). insertCompResilient transparently retries without this
       // column if migration 021 hasn't been applied yet — no hard dependency.
       aerial_image: (comp as any).aerialImage || null,
+      // Full appraisal-page render (vs aerial_image which is the cropped
+      // aerial only). Used by the Review Comp Card modal. Migration 042
+      // added this column. insertCompResilient handles the case where
+      // the column doesn't exist yet (drops the field and retries).
+      source_page_image: (comp as any).sourcePageImage || null,
     });
 
     if (error || !inserted) return false;
@@ -1688,6 +1693,12 @@ export default function ImportPage() {
           for (const c of outcome.comps as any[]) {
             if (!c.aerialImage && c.aerial_thumbnail_data_url) {
               c.aerialImage = c.aerial_thumbnail_data_url;
+            }
+            // Source page image (full appraisal page render) — sibling to
+            // aerial_image. Used by the Review Comp Card modal. See
+            // migration 042 + lib/extraction/cropAerial for context.
+            if (!c.sourcePageImage && c.source_page_image_data_url) {
+              c.sourcePageImage = c.source_page_image_data_url;
             }
           }
         }
@@ -2660,6 +2671,13 @@ export default function ImportPage() {
         if (!c.aerialImage && c.aerial_thumbnail_data_url) {
           c.aerialImage = c.aerial_thumbnail_data_url;
         }
+        // Mirror of the batch-flow alias (see comment in handleMultipleFiles).
+        // Source page image is the full appraisal-page render — sibling to
+        // aerial_image (which is the cropped aerial). Used by the Review
+        // Comp Card modal.
+        if (!c.sourcePageImage && c.source_page_image_data_url) {
+          c.sourcePageImage = c.source_page_image_data_url;
+        }
       }
 
       // Aerial attribution removed alongside the client-side aerial
@@ -3122,6 +3140,10 @@ export default function ImportPage() {
       // multi-comp PDFs, text-only appraisals, or extraction failures.
       // See docs/DESIGN_DECISIONS.md §5 (review page architecture).
       aerial_image: (comp as any).aerialImage || null,
+      // Full appraisal-page render — sibling to aerial_image. Used by
+      // the Review Comp Card modal in the review page (added 2026-06).
+      // Migration 042 added the column.
+      source_page_image: (comp as any).sourcePageImage || null,
     }).select('id').single();
 
     if (error || !inserted) {

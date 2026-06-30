@@ -12,6 +12,7 @@ import {
   SUBMIT_COMPS_TOOL,
 } from '@/app/api/import-pdf-claude/route';
 import { renderPdfPageToJpg } from '@/lib/extraction/convertapi';
+import { cropAerialFromPageJpg } from '@/lib/extraction/cropAerial';
 
 // ─────────────────────────────────────────────────────────────────────────
 // PDF extraction orchestrator — runs GPT + Claude in parallel on every
@@ -665,59 +666,84 @@ export async function POST(request: NextRequest) {
         `total ${(elapsedMs / 1000).toFixed(1)}s`,
     );
 
-    // ─── Aerial thumbnails (ConvertAPI, parallel, best-effort) ───────
-    // Render evidence_pages[0] for each comp as a JPG and inline as a
-    // data URL on the comp. The verification card uses this as the
-    // map-corner overlay so brokers can see the appraiser's aerial
-    // when refining a boundary on rural land (where parcel lines blend
-    // into the landscape).
+    // ─── Aerial thumbnails (ConvertAPI render + Claude vision crop) ──
+    // Two outputs per comp:
+    //   1. source_page_image_data_url — the FULL appraisal-page render
+    //      (Property Identification + Transaction Data + aerial all on
+    //      one image). Used by the "Review Comp Card" modal accessible
+    //      from the right panel — broker can verify the extracted
+    //      fields against the source page side-by-side.
+    //   2. aerial_thumbnail_data_url — JUST the cropped aerial
+    //      photograph. Used by the bare image overlay at bottom-left
+    //      of the map view, where the broker glances at it for
+    //      context while drawing/verifying the parcel boundary.
     //
-    // Trade-offs we picked:
-    //   - PARALLEL via Promise.allSettled: 6 ConvertAPI calls finish
-    //     in ~2s instead of ~12s sequential. Latency cost on a 6-comp
-    //     Thorndale extraction is ~2-3s added to the existing 73s
-    //     Claude time. Acceptable.
-    //   - INLINE base64 data URL (no Supabase Storage upload yet):
-    //     comps don't have DB IDs at this stage — they're draft data
-    //     the broker reviews. Persisting JPGs to Storage before the
-    //     broker decides to keep the comp would orphan files on
-    //     every "discard". Cleaner: ship the bytes inline now, persist
-    //     to Storage when the broker saves the comp.
-    //   - BEST-EFFORT: if a thumbnail fails (ConvertAPI 5xx, timeout,
-    //     missing evidence_pages), the comp ships without one. We
-    //     never let thumbnail rendering tank the extraction the broker
-    //     is waiting for.
+    // Pipeline:
+    //   render page via ConvertAPI → save as source_page_image
+    //                              → Claude vision crop (lib/extraction/cropAerial)
+    //                              → save cropped as aerial_thumbnail
     //
-    // Cost: 1 ConvertAPI op per thumbnail. Christina's set (12 PDFs/mo
-    // × ~1 comp/PDF) = 12 ops/mo, well under the 1,500 cap.
+    // Trade-offs:
+    //   - PARALLEL via Promise.allSettled: N comp renders + crops happen
+    //     concurrently. Total added latency for a 6-comp PDF: ~3-5s
+    //     (1-2s ConvertAPI + 2-3s Claude vision per comp, parallelized).
+    //   - INLINE base64 data URLs (no Supabase Storage upload yet):
+    //     comps don't have DB IDs at this stage. Persisting JPGs to
+    //     Storage before the broker decides to keep the comp would
+    //     orphan files on every "discard". Inline now, persist on save.
+    //   - BEST-EFFORT crop: if Claude says "no aerial" or vision call
+    //     errors, the comp ships with source_page_image_data_url set
+    //     and aerial_thumbnail_data_url=null. UI handles null gracefully
+    //     (shows the "No aerial available" placeholder).
+    //
+    // Cost: 1 ConvertAPI op (~$0.007) + 1 Claude vision call (~$0.005)
+    // per comp = ~$0.012/comp. Christina (~12 comps/mo) ≈ $0.14/mo.
     const thumbnailStartMs = Date.now();
+    const anthropicApiKey = process.env.ANTHROPIC_API_KEY || '';
     const thumbnailResults = await Promise.allSettled(
       chosen.comps.map(async (comp: any) => {
         const pages: number[] = Array.isArray(comp.evidence_pages)
           ? comp.evidence_pages.filter((n: any) => Number.isInteger(n) && n > 0)
           : [];
         if (pages.length === 0) return null;
-        const jpgBuf = await renderPdfPageToJpg(buffer, pages[0]);
-        return `data:image/jpeg;base64,${jpgBuf.toString('base64')}`;
+        const pageBuf = await renderPdfPageToJpg(buffer, pages[0]);
+        const fullPageDataUrl = `data:image/jpeg;base64,${pageBuf.toString('base64')}`;
+        // Crop the aerial out of the rendered page. Defensive: if the
+        // crop step throws or returns no_aerial, we still keep the
+        // full-page render so the broker has SOMETHING to look at.
+        const cropResult = await cropAerialFromPageJpg(pageBuf, anthropicApiKey);
+        const aerialDataUrl = cropResult.cropped
+          ? `data:image/jpeg;base64,${cropResult.cropped.toString('base64')}`
+          : null;
+        if (cropResult.reason !== 'ok' && cropResult.reason !== 'no_aerial') {
+          console.warn(
+            `[orchestrator] aerial crop ${cropResult.reason} for comp "${comp.property_name ?? comp.county ?? '?'}": ${cropResult.detail ?? ''}`,
+          );
+        }
+        return { full: fullPageDataUrl, aerial: aerialDataUrl };
       }),
     );
-    let thumbnailsAttached = 0;
+    let pagesAttached = 0;
+    let aerialsAttached = 0;
     let thumbnailsFailed = 0;
     chosen.comps.forEach((comp: any, i: number) => {
       const r = thumbnailResults[i];
       if (r.status === 'fulfilled' && r.value) {
-        comp.aerial_thumbnail_data_url = r.value;
-        thumbnailsAttached++;
+        comp.source_page_image_data_url = r.value.full;
+        comp.aerial_thumbnail_data_url = r.value.aerial;
+        pagesAttached++;
+        if (r.value.aerial) aerialsAttached++;
       } else {
+        comp.source_page_image_data_url = null;
         comp.aerial_thumbnail_data_url = null;
         if (r.status === 'rejected') {
           thumbnailsFailed++;
-          console.warn(`[orchestrator] thumbnail render failed for comp ${i + 1}:`, r.reason?.message ?? r.reason);
+          console.warn(`[orchestrator] page render failed for comp ${i + 1}:`, r.reason?.message ?? r.reason);
         }
       }
     });
     console.log(
-      `[orchestrator] ${file.name} · thumbnails: ${thumbnailsAttached} attached, ${thumbnailsFailed} failed in ${((Date.now() - thumbnailStartMs) / 1000).toFixed(1)}s`,
+      `[orchestrator] ${file.name} · pages rendered: ${pagesAttached}, aerials cropped: ${aerialsAttached}, failed: ${thumbnailsFailed} in ${((Date.now() - thumbnailStartMs) / 1000).toFixed(1)}s`,
     );
 
     // ─── Surface the chosen result ───────────────────────────────────
