@@ -7,7 +7,7 @@ import { CMA } from '@/types';
 import { formatCurrency, formatAcres } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals, type CmaComp } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
-import { FileText, Plus, MapPin, Trash2, Share2, AlertCircle, Eye, Users } from 'lucide-react';
+import { FileText, Plus, MapPin, Trash2, Share2, AlertCircle, Eye, Users, Pencil, Check, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 type CMARow = CMA & {
@@ -37,6 +37,11 @@ export default function CMALibraryPage() {
   const [disclosureCMA, setDisclosureCMA] = useState<CMARow | null>(null);
   const [disclosureChecked, setDisclosureChecked] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Inline rename: which CMA is being edited (null = none) + current input value.
+  // Renders an <input> in place of the name in the list row while active.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -90,6 +95,41 @@ export default function CMALibraryPage() {
     }
     toast.success('CMA deleted');
     setCmas(prev => prev.filter(c => c.id !== id));
+  };
+
+  // Start/save/cancel inline rename of a CMA's subject_name. The name shows
+  // on the CMA list card and (via `properCase`) on the map view + public
+  // report — persisting subject_name updates all of those in one write.
+  const startRename = (cma: CMARow) => {
+    setRenamingId(cma.id);
+    setRenameValue(cma.subject_name || '');
+  };
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameValue('');
+  };
+  const saveRename = async (id: string) => {
+    const trimmed = renameValue.trim();
+    if (!trimmed) {
+      toast.error('Name cannot be empty');
+      return;
+    }
+    setRenameSaving(true);
+    try {
+      const { error } = await supabase
+        .from('cmas')
+        .update({ subject_name: trimmed })
+        .eq('id', id);
+      if (error) {
+        toast.error(`Rename failed: ${error.message}`);
+        return;
+      }
+      toast.success('Renamed');
+      setCmas(prev => prev.map(c => c.id === id ? { ...c, subject_name: trimmed } : c));
+      cancelRename();
+    } finally {
+      setRenameSaving(false);
+    }
   };
 
   const performCopyShareLink = async (cma: CMARow) => {
@@ -226,6 +266,49 @@ export default function CMALibraryPage() {
                 className="bg-white border border-beige hover:border-slate-blue/40 rounded-xl p-4 transition-colors"
               >
                 <div className="flex items-start justify-between gap-3">
+                  {/* Inline rename mode: input + save/cancel replaces the link
+                      wrapper so the broker doesn't accidentally navigate to
+                      the map while typing. Enter saves; Escape cancels. */}
+                  {renamingId === cma.id ? (
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveRename(cma.id);
+                            else if (e.key === 'Escape') cancelRename();
+                          }}
+                          autoFocus
+                          disabled={renameSaving}
+                          className="flex-1 min-w-0 font-bold text-base bg-cream border border-slate-blue/40 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-slate-blue/30"
+                          placeholder="CMA name"
+                        />
+                        <button
+                          onClick={() => saveRename(cma.id)}
+                          disabled={renameSaving}
+                          className="p-1.5 text-olive-2 hover:bg-olive-tint rounded disabled:opacity-50"
+                          title="Save (Enter)"
+                          aria-label="Save rename"
+                        >
+                          <Check size={14} />
+                        </button>
+                        <button
+                          onClick={cancelRename}
+                          disabled={renameSaving}
+                          className="p-1.5 text-ink-2 hover:text-red-500 hover:bg-red-400/10 rounded disabled:opacity-50"
+                          title="Cancel (Esc)"
+                          aria-label="Cancel rename"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                      <p className="text-xs text-ink-3 mt-1">
+                        {properCase(cma.subject_county)}, {cma.subject_state} · {formatAcres(cma.subject_acres)} · {compCount} comp{compCount === 1 ? '' : 's'}
+                      </p>
+                    </div>
+                  ) : (
                   <Link href={`/dashboard/map?cma=${cma.id}`} className="flex-1 min-w-0 group">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="font-bold text-base text-ink group-hover:text-slate-blue-2 transition-colors truncate">
@@ -263,8 +346,21 @@ export default function CMALibraryPage() {
                       </p>
                     )}
                   </Link>
+                  )}
 
                   <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {/* Rename button. Hidden while another CMA is being renamed
+                        to keep the row's action set unambiguous. */}
+                    {renamingId !== cma.id && (
+                      <button
+                        onClick={() => startRename(cma)}
+                        className="p-2 text-ink-2 hover:text-slate-blue-2 hover:bg-slate-blue/10 rounded-lg transition-colors"
+                        title="Rename"
+                        aria-label="Rename CMA"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    )}
                     <Link
                       href={`/dashboard/map?cma=${cma.id}`}
                       className="p-2 text-ink-2 hover:text-slate-blue-2 hover:bg-slate-blue/10 rounded-lg transition-colors"
