@@ -747,7 +747,47 @@ export default function MapPage() {
         id: 'cma-subject-line',
         type: 'line',
         source: 'cma-subject',
-        paint: { 'line-color': '#C8503F', 'line-width': 3, 'line-opacity': 1 },
+        // 'round' cap+join keeps the boundary corners smooth instead of
+        // sharp/pointy — reads as a considered, deliberate shape rather
+        // than an auto-generated polygon. Small detail, big polish gain.
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#C8503F',
+          // Slightly thicker at deep zoom to match the label size and hold
+          // presence when the user has zoomed in for detail work.
+          'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2, 15, 3, 18, 4],
+          'line-opacity': 1,
+        },
+      });
+      // Subject label — property name + acres, floating just above the
+      // centroid. Uses the same brick red as the boundary for a single
+      // visual identity. White halo makes it readable on any satellite
+      // background. Hidden below zoom 12 (boundary too small to warrant
+      // a label; the pin marker carries the identity from far out).
+      map.current!.addLayer({
+        id: 'cma-subject-label',
+        type: 'symbol',
+        source: 'cma-subject',
+        minzoom: 12,
+        layout: {
+          'symbol-placement': 'point',
+          'text-field': [
+            'format',
+            ['get', 'name'], { 'font-scale': 1.15, 'text-font': ['literal', ['DIN Pro Bold', 'Arial Unicode MS Bold']] },
+            '\n',
+            ['get', 'acres_label'], { 'font-scale': 0.85 },
+          ],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 12, 11, 16, 14, 19, 17],
+          'text-anchor': 'center',
+          'text-allow-overlap': false,
+          'text-max-width': 12,
+        },
+        paint: {
+          'text-color': '#F8FAFC',
+          'text-halo-color': 'rgba(30, 20, 15, 0.85)',
+          'text-halo-width': 1.8,
+          'text-halo-blur': 0.5,
+        },
       });
 
       // Saved comp boundaries (rendered from comps.boundary_geojson)
@@ -2573,15 +2613,26 @@ export default function MapPage() {
     });
   }, [viewingCMA, router]);
 
-  // Render subject boundary in workspace view
+  // Render subject boundary + label in workspace view. Feature properties
+  // populate the cma-subject-label symbol layer's text-field expressions
+  // (name = property name, acres_label = formatted acreage).
   useEffect(() => {
     if (!mapLoaded || !map.current) return;
     const src = map.current.getSource('cma-subject') as mapboxgl.GeoJSONSource | undefined;
     if (!src) return;
     if (viewingCMA?.subject_boundary_geojson) {
+      const name = properCase(viewingCMA.subject_name || '') || `${properCase(viewingCMA.subject_county || '')} subject`;
+      const acresLabel =
+        viewingCMA.subject_acres != null
+          ? `${formatAcres(viewingCMA.subject_acres)}`
+          : '';
       src.setData({
         type: 'FeatureCollection',
-        features: [{ type: 'Feature', properties: {}, geometry: viewingCMA.subject_boundary_geojson }],
+        features: [{
+          type: 'Feature',
+          properties: { name, acres_label: acresLabel },
+          geometry: viewingCMA.subject_boundary_geojson,
+        }],
       });
     } else {
       src.setData({ type: 'FeatureCollection', features: [] });

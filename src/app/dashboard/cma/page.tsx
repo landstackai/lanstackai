@@ -42,6 +42,11 @@ export default function CMALibraryPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
+  // Inline acres edit — same pattern, separate state so both can (in principle)
+  // be active on different rows simultaneously without collision.
+  const [editingAcresId, setEditingAcresId] = useState<string | null>(null);
+  const [acresValue, setAcresValue] = useState('');
+  const [acresSaving, setAcresSaving] = useState(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -129,6 +134,42 @@ export default function CMALibraryPage() {
       cancelRename();
     } finally {
       setRenameSaving(false);
+    }
+  };
+
+  // Inline acres edit — direct override for cases where the geometry-computed
+  // acres is wrong (partial-parcel sales, carve-outs, county records that
+  // disagree with GIS geometry, etc.). Overrides subject_acres directly; does
+  // not touch subject_boundary_geojson.
+  const startEditAcres = (cma: CMARow) => {
+    setEditingAcresId(cma.id);
+    setAcresValue(String(cma.subject_acres ?? ''));
+  };
+  const cancelEditAcres = () => {
+    setEditingAcresId(null);
+    setAcresValue('');
+  };
+  const saveEditAcres = async (id: string) => {
+    const parsed = parseFloat(acresValue);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      toast.error('Acres must be a positive number');
+      return;
+    }
+    setAcresSaving(true);
+    try {
+      const { error } = await supabase
+        .from('cmas')
+        .update({ subject_acres: parsed })
+        .eq('id', id);
+      if (error) {
+        toast.error(`Update failed: ${error.message}`);
+        return;
+      }
+      toast.success('Acres updated');
+      setCmas(prev => prev.map(c => c.id === id ? { ...c, subject_acres: parsed } : c));
+      cancelEditAcres();
+    } finally {
+      setAcresSaving(false);
     }
   };
 
@@ -324,13 +365,63 @@ export default function CMALibraryPage() {
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-ink-2 mt-1">
+                    <p className="text-xs text-ink-2 mt-1 flex items-center gap-1 flex-wrap">
                       <span className="text-ink-2">{properCase(cma.subject_county)}, {cma.subject_state}</span>
-                      <span className="text-ink-3 mx-1.5">·</span>
-                      {formatAcres(cma.subject_acres)}
-                      <span className="text-ink-3 mx-1.5">·</span>
+                      <span className="text-ink-3">·</span>
+                      {/* Acres — click to edit inline. Overrides subject_acres
+                          directly without touching the boundary geometry. */}
+                      {editingAcresId === cma.id ? (
+                        <span
+                          onClick={(e) => e.preventDefault()}
+                          className="inline-flex items-center gap-1"
+                        >
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={acresValue}
+                            onChange={(e) => setAcresValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); saveEditAcres(cma.id); }
+                              else if (e.key === 'Escape') { e.preventDefault(); cancelEditAcres(); }
+                            }}
+                            onClick={(e) => e.preventDefault()}
+                            autoFocus
+                            disabled={acresSaving}
+                            className="w-24 text-xs bg-cream border border-slate-blue/40 rounded px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-slate-blue/30"
+                          />
+                          <button
+                            onClick={(e) => { e.preventDefault(); saveEditAcres(cma.id); }}
+                            disabled={acresSaving}
+                            className="p-0.5 text-olive-2 hover:bg-olive-tint rounded disabled:opacity-50"
+                            title="Save (Enter)"
+                            aria-label="Save acres"
+                          >
+                            <Check size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.preventDefault(); cancelEditAcres(); }}
+                            disabled={acresSaving}
+                            className="p-0.5 text-ink-2 hover:text-red-500 hover:bg-red-400/10 rounded disabled:opacity-50"
+                            title="Cancel (Esc)"
+                            aria-label="Cancel"
+                          >
+                            <X size={12} />
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.preventDefault(); startEditAcres(cma); }}
+                          className="inline-flex items-center gap-1 hover:text-slate-blue-2 hover:underline decoration-dashed underline-offset-2 transition-colors"
+                          title="Click to edit acres"
+                        >
+                          {formatAcres(cma.subject_acres)}
+                          <Pencil size={9} className="opacity-40" />
+                        </button>
+                      )}
+                      <span className="text-ink-3">·</span>
                       {compCount} comp{compCount === 1 ? '' : 's'}
-                      <span className="text-ink-3 mx-1.5">·</span>
+                      <span className="text-ink-3">·</span>
                       {new Date(cma.created_at).toLocaleDateString()}
                     </p>
                     {hasRange ? (
