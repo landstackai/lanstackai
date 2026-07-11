@@ -2479,6 +2479,38 @@ export default function MapPage() {
   // hits Combine, we save the merged geometry + centroid to the CMA's
   // subject_boundary_geojson / subject_latitude / subject_longitude columns.
   const [settingSubjectForCma, setSettingSubjectForCma] = useState<string | null>(null);
+  // Inline subject-acres edit on the workspace right panel. Brokers use this
+  // when the measured geometry acres disagrees with what the owner actually
+  // owns per deed / county records — common on partial-parcel sales,
+  // carve-outs, or CADs whose GIS lags their tax records. Overrides
+  // subject_acres directly; leaves subject_boundary_geojson untouched.
+  const [editingSubjectAcres, setEditingSubjectAcres] = useState(false);
+  const [subjectAcresValue, setSubjectAcresValue] = useState('');
+  const [subjectAcresSaving, setSubjectAcresSaving] = useState(false);
+  const saveSubjectAcres = useCallback(async () => {
+    if (!viewingCMA) return;
+    const parsed = parseFloat(subjectAcresValue);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      toast.error('Acres must be a positive number');
+      return;
+    }
+    setSubjectAcresSaving(true);
+    try {
+      const { error } = await supabase
+        .from('cmas')
+        .update({ subject_acres: parsed })
+        .eq('id', viewingCMA.id);
+      if (error) {
+        toast.error(`Update failed: ${error.message}`);
+        return;
+      }
+      toast.success('Acres updated');
+      setViewingCMA((prev: any) => prev ? { ...prev, subject_acres: parsed } : prev);
+      setEditingSubjectAcres(false);
+    } finally {
+      setSubjectAcresSaving(false);
+    }
+  }, [viewingCMA, subjectAcresValue, supabase]);
   const startMapSubjectForCMA = useCallback(() => {
     if (!viewingCMA) return;
     setSettingSubjectForCma(viewingCMA.id);
@@ -5282,8 +5314,60 @@ export default function MapPage() {
                           <p className="text-[10px] font-semibold uppercase tracking-[0.08em]" style={{ color: '#C8503F' }}>Subject</p>
                         </div>
                         <p className="text-sm font-semibold text-ink truncate">{properCase(viewingCMA.subject_name)}</p>
-                        <p className="text-xs text-ink-2 font-mono tabular-nums">
-                          {properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state} · {formatAcres(subjAcres)}
+                        {/* County/state · acres. Acres is click-to-edit inline
+                            for cases where the geometry-computed number is off
+                            from what the owner actually owns per deed. */}
+                        <p className="text-xs text-ink-2 font-mono tabular-nums flex items-center gap-1 flex-wrap">
+                          <span>{properCase(viewingCMA.subject_county)}, {viewingCMA.subject_state}</span>
+                          <span className="text-ink-3">·</span>
+                          {editingSubjectAcres ? (
+                            <span className="inline-flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={subjectAcresValue}
+                                onChange={(e) => setSubjectAcresValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') { e.preventDefault(); saveSubjectAcres(); }
+                                  else if (e.key === 'Escape') { e.preventDefault(); setEditingSubjectAcres(false); }
+                                }}
+                                autoFocus
+                                disabled={subjectAcresSaving}
+                                className="w-24 text-xs bg-cream border border-slate-blue/40 rounded px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-slate-blue/30"
+                              />
+                              <button
+                                onClick={saveSubjectAcres}
+                                disabled={subjectAcresSaving}
+                                className="p-0.5 text-olive-2 hover:bg-olive-tint rounded disabled:opacity-50"
+                                title="Save (Enter)"
+                                aria-label="Save acres"
+                              >
+                                <Check size={12} />
+                              </button>
+                              <button
+                                onClick={() => setEditingSubjectAcres(false)}
+                                disabled={subjectAcresSaving}
+                                className="p-0.5 text-ink-2 hover:text-red-500 hover:bg-red-400/10 rounded disabled:opacity-50"
+                                title="Cancel (Esc)"
+                                aria-label="Cancel"
+                              >
+                                <X size={12} />
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setSubjectAcresValue(String(subjAcres ?? ''));
+                                setEditingSubjectAcres(true);
+                              }}
+                              className="inline-flex items-center gap-1 hover:text-slate-blue-2 hover:underline decoration-dashed underline-offset-2 transition-colors"
+                              title="Click to edit acres (overrides geometry-computed value)"
+                            >
+                              {formatAcres(subjAcres)}
+                              <Pencil size={9} className="opacity-40" />
+                            </button>
+                          )}
                         </p>
                       </div>
                       {headlineKind !== 'none' && (
