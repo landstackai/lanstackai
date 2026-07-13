@@ -5101,7 +5101,14 @@ export default function MapPage() {
       {/* CMA Workspace panel — replaces the comp detail panel when ?cma=ID */}
       {viewingCMA && !cmaMode && (() => {
         const ids: string[] = viewingCMA.selected_comp_ids || [];
-        const cmaComps = comps.filter(c => ids.includes(c.id));
+        // Iterate in selected_comp_ids order so panel row numbers match the
+        // map pin numbers exactly. Previously used comps.filter(...) which
+        // preserved the arbitrary fetch order and could disagree with the
+        // pin's selected_comp_ids.indexOf() numbering — broker saw "#3" on
+        // map and "#3" in panel referring to different comps.
+        const cmaComps = ids
+          .map((id) => comps.find((c) => c.id === id))
+          .filter((c): c is Comp => Boolean(c));
 
         // Effective improvement value for a comp in this CMA: CMA-level
         // adjustment wins, else the comp's own improvement_value, else null.
