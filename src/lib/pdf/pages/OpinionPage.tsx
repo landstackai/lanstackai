@@ -37,10 +37,16 @@ export function OpinionPage({ data }: { data: CmaPdfData }) {
     opinion.mode === 'breakdown'
       ? (opinion.land_value ?? 0) + breakdownImprovements
       : 0;
+  // Expected Sale reflects the BROKER's opinion — either explicit
+  // (opinion.total) or itemized (land + improvement). We deliberately do
+  // NOT fall back to the comp midpoint here: showing a compAvg-derived
+  // number under an "Expected Sale" heading implies the broker signed
+  // off on it, when in fact it's raw comp math. If broker hasn't set
+  // an opinion, the Expected Sale block is suppressed (see
+  // showExpectedSale below) rather than filled with a fabricated value.
   const brokerTotal =
     opinion.total ??
     (breakdownTotal > 0 ? breakdownTotal : null) ??
-    data.stats.value_mid ??
     null;
 
   // Suggested List Price — explicit broker override wins; otherwise
@@ -279,8 +285,14 @@ function ConfirmedHero({
   // line in that case. Also handles range mode (where Expected Sale
   // is a low–high band and clearly distinct from the single SLP).
   const slpExplicit = opinion.suggested_list_price != null;
+  // Only show Expected Sale when broker has actually put their opinion on
+  // record — either explicit total or an itemized breakdown. Without an
+  // opinion, Expected Sale would be a fabricated number under the broker's
+  // name (see brokerTotal fallback comment).
   const showExpectedSale =
-    presentation === 'range' || (slpExplicit && suggestedListPrice !== brokerTotal);
+    brokerTotal != null && (
+      presentation === 'range' || (slpExplicit && suggestedListPrice !== brokerTotal)
+    );
 
   // Per-acre derivations. Brokers + clients both think in $/ac for
   // land — keeping the totals as the headline but always showing the
