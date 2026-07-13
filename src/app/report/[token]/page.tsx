@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { CMA, Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate } from '@/lib/utils';
@@ -45,6 +45,44 @@ export default function ClientReport({ params }: ClientReportProps) {
   const [mapReady, setMapReady] = useState(false);
   const [hoveredCompId, setHoveredCompId] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'default' | 'closest' | 'recent' | 'ppa'>('closest');
+
+  // Sorted-order lookup so map pin numbers stay in lockstep with the panel's
+  // comp cards. Both surfaces show "#1 = first card in current sort" — click
+  // sort dropdown and both re-number together. The panel still sorts its own
+  // list inside the render (existing logic at ~line 691); this memo only
+  // exists so the map-init effect can look up each pin's number without
+  // duplicating the sort logic.
+  const compOrder = useMemo(() => {
+    if (!comps.length) return new Map<string, number>();
+    const subjLat = (cma as any)?.subject_latitude;
+    const subjLng = (cma as any)?.subject_longitude;
+    const dist = (c: Comp): number => {
+      if (subjLat == null || subjLng == null || c.latitude == null || c.longitude == null) return Infinity;
+      const R = 3958.7613;
+      const toRad = (d: number) => (d * Math.PI) / 180;
+      const dLat = toRad(c.latitude - subjLat);
+      const dLng = toRad(c.longitude - subjLng);
+      const a = Math.sin(dLat / 2) ** 2
+        + Math.cos(toRad(subjLat)) * Math.cos(toRad(c.latitude)) * Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    };
+    const ppa = (c: Comp): number => {
+      const total = Number(c.sale_price) || 0;
+      const acres = Number(c.acres) || 0;
+      return acres > 0 ? total / acres : (c.price_per_acre || 0);
+    };
+    const sorted = [...comps].sort((a, b) => {
+      if (sortBy === 'ppa') return ppa(b) - ppa(a);
+      if (sortBy === 'recent') {
+        const da = (a as any).sale_date ? new Date((a as any).sale_date).getTime() : 0;
+        const db = (b as any).sale_date ? new Date((b as any).sale_date).getTime() : 0;
+        return db - da;
+      }
+      if (sortBy === 'closest') return dist(a) - dist(b);
+      return 0;
+    });
+    return new Map(sorted.map((c, i) => [c.id, i + 1]));
+  }, [comps, sortBy, cma]);
   const [showMethodology, setShowMethodology] = useState(false);
   const [expandedCompIds, setExpandedCompIds] = useState<Set<string>>(new Set());
   const [expandedDescriptionIds, setExpandedDescriptionIds] = useState<Set<string>>(new Set());
@@ -252,6 +290,45 @@ export default function ClientReport({ params }: ClientReportProps) {
         }
       }
 
+      // Comp boundaries — same red-line treatment used on the broker
+      // workspace map. Previously missing on the report, so clients saw
+      // just floating pins with no property outlines. Now the client sees
+      // the actual parcel shape for each comp, matching what the broker
+      // sees. Fill + halo + line for depth on satellite backgrounds.
+      const compBoundaryFeatures = comps
+        .filter((c) => (c as any).boundary_geojson)
+        .map((c) => ({
+          type: 'Feature' as const,
+          properties: { comp_id: c.id },
+          geometry: (c as any).boundary_geojson,
+        }));
+      const existingCompBoundarySrc = map.current.getSource('comp-boundaries');
+      const compFC = { type: 'FeatureCollection' as const, features: compBoundaryFeatures };
+      if (existingCompBoundarySrc) {
+        (existingCompBoundarySrc as mapboxgl.GeoJSONSource).setData(compFC as any);
+      } else {
+        map.current.addSource('comp-boundaries', { type: 'geojson', data: compFC as any });
+        map.current.addLayer({
+          id: 'comp-boundary-fill',
+          type: 'fill',
+          source: 'comp-boundaries',
+          paint: { 'fill-color': '#ef4444', 'fill-opacity': 0.14 },
+        });
+        map.current.addLayer({
+          id: 'comp-boundary-halo',
+          type: 'line',
+          source: 'comp-boundaries',
+          paint: { 'line-color': '#ef4444', 'line-width': 5, 'line-opacity': 0.28, 'line-blur': 1.2 },
+        });
+        map.current.addLayer({
+          id: 'comp-boundary-line',
+          type: 'line',
+          source: 'comp-boundaries',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#ef4444', 'line-width': 2, 'line-opacity': 1 },
+        });
+      }
+
       // Comp pins — match the broker map's pin treatment exactly so
       // clients see the same visual language as the live dashboard:
       //   - Warm dark base (#1A1815)
@@ -283,7 +360,30 @@ export default function ClientReport({ params }: ClientReportProps) {
         // Match the broker map's Total $/Ac label convention (PR #27).
         // Falls back to ppa_land_only only if total isn't populated.
         const totalForLabel = (comp as any).price_per_acre || comp.ppa_land_only || 0;
-        el.textContent = `$${Math.round(totalForLabel / 1000)}k`;
+        const priceLabel = `$${Math.round(totalForLabel / 1000)}k`;
+
+        // Pin number matches the comp's row number in the sortable panel.
+        // When client sorts by Closest / Recent / $/Ac, both surfaces
+        // re-number together — #3 on map = #3 in panel = same property.
+        // compOrder is the useMemo that computes the sort order at
+        // component level so this effect and the JSX both agree.
+        const compNumber = compOrder.get(comp.id) ?? 0;
+        if (compNumber > 0) {
+          el.innerHTML = `
+            <span style="
+              position:absolute; top:-7px; left:-7px;
+              min-width:18px; height:18px; padding:0 4px;
+              border-radius:9px; background:#A8B57A;
+              border:1.5px solid #1A1815; color:#1A1815;
+              font-family:'DM Mono',monospace; font-size:10px; font-weight:700;
+              display:flex; align-items:center; justify-content:center;
+              line-height:1; box-shadow:0 1px 4px rgba(0,0,0,0.4); z-index:2;
+            ">${compNumber}</span>
+            <span>${priceLabel}</span>
+          `;
+        } else {
+          el.textContent = priceLabel;
+        }
 
         // Hover preview popup — exact mirror of the collapsed comp card in
         // the share report's Comparable Sales list (header + 4-col grid).
@@ -378,7 +478,9 @@ export default function ClientReport({ params }: ClientReportProps) {
 
     if (map.current.isStyleLoaded()) apply();
     else map.current.once('load', apply);
-  }, [cma, comps, mapReady]);
+    // compOrder in deps: when sortBy changes, pins re-render with new
+    // numbers so they stay aligned with the panel's row order.
+  }, [cma, comps, mapReady, compOrder]);
 
   // Imperative hover highlight on pins. Mirrors the broker map's
   // treatment exactly so a client viewing the share link sees the same
