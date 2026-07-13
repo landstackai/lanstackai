@@ -680,9 +680,18 @@ export default function ClientReport({ params }: ClientReportProps) {
             const impNum = brokerImprovementValue != null ? Number(brokerImprovementValue) : NaN;
             const lumpNum = brokerOpinion != null ? Number(brokerOpinion) : NaN;
 
-            // Resolve mode: explicit > inferred from data presence
+            // Resolve mode: explicit > inferred from data presence.
+            // Defensive: 'breakdown' mode ONLY takes effect if at least one
+            // of the two component values is populated. Otherwise we'd
+            // render "Land Value $0 / Improvement Value $0" which reads
+            // as bogus data to the client — actually just an
+            // unfinished mode toggle. Falls through to isLumpSum /
+            // compAvg display in that case.
+            const hasBreakdownValues =
+              (Number.isFinite(landNum) && landNum > 0)
+              || (Number.isFinite(impNum) && impNum > 0);
             const isBreakdown =
-              brokerMode === 'breakdown'
+              (brokerMode === 'breakdown' && hasBreakdownValues)
               || (brokerMode == null && Number.isFinite(landNum) && landNum > 0);
             const isLumpSum =
               brokerMode === 'lump_sum'
