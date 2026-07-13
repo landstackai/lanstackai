@@ -200,11 +200,14 @@ export function CoverPage({ data }: { data: CmaPdfData }) {
           ) : null}
         </View>
 
-        {/* Generated date — small, bottom-right */}
+        {/* Generated date — bottom-LEFT. Was bottom-right, but collided
+            with the brokerage info block (name/address/website/TREC) when
+            the right column had more than 3 lines. Left column has just
+            the Prepared By name + title, so plenty of vertical room. */}
         <View
           style={{
             position: 'absolute',
-            right: PAGE.margin,
+            left: PAGE.margin,
             bottom: 28,
           }}
         >
