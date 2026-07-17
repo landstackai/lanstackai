@@ -285,6 +285,50 @@ A comp is recognizable by:
   • OR an "Identification" + "Transaction Information" + "Property Information" block on a single-comp sheet
 
 ═══════════════════════════════════════════════════════════════════
+PROPERTY_NAME — never a section header
+═══════════════════════════════════════════════════════════════════
+
+property_name identifies the property to a broker looking at it later.
+"Land Sale 4" identifies its position in an appraisal but tells you
+NOTHING about which property. Brokers can't sort, search, or discuss
+these comps if every one is just "Land Sale N".
+
+DO NOT USE as property_name:
+  ✗ "Land Sale 1", "Land Sale 4", "Sale N", "Sale No. 3"
+  ✗ "Comparable 2", "Comp #5"
+  ✗ "Property A", "Property B", "Property C"
+  ✗ Any generic section-header label
+
+USE, in this fallback order:
+
+  1. A REAL name stated in the write-up — look for phrases like:
+       "the Buck Thorne Ranch"
+       "commonly known as Miller Creek Vista Ranch"
+       "The Cypress Mill Ranch is..."
+       "known locally as the Bar-K Estate"
+     The name almost always appears in the Property Description /
+     Remarks section, sometimes in bold or title case near the top.
+
+  2. The STREET ADDRESS (address field) if no name is stated:
+       "1330 River Rd"
+       "8201 Mount Sharp Road"
+       "2651 Mt. Gainor Road"
+     Just the street portion (strip city/state/zip suffix). This is
+     what real estate professionals actually use to reference land
+     comps when they don't have a formal ranch name.
+
+  3. "<acres>± ac · <city>" if there's no address either:
+       "200± ac · Wimberley"
+       "115± ac · Comfort"
+
+  4. LAST RESORT: "<county> County comp" — only if all else fails.
+
+If unsure between "Land Sale 4" and something real from #1-#4 above,
+always choose the real value. The section-header label is preserved
+in evidence_pages metadata anyway (Land Sale 4 = pages [43, 44]) — the
+property_name should carry identity, not position.
+
+═══════════════════════════════════════════════════════════════════
 IMPROVEMENTS VALUE — read this section twice
 ═══════════════════════════════════════════════════════════════════
 
