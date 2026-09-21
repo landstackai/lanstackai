@@ -1012,6 +1012,17 @@ export default function VaultPage() {
               <CompCard
                 key={comp.id}
                 comp={comp}
+                // Card click → map with the detail overlay open (compare-first;
+                // the pencil icon still opens the edit modal). Pinless comps
+                // fall back to the edit modal — they can't render on a map.
+                onSelect={() => {
+                  if (comp.latitude != null && comp.longitude != null) {
+                    router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14&compId=${comp.id}`);
+                  } else {
+                    setEditingComp(comp);
+                    setShowAddModal(true);
+                  }
+                }}
                 onEdit={() => {
                   setEditingComp(comp);
                   setShowAddModal(true);
@@ -1024,7 +1035,11 @@ export default function VaultPage() {
         ) : (
           /* TABLE VIEW — 7 columns: County · City · Acres · Total Price ·
              Per Acre (Total $/Ac) · Adjusted ($/Ac) · Improved.
-             Click any column header to sort. Row click opens edit modal.
+             Click any column header to sort. Row click → map with the
+             detail overlay open (compare-first — a user may know nothing
+             about the property, so never land them on an edit screen).
+             The pencil icon still opens the edit modal; pinless comps
+             fall back to it since they can't render on a map.
 
              Multi-county comps (e.g. "Atascosa, Frio") expand into one row
              per county so they're findable when sorted by county or
@@ -1443,13 +1458,16 @@ export default function VaultPage() {
                                   const r = classifyReview(c);
                                   const isVerified = r === null;
                                   const compCounty = (c.county || '').split(',')[0]?.trim() || '—';
-                                  // Verified comps with a pin: click → map (focused on the
-                                  // property, detail panel auto-opened). After review, the
-                                  // dominant job is "look it up" not "edit it." The review
-                                  // page is still reachable from the map detail panel.
-                                  // Anything not-yet-verified or pinless: click → review
-                                  // page (edit-first, broker needs to fix something).
-                                  const canJumpToMap = isVerified && c.latitude != null && c.longitude != null;
+                                  // ANY comp with a pin: click → map (focused on the
+                                  // property, detail panel auto-opened). The dominant
+                                  // vault job is "look it up / compare it," not "edit
+                                  // it" — a user may know nothing about the property.
+                                  // The review page is still reachable from the map
+                                  // detail panel's edit button. Only pinless comps
+                                  // (no lat/lng — nothing to show on a map, and the
+                                  // map page filters them out of its comps fetch)
+                                  // fall back to the review page.
+                                  const canJumpToMap = c.latitude != null && c.longitude != null;
                                   const handleRowClick = () => {
                                     if (canJumpToMap) {
                                       router.push(`/dashboard/map?focus=${c.latitude},${c.longitude},14&compId=${c.id}`);
@@ -1839,8 +1857,12 @@ export default function VaultPage() {
                           <tr
                             key={entry.key}
                             onClick={() => {
-                              setEditingComp(comp);
-                              setShowAddModal(true);
+                              if (comp.latitude != null && comp.longitude != null) {
+                                router.push(`/dashboard/map?focus=${comp.latitude},${comp.longitude},14&compId=${comp.id}`);
+                              } else {
+                                setEditingComp(comp);
+                                setShowAddModal(true);
+                              }
                             }}
                             className="border-b border-beige/60 last:border-b-0 hover:bg-cream/60 cursor-pointer group transition-colors"
                           >
