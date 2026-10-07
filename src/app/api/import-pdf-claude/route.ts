@@ -410,6 +410,14 @@ NORMALIZATION
   sale_date     → ISO YYYY-MM-DD: "2022-06-29" not "June 29, 2022"
   acres         → number to 2 decimal places when stated more precisely
 
+  ACRES — WHOLE TRACT, NEVER A COMPONENT: when the document splits the
+  sold property into components — "500 ac high fenced + 276 ac standard
+  fencing", irrigated vs dry, cultivated vs pasture — and states a
+  GROSS LAND SIZE or TOTAL for the sale, that gross/total IS the acres
+  value (e.g. gross land size 746 → acres: 746, not 500). A component
+  acreage is never the sold-tract size. (Distinct from "Gross Acres" of
+  a PARENT holding the tract was carved from — that is still excluded.)
+
 ═══════════════════════════════════════════════════════════════════
 DOCUMENT TYPE
 ═══════════════════════════════════════════════════════════════════

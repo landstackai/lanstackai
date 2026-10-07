@@ -11,6 +11,7 @@ import {
   selectBoundaryByAcreage,
 } from '@/lib/utils/countyParcels';
 import { IMPORT_RESPONSE_SCHEMA } from '@/lib/utils/compExtractionSchema';
+import { extractAcresFromDescription } from '@/lib/utils/acreage';
 
 export const maxDuration = 300; // vision + multi-page extraction; headroom over the old 120 since the swapped engine runs longer per call
 
@@ -126,6 +127,12 @@ When you find comparable sales in a document:
     * "Improved Acres" / "Net Usable" / "Taxable Acres" — subsets, smaller
       than the actual sold tract.
     * "Pasture X: NNN ac" / per-field subtotals — components, not the total.
+    * Fence-type or use splits — "500 ac high fenced + 276 ac standard
+      fencing", irrigated vs dry, cultivated vs native. When the document
+      also states a GROSS LAND SIZE or TOTAL for the sale, that
+      gross/total IS the acres value (gross land size 746 → acres: 746,
+      not 500). This is distinct from "Gross Acres" of a PARENT holding —
+      a parent tract is still excluded per the first bullet.
     * "Adjoining property" / "surrounding ranch" / "larger holding" — not
       the sold tract at all.
 
@@ -778,83 +785,11 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Pulls the SOLD-TRACT acreage figure from descriptive prose. Handles formats
-// like "265.210 ac", "1,250 acres", "455.92-acre", "97.5 ac".
-//
-// L&D Farm and Ranch failure mode that motivated the rewrite:
-//   "Part of an 8,820-acre Cooper Ranch holdings, of which Subject is a
-//    1,179.115-acre portion..."
-//
-// The old regex grabbed the FIRST acreage and returned 8,820 (the parent
-// tract). Compounding mistake: that overwrote a correct AI extraction with
-// a worse description-derived value. The math gate then fired (8,820 ×
-// $4,750 ≠ $5.6M, Δ86%) but the damage was already done — the row saved
-// with 8,820 acres flagged for broker review.
-//
-// Strategy (refined after Eatwell River Ranch failure):
-//   1. Find every "NNN acre/ac" mention.
-//   2. Look for a SALE_CUE (sale/subject/tract/comprising/totaling/
-//      consisting) near each one. If exactly one match has a cue, take
-//      it. That's the strongest signal of "this is THE sold tract".
-//   3. Otherwise, strip out NEG_CUE matches (parent/holdings/larger/
-//      portion of/adjoining/surrounding — explicitly NOT the sold
-//      tract) and pick the LARGEST remaining number.
-//
-// Why "largest" instead of "last":
-//   - L&D had parent FIRST + sold LAST (8,820 → 1,179)
-//     → both survive NEG_CUE filter? No — "8,820-acre Cooper Ranch
-//       holdings" trips the "holdings" NEG_CUE, gets stripped, leaves
-//       just 1,179. ✓
-//   - Eatwell had property total FIRST (±796-acre headline) +
-//     sub-feature LATER (e.g., "9-acre lake")
-//     → both survive NEG_CUE filter; old "pick last" wrongly chose 9
-//     → new "pick largest" correctly chooses 796 ✓
-//   - Property totals are reliably the BIGGEST acreage in a description;
-//     sub-features (lakes, ponds, pastures, fields) are smaller.
-function extractAcresFromDescription(desc: any): number | null {
-  if (typeof desc !== 'string' || !desc) return null;
-  // Array.from() rather than spread — the project's tsconfig.json doesn't
-  // set a "target", so RegExpStringIterator can't be spread (TS2802).
-  const all = Array.from(desc.matchAll(
-    /(?<![\d,])([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*(?:acres?|ac)\b/gi
-  ));
-  if (all.length === 0) return null;
-
-  // Look for a contextual cue near each match that ties it to the sold tract
-  const SALE_CUE = /\b(sale|subject|tract|comprising|consist\w*|totaling)\b/i;
-  const preferred = all.find((m) => {
-    const idx = m.index ?? 0;
-    const window = desc.slice(Math.max(0, idx - 60), idx + 30);
-    return SALE_CUE.test(window);
-  });
-
-  // Negative cue — explicitly NOT the sold tract. Strip these from the
-  // pool before falling back to magnitude.
-  const NEG_CUE = /\b(parent|holdings?|larger|portion of|adjoining|surrounding|abuts|neighbor)\b/i;
-  const candidates = preferred
-    ? [preferred]
-    : all.filter((m) => {
-        const idx = m.index ?? 0;
-        const window = desc.slice(Math.max(0, idx - 60), idx + 30);
-        return !NEG_CUE.test(window);
-      });
-
-  if (candidates.length === 0) return null;
-
-  // Pick the LARGEST acreage in the candidate pool. See block comment
-  // above for rationale.
-  let best = candidates[0];
-  let bestVal = parseFloat(best[1].replace(/,/g, ''));
-  for (let i = 1; i < candidates.length; i++) {
-    const v = parseFloat(candidates[i][1].replace(/,/g, ''));
-    if (Number.isFinite(v) && v > bestVal) {
-      best = candidates[i];
-      bestVal = v;
-    }
-  }
-  return Number.isFinite(bestVal) ? bestVal : null;
-}
-
+// extractAcresFromDescription moved to src/lib/utils/acreage.ts so the
+// map page's description-reconcile effect shares the exact same
+// cue-aware logic (it previously used a naive first-match regex that
+// clobbered broker-corrected acreage — see the Pletcher Ranch case
+// documented in that file).
 async function enrichWithHolding(comp: any): Promise<any> {
   if (!comp || comp.latitude == null || comp.longitude == null) return comp;
   const countyKey = (comp.county || '').toLowerCase();

@@ -7,6 +7,7 @@ import { Comp } from '@/types';
 import { formatPPA, formatAcres, formatCurrency, formatDate, TEXAS_COUNTIES } from '@/lib/utils';
 import { computeCmaAverages, subjectTotals } from '@/lib/utils/cmaMath';
 import { properCase } from '@/lib/utils/properCase';
+import { extractAcresFromDescription } from '@/lib/utils/acreage';
 import { X, Edit, MousePointer, Search, Pencil, Combine, Trash2, ChevronDown, ChevronUp, ArrowRight, ShieldCheck, ShieldAlert, ShieldQuestion, Home, MapPin, FileText, Save, Sparkles, ExternalLink, Globe, Share2, Users, Check, Waves, SlidersHorizontal, Loader2, Link as LinkIcon, Download, Plus } from 'lucide-react';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
@@ -364,14 +365,19 @@ export default function MapPage() {
   // current user owns, if the description names a different acreage than
   // what's saved (beyond rounding), reconcile silently — write the
   // description value to the DB so all downstream views are consistent.
+  //
+  // Uses the shared cue-aware extractor (lib/utils/acreage), NOT a bare
+  // first-match regex. The old first-match version reset Pletcher Ranch
+  // (746 gross acres, broker-corrected) back to 500 on every open —
+  // "Approximately 500 acres is high fenced while 276 acres features
+  // standard pasture fencing" — because it grabbed the first number.
+  // The shared extractor returns null for component-only descriptions,
+  // which skips the reconcile and leaves the saved value alone.
   useEffect(() => {
     if (!selectedComp || !currentUserId) return;
     if (selectedComp.created_by !== currentUserId) return;
-    const desc = selectedComp.description || '';
-    const m = desc.match(/([0-9][0-9,]*(?:\.\d+)?)\s*[-]?\s*(?:acres?|ac)\b/i);
-    if (!m) return;
-    const fromDesc = parseFloat(m[1].replace(/,/g, ''));
-    if (!Number.isFinite(fromDesc)) return;
+    const fromDesc = extractAcresFromDescription(selectedComp.description);
+    if (fromDesc == null) return;
     const saved = selectedComp.acres || 0;
     if (Math.abs(fromDesc - saved) <= 0.5) return; // already matches (within rounding)
     let cancelled = false;
