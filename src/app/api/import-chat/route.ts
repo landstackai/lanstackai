@@ -478,6 +478,25 @@ export async function POST(request: NextRequest) {
           return true;
         })
       : null;
+
+    // The old OpenAI strict json_schema mode GUARANTEED a confidence
+    // object on every comp; downstream code (import page saveComp reads
+    // comp.confidence.overall unguarded) relies on it. The non-strict
+    // submit_comps tool can omit it — restore the invariant here so
+    // auto-save never crashes on an otherwise-good comp.
+    if (Array.isArray(comps)) {
+      for (const c of comps) {
+        if (!c.confidence || typeof c.confidence !== 'object') {
+          c.confidence = { overall: 50, per_field: null };
+        } else if (typeof c.confidence.overall !== 'number') {
+          c.confidence.overall = 50;
+        } else if (c.confidence.overall > 0 && c.confidence.overall <= 1) {
+          // 0.0-1.0 fraction → 0-100 percentage; downstream thresholds
+          // (Verified>80, math gate >=80) all expect percentages.
+          c.confidence.overall = Math.round(c.confidence.overall * 100);
+        }
+      }
+    }
     if (Array.isArray(parsed.comps) && parsed.comps.length > 0 && (!comps || comps.length === 0)) {
       // Visibility: log what got filtered out so we can debug the "no_comps"
       // outcome that brokers see in the import chat log.

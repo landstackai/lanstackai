@@ -2607,12 +2607,15 @@ export default function ImportPage() {
     // logs + the diagnostic block, not in the broker's UI.
     setLoadingStatus('Reading your document…');
 
-    // 95-second client cap. Server's own AbortController fires at 90s,
-    // Vercel kills the function at 120s. The client's 95 leaves a
-    // narrow gap to receive the server's clean "timeout" response
-    // rather than racing the network and showing a generic abort.
+    // 310-second client cap — the orchestrator's maxDuration is now 300
+    // (primary extraction ~30-75s on big appraisals, plus the text
+    // fallback when the primary fails). The old 95s cap was aborting
+    // the client while the server was still happily working: a 71-page
+    // appraisal measured 72.6s end-to-end in production, right at the
+    // old limit. 310 leaves a 10s gap to receive the server's clean
+    // timeout response rather than racing it.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 95_000);
+    const timeoutId = setTimeout(() => controller.abort(), 310_000);
 
     try {
       const formData = new FormData();
@@ -2842,7 +2845,7 @@ export default function ImportPage() {
       let toastMessage: string;
       if (error?.name === 'AbortError') {
         toastMessage =
-          'PDF extraction took longer than 90 seconds and was cancelled.';
+          'PDF extraction took longer than 5 minutes and was cancelled.';
         chatMessage =
           "That PDF took too long to process and was cancelled. If it has a separate Sales Comparison section, try uploading just those pages.";
       } else if (typeof error?.message === 'string' && error.message.length > 0) {
@@ -3125,7 +3128,10 @@ export default function ImportPage() {
       flood_plain_pct: comp.flood_plain_pct,
       status: 'Sold',
       visibility: 'team',
-      confidence: comp.confidence.overall > 80 ? 'Verified' : comp.confidence.overall > 50 ? 'Estimated' : 'Unverified',
+      // Optional-chained: a comp missing its confidence object must save
+      // as Unverified, not crash the whole auto-save (the "Auto-save
+      // didn't complete" bug, 2026-10-06).
+      confidence: (comp.confidence?.overall ?? 0) > 80 ? 'Verified' : (comp.confidence?.overall ?? 0) > 50 ? 'Estimated' : 'Unverified',
       boundary_geojson: (comp as any).geometry ?? null,
       // Carry the math-identity-gate flag through to the row so the vault
       // UI can show its warning badge. False (default) if the gate passed
@@ -3586,10 +3592,10 @@ export default function ImportPage() {
                           <div className="flex items-center gap-2 flex-shrink-0">
                             <div className="flex items-center gap-1">
                               <div className={`w-2 h-2 rounded-full ${
-                                comp.confidence.overall >= 80 ? 'bg-olive' :
-                                comp.confidence.overall >= 50 ? 'bg-amber-600' : 'bg-red-500'
+                                (comp.confidence?.overall ?? 0) >= 80 ? 'bg-olive' :
+                                (comp.confidence?.overall ?? 0) >= 50 ? 'bg-amber-600' : 'bg-red-500'
                               }`} />
-                              <span className="text-xs text-ink-3">{comp.confidence.overall}%</span>
+                              <span className="text-xs text-ink-3">{comp.confidence?.overall ?? 0}%</span>
                             </div>
 
                             {/* Discard (X) — removes the card from this

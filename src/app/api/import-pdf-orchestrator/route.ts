@@ -98,6 +98,30 @@ interface EngineRun {
 
 const TEXT_FALLBACK_MODEL = 'claude-opus-5-5';
 
+// The old OpenAI strict json_schema mode GUARANTEED every comp carried
+// a confidence object ({overall, per_field}); downstream code — the
+// import page's saveComp reads comp.confidence.overall unguarded —
+// grew to rely on that. Non-strict tools can omit it, which made
+// auto-save silently fail on otherwise-good comps. Restore the old
+// invariant at the source for every engine's output.
+function ensureConfidence<T>(comps: T[]): T[] {
+  for (const c of comps as any[]) {
+    if (!c.confidence || typeof c.confidence !== 'object') {
+      c.confidence = { overall: 50, per_field: null };
+    } else if (typeof c.confidence.overall !== 'number') {
+      c.confidence.overall = 50;
+    } else if (c.confidence.overall > 0 && c.confidence.overall <= 1) {
+      // Scale mismatch: CLAUDE_PDF_SYSTEM_PROMPT's tool schema asks for
+      // 0.0-1.0 but every downstream threshold (saveComp Verified>80,
+      // math-gate priceConf>=80, review classification) expects 0-100.
+      // A 0.95-confidence comp was saving as "Unverified" and jamming
+      // the review queue. Normalize fractions to percentages.
+      c.confidence.overall = Math.round(c.confidence.overall * 100);
+    }
+  }
+  return comps;
+}
+
 // The same response schema the OpenAI json_schema response_format
 // enforced, re-expressed as a tool. The schema itself
 // (IMPORT_RESPONSE_SCHEMA) is unchanged. Deliberately NOT strict:
@@ -180,9 +204,9 @@ async function runTextFallback(text: string, fileName: string): Promise<EngineRu
     const parsed: any = toolUse.input;
     const rawComps: ExtractedComp[] = Array.isArray(parsed.comps) ? parsed.comps : [];
     // Drop subject entries — schema returns is_comparable so we filter on it.
-    const comps = rawComps.filter(
+    const comps = ensureConfidence(rawComps.filter(
       (c: any) => c.is_comparable !== false && c.is_subject_property !== true,
-    );
+    ));
 
     return {
       engine: 'claude_text',
@@ -295,6 +319,7 @@ async function runClaude(pdfBuffer: Buffer, fileName: string): Promise<EngineRun
             ? Math.round((c.sale_price - c.improvements_value) / c.acres)
             : null),
       }));
+    ensureConfidence(comps);
 
     return {
       engine: 'claude',
