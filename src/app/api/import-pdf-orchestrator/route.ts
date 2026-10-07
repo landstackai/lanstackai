@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { createClient as createSupabaseUserClient } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
-import { IMPORT_RESPONSE_FORMAT } from '@/lib/utils/compExtractionSchema';
+import { IMPORT_RESPONSE_SCHEMA } from '@/lib/utils/compExtractionSchema';
 import { IMPORT_SYSTEM_PROMPT } from '@/app/api/import-chat/route';
 import {
   CLAUDE_PDF_SYSTEM_PROMPT,
@@ -15,56 +14,43 @@ import { renderPdfPageToJpg } from '@/lib/extraction/convertapi';
 import { cropAerialFromPageJpg } from '@/lib/extraction/cropAerial';
 
 // ─────────────────────────────────────────────────────────────────────────
-// PDF extraction orchestrator — runs GPT + Claude in parallel on every
-// PDF upload, returns GPT primary (preserves months of broker-tested
-// prompt work), promotes Claude on GPT failure (instant fallback,
-// already computed), writes both results to extraction_runs (Stripe-
-// shadow pattern — gives us comparison data on every real upload from
-// day 1 to inform an evidence-based router later).
+// PDF extraction orchestrator — Claude native-PDF extraction primary,
+// text-path extraction fallback, both results written to
+// extraction_runs for post-hoc comparison.
 //
-// WHY THIS PATTERN (not Claude-only, not GPT-only):
+// ENGINE HISTORY: the text fallback originally ran on OpenAI
+// gpt-4o-mini. When the OpenAI account ran dry (2026-10), the fallback
+// engine was swapped to Claude — but the ~600 lines of accumulated
+// broker domain knowledge in IMPORT_SYSTEM_PROMPT (Texas terminology,
+// MLS section handling, subject-vs-comp disambiguation, normalization
+// rules, taught by months of real broker uploads) carried over
+// VERBATIM. The prompt is the asset; the engine behind it is a part.
 //
-//   - GPT has ~600 lines of accumulated broker domain knowledge in
-//     IMPORT_SYSTEM_PROMPT — Texas terminology, MLS section handling,
-//     subject-vs-comp disambiguation, normalization rules. Months of
-//     real broker uploads taught us those rules. Throwing that away
-//     to use Claude exclusively would be a regression on edge cases
-//     we don't yet know to write down.
+// WHY TWO PATHS (not one):
 //
-//   - Claude has two structural advantages we can't replicate on GPT:
-//     native PDF support (no client-side render → no Safari throttling
-//     stall on 60+ page appraisals — the Thorndale bug class) and
-//     schema-enforced tool_use (Anthropic refuses to return malformed
-//     types; OpenAI structured outputs only "asks nicely"). Both
-//     matter for production reliability.
+//   - The PRIMARY reads the PDF binary natively — it sees 2-column
+//     appraiser layouts the way a human does. This fixed the v2
+//     regression where 4 of 12 Frio Farms PDFs returned 0 comps via
+//     the text path (pdf-parse jumbles label/value columns).
 //
-//   - Stripe's fraud model migration playbook: keep the proven model
-//     in production, run the new model in shadow on every transaction,
-//     log both decisions, switch over only when evidence supports it.
-//     We're doing the same with extraction engines instead of fraud
-//     scores.
+//   - The TEXT FALLBACK still earns its keep for the rare case the
+//     native-PDF path errors (rate limit, malformed-but-parseable
+//     PDF): pdf-parse text + the battle-tested import prompt recovers
+//     most single-column documents.
 //
 // FAILURE-CONDITION LADDER (what gets shown to the broker):
 //
-//   1. GPT succeeds with ≥1 comp        → show GPT, log Claude silent
-//   2. GPT times out (>60s)             → show Claude (auto-fallback)
-//   3. GPT errors (429, 5xx)            → show Claude (auto-fallback)
-//   4. GPT returns 0 comps              → if Claude > 0, show Claude
-//                                          with a "GPT found nothing"
-//                                          warning; else show GPT's
-//                                          "no comps" message
+//   1. Primary succeeds with ≥1 comp    → show it, skip fallback
+//   2. Primary errors or returns 0      → run text fallback; show it
+//                                          if it found comps
+//   3. Both empty/failed                → clean error to the broker
 //
-// Because Claude was already computing in parallel, fallback is free
-// (no second round-trip, no extra latency).
-//
-// COST: ~$0.025 per PDF (both engines on every call). At Christina's
-// expected ~50 PDFs/month: ~$1.25/month extra vs GPT-only. Trivial
-// relative to the comparison data and instant fallback.
+// COST: fallback only runs when the primary fails, so normal uploads
+// cost one extraction call.
 // ─────────────────────────────────────────────────────────────────────────
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Service-role client for extraction_runs writes. The RLS on the table
@@ -100,7 +86,7 @@ interface ExtractionResult {
 }
 
 interface EngineRun {
-  engine: 'gpt' | 'claude';
+  engine: 'claude_text' | 'claude';
   model: string;
   ok: boolean;
   result: ExtractionResult | null;
@@ -110,65 +96,88 @@ interface EngineRun {
   output_tokens: number | null;
 }
 
-// ─── GPT extraction (text input) ────────────────────────────────────────
-// Uses the same prompt + schema as /api/import-chat. We send the
-// pdf-parse-extracted text wrapped as a "documentContent" message to
-// preserve the existing prompt's expected user-message shape.
-async function runGPT(text: string, fileName: string): Promise<EngineRun> {
+const TEXT_FALLBACK_MODEL = 'claude-opus-5-5';
+
+// The same response schema the OpenAI json_schema response_format
+// enforced, re-expressed as a tool. The schema itself
+// (IMPORT_RESPONSE_SCHEMA) is unchanged. Deliberately NOT strict:
+// Anthropic's strict validation rejects this schema twice over — the
+// OpenAI nullable-enum idiom ({type:['string','null'], enum:[...,
+// null]}) 400s, and 33 nullable fields exceeds the 16-union strict
+// limit. The production SUBMIT_COMPS_TOOL (import-pdf-claude) runs the
+// same idioms non-strict in production daily; downstream code already
+// filters defensively.
+const SUBMIT_COMPS_TEXT_TOOL = {
+  name: 'submit_comps',
+  description:
+    'Submit the full extraction result. Call exactly once with the ' +
+    'message and every comparable sale found in the document.',
+  input_schema: IMPORT_RESPONSE_SCHEMA,
+} as const;
+
+// ─── Text-path extraction (fallback) ────────────────────────────────────
+// Uses the same battle-tested IMPORT_SYSTEM_PROMPT as the legacy GPT
+// path (verbatim — the prompt is the asset). We send the
+// pdf-parse-extracted text wrapped the same way to preserve the
+// prompt's expected user-message shape. Engine swapped from
+// gpt-4o-mini to Claude 2026-10 (OpenAI account unfunded).
+//
+// Note on determinism: the old path set temperature: 0 because GPT
+// returned 5 comps on one Thorndale run and 6 on the next (a
+// completeness bug, fixed in a64b2e2). Current Claude models removed
+// the temperature parameter entirely (400 if sent); the strict tool
+// schema + "extract EVERY comparable" instruction carry the same
+// intent.
+async function runTextFallback(text: string, fileName: string): Promise<EngineRun> {
   const t0 = Date.now();
   try {
     if (!text || text.trim().length < 200) {
       return {
-        engine: 'gpt',
-        model: 'gpt-4o-mini',
+        engine: 'claude_text',
+        model: TEXT_FALLBACK_MODEL,
         ok: false,
         result: null,
         error:
-          'PDF text extraction yielded too little content. Document may be scanned (image-only) — GPT path needs OCR.',
+          'PDF text extraction yielded too little content. Document may be scanned (image-only) — text path needs OCR.',
         elapsed_ms: Date.now() - t0,
         input_tokens: null,
         output_tokens: null,
       };
     }
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      // 16k is the new floor — 6k was at the truncation boundary
+    const message = await anthropic.messages.create({
+      model: TEXT_FALLBACK_MODEL,
+      // 16k is the floor — 6k was at the truncation boundary
       // for 6-comp appraisals. 16k gives generous headroom.
       max_tokens: 16000,
-      // Temperature 0 for structured-extraction determinism. Without
-      // this, GPT was returning 5 comps on one run and 6 on the next
-      // for the same Thorndale PDF — same input, same prompt. The
-      // determinism dropoff isn't a quality issue (correctness was
-      // fine when it returned 6) — it's a *completeness* issue
-      // (sometimes stopped early). For extraction we want the same
-      // input to produce the same output every time. Trade-off: zero
-      // creative variation. For comp data, that's the right trade.
-      temperature: 0,
-      response_format: IMPORT_RESPONSE_FORMAT,
+      system: IMPORT_SYSTEM_PROMPT,
+      tools: [SUBMIT_COMPS_TEXT_TOOL],
       messages: [
-        { role: 'system', content: IMPORT_SYSTEM_PROMPT },
         {
           role: 'user',
-          content: `Please extract all comparable sales from this document (filename: ${fileName}):\n\n${text}`,
+          content:
+            `Please extract all comparable sales from this document (filename: ${fileName}). ` +
+            `Call submit_comps exactly once with the full result.\n\n${text}`,
         },
       ],
-    });
+    } as any);
 
-    const content = completion.choices[0]?.message?.content;
-    if (!content) {
+    const toolUse = (message.content as any[]).find(
+      (b) => b.type === 'tool_use' && b.name === 'submit_comps',
+    );
+    if (!toolUse) {
       return {
-        engine: 'gpt',
-        model: 'gpt-4o-mini',
+        engine: 'claude_text',
+        model: TEXT_FALLBACK_MODEL,
         ok: false,
         result: null,
-        error: 'GPT returned empty content',
+        error: `text fallback did not call submit_comps (stop_reason=${(message as any).stop_reason})`,
         elapsed_ms: Date.now() - t0,
-        input_tokens: completion.usage?.prompt_tokens ?? null,
-        output_tokens: completion.usage?.completion_tokens ?? null,
+        input_tokens: (message as any).usage?.input_tokens ?? null,
+        output_tokens: (message as any).usage?.output_tokens ?? null,
       };
     }
-    const parsed = JSON.parse(content);
+    const parsed: any = toolUse.input;
     const rawComps: ExtractedComp[] = Array.isArray(parsed.comps) ? parsed.comps : [];
     // Drop subject entries — schema returns is_comparable so we filter on it.
     const comps = rawComps.filter(
@@ -176,8 +185,8 @@ async function runGPT(text: string, fileName: string): Promise<EngineRun> {
     );
 
     return {
-      engine: 'gpt',
-      model: 'gpt-4o-mini',
+      engine: 'claude_text',
+      model: TEXT_FALLBACK_MODEL,
       ok: true,
       result: {
         // User-facing message — engine name stripped. Broker sees
@@ -190,13 +199,13 @@ async function runGPT(text: string, fileName: string): Promise<EngineRun> {
       },
       error: null,
       elapsed_ms: Date.now() - t0,
-      input_tokens: completion.usage?.prompt_tokens ?? null,
-      output_tokens: completion.usage?.completion_tokens ?? null,
+      input_tokens: (message as any).usage?.input_tokens ?? null,
+      output_tokens: (message as any).usage?.output_tokens ?? null,
     };
   } catch (e: any) {
     return {
-      engine: 'gpt',
-      model: 'gpt-4o-mini',
+      engine: 'claude_text',
+      model: TEXT_FALLBACK_MODEL,
       ok: false,
       result: null,
       error: e?.message || String(e),
@@ -355,16 +364,19 @@ async function logRun(args: {
     fieldsFilledPct = possible > 0 ? (filled / possible) * 100 : null;
   }
 
-  // Anthropic costs (per million tokens, mid-2026 published):
-  //   Sonnet 4.5: $3.00 input, $15.00 output
-  // OpenAI gpt-4o-mini (current):
-  //   $0.15 input, $0.60 output
+  // Anthropic costs per million tokens (published, keyed by model so
+  // the primary and text-fallback engines price independently):
+  //   claude-sonnet-4-5: $3.00 input, $15.00 output
+  //   claude-opus-5-5:   $4.00 input, $20.00 output
+  const PRICES: Record<string, [number, number]> = {
+    'claude-sonnet-4-5': [3.0, 15.0],
+    'claude-opus-5-5': [4.0, 20.0],
+  };
   let costUsd: number | null = null;
   if (run.input_tokens != null && run.output_tokens != null) {
-    if (run.engine === 'claude') {
-      costUsd = (run.input_tokens * 3.0 + run.output_tokens * 15.0) / 1_000_000;
-    } else if (run.engine === 'gpt') {
-      costUsd = (run.input_tokens * 0.15 + run.output_tokens * 0.6) / 1_000_000;
+    const p = PRICES[run.model];
+    if (p) {
+      costUsd = (run.input_tokens * p[0] + run.output_tokens * p[1]) / 1_000_000;
     }
   }
 
@@ -389,7 +401,7 @@ async function logRun(args: {
     cost_usd: costUsd,
     succeeded: run.ok,
     error_message: run.error,
-    error_stage: run.ok ? null : run.engine === 'gpt' ? 'gpt_extract' : 'claude_extract',
+    error_stage: run.ok ? null : run.engine === 'claude_text' ? 'text_extract' : 'claude_extract',
   });
   if (error) {
     console.error('[orchestrator] extraction_runs insert failed:', error.message);
@@ -455,8 +467,8 @@ export async function POST(request: NextRequest) {
       console.warn('[orchestrator] auth context fetch failed:', e);
     }
 
-    // Parse PDF to text for GPT. Failure here doesn't kill the request —
-    // Claude can still extract from the binary, just GPT can't.
+    // Parse PDF to text for the text fallback. Failure here doesn't kill
+    // the request — the primary extracts from the binary either way.
     let pdfText = '';
     let pageCount: number | null = null;
     let hasLiveText = false;
@@ -472,122 +484,121 @@ export async function POST(request: NextRequest) {
 
     console.log(
       `[orchestrator] ${file.name} · ${sizeMB.toFixed(2)}MB · ${pageCount ?? '?'} pages · ` +
-        `live text ${hasLiveText ? '✓' : '✗'} · Claude primary, GPT fallback`,
+        `live text ${hasLiveText ? '✓' : '✗'} · native-PDF primary, text fallback`,
     );
 
-    // ─── Claude primary, GPT as fallback ─────────────────────────────
+    // ─── Native-PDF primary, text path as fallback ───────────────────
     //
     // History of this decision:
     //   v1: parallel race (Stripe shadow pattern) — both engines run,
-    //       result waits for max(GPT, Claude). Robust but slow.
-    //   v2: GPT primary, Claude fallback only — fast on success but
-    //       silently dropped extraction on TYPE-A appraiser comp sheets
-    //       with 2-column layouts. The text pdf-parse spits out is
-    //       label-column-then-value-column, which text-only GPT can't
-    //       reliably align. We confirmed 4 of 12 Frio Farms PDFs
-    //       returned 0 comps via the GPT-text path (Wesla, Wright,
+    //       result waits for max(text, native-PDF). Robust but slow.
+    //   v2: text path primary, native-PDF fallback only — fast on
+    //       success but silently dropped extraction on TYPE-A appraiser
+    //       comp sheets with 2-column layouts. The text pdf-parse spits
+    //       out is label-column-then-value-column, which a text-only
+    //       model can't reliably align. We confirmed 4 of 12 Frio Farms
+    //       PDFs returned 0 comps via the text path (Wesla, Wright,
     //       Bagan, VC5) — all of which were extracted correctly in May
     //       by the legacy /api/import-chat vision path that's since
     //       been deleted. Christina's exact use case was the
     //       regression.
-    //   v3 (this): Claude primary. Claude reads the PDF binary
+    //   v3 (this): native-PDF primary. Claude reads the PDF binary
     //       directly via Anthropic's native PDF support — it sees the
     //       2-column layout the way a human does, not as a jumbled
     //       text dump. Verified 12 of 12 Frio Farms + Thorndale all
-    //       extract cleanly via Claude. GPT remains the fallback for
-    //       the rare case Claude itself errors (auth, rate limit,
-    //       Anthropic outage).
+    //       extract cleanly. The text path remains the fallback for
+    //       the rare case the primary itself errors.
     //
-    // Latency trade-off: Claude on a 2-page comp sheet runs ~27s vs
-    // GPT-text ~12s. The 15s extra is the price of reliability — the
+    // Latency trade-off: native-PDF on a 2-page comp sheet runs ~27s vs
+    // text ~12s. The 15s extra is the price of reliability — the
     // alternative is silently returning 0 comps to the broker on
     // every other upload. We'll add per-comp progress streaming later
     // to make the wait feel shorter, but never trade correctness for
     // perceived speed.
     const claudeRun = await runClaude(buffer, file.name);
 
-    let gptRun: EngineRun;
+    let textRun: EngineRun;
     const claudeCompsCount = claudeRun.result?.comps?.length ?? 0;
     const claudeHasUsableResults = claudeRun.ok && claudeCompsCount > 0;
 
     if (claudeHasUsableResults) {
-      // Claude succeeded — skip GPT entirely. Stub a placeholder run
-      // so the telemetry + diagnostic shape doesn't need a separate
-      // path.
-      gptRun = {
-        engine: 'gpt',
-        model: 'gpt-4o-mini',
+      // Primary succeeded — skip the fallback entirely. Stub a
+      // placeholder run so the telemetry + diagnostic shape doesn't
+      // need a separate path.
+      textRun = {
+        engine: 'claude_text',
+        model: TEXT_FALLBACK_MODEL,
         ok: false,
         result: null,
-        error: 'skipped: Claude primary succeeded',
+        error: 'skipped: native-PDF primary succeeded',
         elapsed_ms: 0,
         input_tokens: null,
         output_tokens: null,
       };
     } else {
       console.log(
-        `[orchestrator] ${file.name} · Claude ${claudeRun.ok ? 'returned 0 comps' : `failed (${claudeRun.error})`}, falling back to GPT-text`,
+        `[orchestrator] ${file.name} · primary ${claudeRun.ok ? 'returned 0 comps' : `failed (${claudeRun.error})`}, falling back to text path`,
       );
-      gptRun = await runGPT(pdfText, file.name);
+      textRun = await runTextFallback(pdfText, file.name);
     }
 
     const elapsedMs = Date.now() - startTime;
 
     // ─── Failure-condition ladder ────────────────────────────────────
-    let primary: 'gpt' | 'claude';
+    let primary: 'claude_text' | 'claude';
     let routingReason: string;
     let chosen: ExtractionResult;
 
-    const gptCompCount = gptRun.result?.comps?.length ?? 0;
+    const textCompCount = textRun.result?.comps?.length ?? 0;
     const claudeCompCount = claudeRun.result?.comps?.length ?? 0;
-    const gptHasResults = gptRun.ok && gptCompCount > 0;
+    const textHasResults = textRun.ok && textCompCount > 0;
     const claudeHasResults = claudeRun.ok && claudeCompCount > 0;
 
     // Selection ladder: trust Claude when it returned comps (it's the
     // primary engine — native PDF reader, layout-robust). Fall through
-    // to GPT only when Claude couldn't get the job done. The legacy
-    // "claudeFoundMoreComps" tiebreaker is gone — under the new shape
-    // GPT only runs when Claude already failed, so a comp-count
-    // disagreement isn't possible on the success path.
+    // to the text path only when the primary couldn't get the job
+    // done. The legacy "claudeFoundMoreComps" tiebreaker is gone —
+    // under the new shape the fallback only runs when the primary
+    // already failed, so a comp-count disagreement isn't possible on
+    // the success path.
     if (claudeHasResults) {
-      // Claude is the primary engine — if it returned comps, use them.
-      // Don't second-guess with GPT comparison: Claude reads the PDF
-      // natively (vision-equivalent), GPT reads pdf-parse text that
-      // breaks on 2-column layouts. When both ran (Claude succeeded
-      // AND GPT was somehow also invoked), we still trust Claude.
+      // The native-PDF primary returned comps — use them. Don't
+      // second-guess with a text-path comparison: the primary reads
+      // the PDF natively (vision-equivalent), the fallback reads
+      // pdf-parse text that breaks on 2-column layouts.
       primary = 'claude';
       routingReason = 'claude_primary_success';
       chosen = claudeRun.result!;
-    } else if (gptHasResults) {
-      // Claude empty or errored, GPT recovered with results.
-      primary = 'gpt';
+    } else if (textHasResults) {
+      // Primary empty or errored, text fallback recovered with results.
+      primary = 'claude_text';
       if (!claudeRun.ok) {
-        routingReason = `gpt_fallback_after_claude_${claudeRun.error?.includes('timeout') ? 'timeout' : 'error'}`;
+        routingReason = `text_fallback_after_claude_${claudeRun.error?.includes('timeout') ? 'timeout' : 'error'}`;
       } else {
-        routingReason = 'gpt_fallback_claude_zero_comps';
+        routingReason = 'text_fallback_claude_zero_comps';
       }
-      chosen = gptRun.result!;
+      chosen = textRun.result!;
     } else if (claudeRun.ok) {
-      // Both ran, both returned 0 comps. Show Claude's empty-result
-      // message (it's our primary engine).
+      // Both ran, both returned 0 comps. Show the primary's
+      // empty-result message.
       primary = 'claude';
       routingReason = 'both_zero_comps';
       chosen = claudeRun.result!;
-    } else if (gptRun.ok) {
-      // Claude errored, GPT returned a result (even 0). Use GPT.
-      primary = 'gpt';
-      routingReason = 'gpt_fallback_claude_error';
-      chosen = gptRun.result!;
+    } else if (textRun.ok) {
+      // Primary errored, text fallback returned a result (even 0).
+      primary = 'claude_text';
+      routingReason = 'text_fallback_claude_error';
+      chosen = textRun.result!;
     } else {
       // Both failed. Surface a clean error.
       console.error(
         `[orchestrator] BOTH engines failed. ` +
-          `gpt=${gptRun.error} · claude=${claudeRun.error}`,
+          `text=${textRun.error} · claude=${claudeRun.error}`,
       );
       // Still log both failures for telemetry.
       await Promise.allSettled([
         logRun({
-          run: gptRun,
+          run: textRun,
           user_id: userId,
           team_id: teamId,
           sha256,
@@ -619,7 +630,7 @@ export async function POST(request: NextRequest) {
             "Extraction failed on both engines. The PDF may be corrupt, password-protected, or in an unsupported format. Try a different file.",
           comps: null,
           diagnostic: {
-            gpt_error: gptRun.error,
+            text_error: textRun.error,
             claude_error: claudeRun.error,
             elapsed_ms: elapsedMs,
           },
@@ -632,7 +643,7 @@ export async function POST(request: NextRequest) {
     const docType = (chosen.diagnostic?.document_type as string) ?? null;
     Promise.allSettled([
       logRun({
-        run: gptRun,
+        run: textRun,
         user_id: userId,
         team_id: teamId,
         sha256,
@@ -642,7 +653,7 @@ export async function POST(request: NextRequest) {
         doc_type: docType,
         has_live_text: hasLiveText,
         routing_reason: routingReason,
-        was_shown_to_user: primary === 'gpt',
+        was_shown_to_user: primary === 'claude_text',
       }),
       logRun({
         run: claudeRun,
@@ -661,7 +672,7 @@ export async function POST(request: NextRequest) {
 
     console.log(
       `[orchestrator] ${file.name} · primary=${primary} · reason=${routingReason} · ` +
-        `gpt: ${gptRun.ok ? `${gptRun.result?.comps.length ?? 0} comps in ${(gptRun.elapsed_ms / 1000).toFixed(1)}s` : `FAIL: ${gptRun.error}`} · ` +
+        `text: ${textRun.ok ? `${textRun.result?.comps.length ?? 0} comps in ${(textRun.elapsed_ms / 1000).toFixed(1)}s` : `FAIL: ${textRun.error}`} · ` +
         `claude: ${claudeRun.ok ? `${claudeRun.result?.comps.length ?? 0} comps in ${(claudeRun.elapsed_ms / 1000).toFixed(1)}s` : `FAIL: ${claudeRun.error}`} · ` +
         `total ${(elapsedMs / 1000).toFixed(1)}s`,
     );
@@ -769,13 +780,13 @@ export async function POST(request: NextRequest) {
         elapsed_ms: elapsedMs,
         page_count: pageCount,
         has_live_text: hasLiveText,
-        gpt: {
-          ok: gptRun.ok,
-          comps: gptRun.result?.comps.length ?? 0,
-          elapsed_ms: gptRun.elapsed_ms,
-          input_tokens: gptRun.input_tokens,
-          output_tokens: gptRun.output_tokens,
-          error: gptRun.error,
+        text_fallback: {
+          ok: textRun.ok,
+          comps: textRun.result?.comps.length ?? 0,
+          elapsed_ms: textRun.elapsed_ms,
+          input_tokens: textRun.input_tokens,
+          output_tokens: textRun.output_tokens,
+          error: textRun.error,
         },
         claude: {
           ok: claudeRun.ok,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
 // Vision-based page classifier for multi-comp PDFs.
 //
@@ -9,13 +9,19 @@ import OpenAI from 'openai';
 // IMAGES and reads them the way a human would, returning a structured
 // classification per page that the import flow assembles into a CompMap.
 //
+// Engine history: originally OpenAI gpt-4o-mini vision with a strict
+// json_schema response_format. Swapped to Claude (claude-opus-5-5) when
+// the OpenAI account ran dry — rules kept verbatim, the structured
+// response now arrives via a strict tool call (same pattern as the
+// extraction routes' submit_comps).
+//
 // Design choices, in order of importance:
 //
-// 1. SINGLE BATCHED CALL. Earlier draft fanned out one OpenAI call per
+// 1. SINGLE BATCHED CALL. Earlier draft fanned out one model call per
 //    page. That hit two real production limits:
 //      • Vercel serverless body limit is 4.5MB. Ten high-res page
 //        images don't fit.
-//      • Ten parallel calls per PDF spike OpenAI rate limits unnecessarily.
+//      • Ten parallel calls per PDF spike rate limits unnecessarily.
 //    Now: ONE call receives all pages in one multi-part user message,
 //    one response returns an array of N classifications. One round trip,
 //    one rate-limit cost, one body to size-budget.
@@ -26,32 +32,23 @@ import OpenAI from 'openai';
 //    the high-res images used for downstream extraction. Body stays well
 //    under the 4.5MB limit even on long documents.
 //
-// 3. HIGH DETAIL VISION. 'low' detail downsamples to 512×512 which is
-//    insufficient for small/stylized header text. 'high' detail costs
-//    ~12× more but lands us at ~$0.005 per PDF total — still trivial.
-//    Quality of the boundary signal matters more than cost here.
+// 3. STRICT TOOL SCHEMA. The response shape is locked at the model
+//    layer (strict: true). The model can't drift, omit fields, or
+//    return strings where integers are expected. Output is safe to
+//    consume without defensive parsing.
 //
-// 4. STRICT JSON SCHEMA. The response shape is locked at the model
-//    layer. The model can't drift, omit fields, or return strings where
-//    integers are expected. Output is safe to consume without
-//    defensive parsing.
-//
-// 5. PER-PAGE FAILURE TOLERANCE INSIDE A SINGLE CALL. The model
+// 4. PER-PAGE FAILURE TOLERANCE INSIDE A SINGLE CALL. The model
 //    classifies all pages in one response. If any individual page is
 //    ambiguous, the model returns role='other' for it — never throws.
 //    Network/quota failures fail the WHOLE call (which the caller
 //    handles by falling back to regex).
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
-// Retry with exponential backoff for transient OpenAI errors (429 rate
+// Retry with exponential backoff for transient API errors (429 rate
 // limits, 500-level transient failures). Cap at 3 attempts so we don't
 // burn the entire serverless function timeout on retries.
-//
-// 429 from OpenAI usually means "TPM saturated in last 60s." The error
-// message often includes a "try again in X" hint we honor when present.
-// For other transient codes, exponential backoff (5s → 10s → 20s).
-async function callOpenAIWithRetry<T>(fn: () => Promise<T>, attempt = 1): Promise<T> {
+async function callWithRetry<T>(fn: () => Promise<T>, attempt = 1): Promise<T> {
   try {
     return await fn();
   } catch (err: any) {
@@ -68,19 +65,19 @@ async function callOpenAIWithRetry<T>(fn: () => Promise<T>, attempt = 1): Promis
       const hinted = waitMatch[2].toLowerCase() === 's' ? n * 1000 : n;
       waitMs = Math.max(waitMs, hinted);
     }
-    // Cap the wait so we don't blow the 60s function timeout.
+    // Cap the wait so we don't blow the function timeout on retries.
     waitMs = Math.min(waitMs, 30_000);
 
     console.warn(
-      `[classify-pdf-pages] OpenAI ${status} on attempt ${attempt}, ` +
+      `[classify-pdf-pages] API ${status} on attempt ${attempt}, ` +
       `retrying in ${(waitMs / 1000).toFixed(1)}s`
     );
     await new Promise((r) => setTimeout(r, waitMs));
-    return callOpenAIWithRetry(fn, attempt + 1);
+    return callWithRetry(fn, attempt + 1);
   }
 }
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Per-page classification. See SYSTEM_PROMPT for the semantics of each
 // role and the rules for comp_index / comp_label.
@@ -107,17 +104,25 @@ const PAGE_CLASSIFICATION_SCHEMA = {
   required: ['page', 'role', 'comp_index', 'comp_label', 'evidence'],
 } as const;
 
-// Top-level response: a flat array of N page classifications.
-const RESPONSE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    pages: {
-      type: 'array',
-      items: PAGE_CLASSIFICATION_SCHEMA,
+// Tool input: a flat array of N page classifications. Strict mode locks
+// the shape exactly like the old OpenAI json_schema response_format did.
+const SUBMIT_CLASSIFICATIONS_TOOL = {
+  name: 'submit_classifications',
+  description:
+    'Submit the final classification for every page of the document. ' +
+    'Call exactly once, with one entry per input page, in page order.',
+  strict: true,
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      pages: {
+        type: 'array',
+        items: PAGE_CLASSIFICATION_SCHEMA,
+      },
     },
+    required: ['pages'],
   },
-  required: ['pages'],
 } as const;
 
 interface PageClassification {
@@ -176,8 +181,17 @@ comp_label rules:
 
 evidence: one sentence stating what specific text or visual element drove your decision.
 
-Return {pages: [{page, role, comp_index, comp_label, evidence}, ...]} with one entry per \
+When you are done, call submit_classifications exactly once with \
+{pages: [{page, role, comp_index, comp_label, evidence}, ...]} — one entry per \
 input image in page order.`;
+
+// Split a data:image/...;base64,XXXX URL into the media type and raw
+// base64 payload Anthropic's image blocks expect.
+function parseDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
+  const m = dataUrl.match(/^data:(image\/[a-z+.-]+);base64,(.+)$/i);
+  if (!m) return null;
+  return { mediaType: m[1].toLowerCase(), data: m[2] };
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -208,66 +222,72 @@ export async function POST(request: NextRequest) {
     }
     const pageImages = images as string[];
 
-    // Single multi-part user message: text instruction + one image_url
-    // entry per page. Detail 'high' so the model can read small / stylized
-    // header text (the 'low' setting downsamples to 512×512, which loses
-    // header detail in real-world appraisal layouts).
-    const userContent: Array<
-      | { type: 'text'; text: string }
-      | { type: 'image_url'; image_url: { url: string; detail: 'high' } }
-    > = [
+    // Single multi-part user message: text instruction + one image block
+    // per page. Claude reads images at native resolution (no detail
+    // knob) — the caller's pre-downscaled 612x792 pages keep header
+    // text legible while staying under the body limit.
+    const imageBlocks: Anthropic.ImageBlockParam[] = [];
+    for (const url of pageImages) {
+      const parsed = parseDataUrl(url);
+      if (!parsed) {
+        return NextResponse.json(
+          { error: 'each image must be a base64 data:image/... URL' },
+          { status: 400 }
+        );
+      }
+      imageBlocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: parsed.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+          data: parsed.data,
+        },
+      });
+    }
+
+    const userContent: Anthropic.ContentBlockParam[] = [
       {
         type: 'text',
         text:
           `Classify all ${pageImages.length} pages of this document. ` +
-          `Return one classification per page, in page order, in the 'pages' array.`,
+          `Return one classification per page, in page order, in the 'pages' array, ` +
+          `by calling submit_classifications exactly once.`,
       },
-      ...pageImages.map((url) => ({
-        type: 'image_url' as const,
-        image_url: { url, detail: 'high' as const },
-      })),
+      ...imageBlocks,
     ];
 
-    // Retry with backoff on OpenAI rate limits. The TPM cap is a rolling
-    // 60s window; when long-appraisal classification fans out into
-    // multiple parallel batches (visionBoundaryDetection batches 60+
-    // page PDFs), it's possible to spike past the limit for a moment.
-    // Backing off and retrying is the right behavior — fail-fast would
-    // turn what's actually a transient slowdown into a no-result-found
-    // for the broker.
-    const completion = await callOpenAIWithRetry(async () =>
-      openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+    // Retry with backoff on rate limits. When long-appraisal
+    // classification fans out into multiple parallel batches
+    // (visionBoundaryDetection batches 60+ page PDFs), it's possible to
+    // spike past the limit for a moment. Backing off and retrying is
+    // the right behavior — fail-fast would turn what's actually a
+    // transient slowdown into a no-result-found for the broker.
+    const message = await callWithRetry(async () =>
+      anthropic.messages.create({
+        model: 'claude-opus-5-5',
         // Generous budget — each page classification is ~50-80 tokens out;
         // 6000 covers 30 pages comfortably plus structural overhead.
         max_tokens: 6000,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'pdf_page_classifications',
-            strict: true,
-            schema: RESPONSE_SCHEMA,
-          },
-        },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
-        ],
-      })
+        system: SYSTEM_PROMPT,
+        tools: [SUBMIT_CLASSIFICATIONS_TOOL],
+        messages: [{ role: 'user', content: userContent }],
+      } as any)
     );
 
-    const text = completion.choices[0]?.message?.content || '{"pages":[]}';
-    let parsed: { pages: PageClassification[] };
-    try {
-      parsed = JSON.parse(text);
-    } catch (parseErr) {
-      console.error('[classify-pdf-pages] JSON parse failed:', parseErr, text.slice(0, 500));
+    const toolUse = (message.content as any[]).find(
+      (b) => b.type === 'tool_use' && b.name === 'submit_classifications'
+    );
+    if (!toolUse) {
+      console.error(
+        `[classify-pdf-pages] model did not call submit_classifications (stop_reason=${(message as any).stop_reason})`
+      );
       return NextResponse.json(
-        { error: 'classifier returned unparseable JSON' },
+        { error: 'classifier returned no structured result' },
         { status: 502 }
       );
     }
 
+    const parsed = toolUse.input as { pages: PageClassification[] };
     const out = Array.isArray(parsed?.pages) ? parsed.pages : [];
 
     // Sanity: the model SHOULD return exactly one classification per input
