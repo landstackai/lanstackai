@@ -481,6 +481,55 @@ export default function MapPage() {
     }
   }, [selectedComp, savingListing, supabase]);
 
+  // Accept a medium-confidence auto-match suggestion: promote it to
+  // source_url (the agent's confirmation is what upgrades it from
+  // "suggested" to the source of record).
+  const acceptSuggestedListing = useCallback(async () => {
+    const url = (selectedComp as any)?.suggested_listing_url;
+    if (!selectedComp || !url || savingListing) return;
+    setSavingListing(true);
+    try {
+      const patch = {
+        source_url: url,
+        suggested_listing_url: null,
+        listing_match_confidence: 'medium_confirmed',
+      };
+      const { error } = await supabase.from('comps').update(patch).eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Save failed: ${error.message}`);
+        return;
+      }
+      toast.success('Listing confirmed');
+      setSelectedComp({ ...selectedComp, ...patch } as Comp);
+      setComps((prev) => prev.map((c) => (c.id === selectedComp.id ? { ...c, ...patch } : c)));
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
+
+  // Dismiss a suggestion: clear it so it stops nagging. The manual
+  // Find button can always re-search later.
+  const dismissSuggestedListing = useCallback(async () => {
+    if (!selectedComp || savingListing) return;
+    setSavingListing(true);
+    try {
+      const patch = {
+        suggested_listing_url: null,
+        listing_match_confidence: null,
+        listing_match_reason: null,
+      };
+      const { error } = await supabase.from('comps').update(patch).eq('id', selectedComp.id);
+      if (error) {
+        toast.error(`Dismiss failed: ${error.message}`);
+        return;
+      }
+      setSelectedComp({ ...selectedComp, ...patch } as Comp);
+      setComps((prev) => prev.map((c) => (c.id === selectedComp.id ? { ...c, ...patch } : c)));
+    } finally {
+      setSavingListing(false);
+    }
+  }, [selectedComp, savingListing, supabase]);
+
   useEffect(() => {
     let cancelled = false;
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -7607,6 +7656,50 @@ export default function MapPage() {
                       title="Remove the saved listing URL"
                     >
                       Remove
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* SUGGESTED state — a medium-confidence auto-match waiting
+                  on the agent. Shows the model's reason so the agent
+                  knows WHY it matched; Use → promotes to source_url,
+                  Dismiss → clears. High-confidence auto-matches never
+                  land here — they save directly as source_url. */}
+              {!selectedComp.source_url && (selectedComp as any).suggested_listing_url && !listingCandidate && !pasteUrlMode && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-amber-800 text-[10px] font-bold uppercase tracking-wide">
+                    <Sparkles size={11} />
+                    Possible listing match — verify
+                  </div>
+                  <a
+                    href={(selectedComp as any).suggested_listing_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-amber-900 hover:underline break-all text-[11px] flex items-start gap-1.5"
+                  >
+                    <ExternalLink size={11} className="flex-shrink-0 mt-0.5" />
+                    <span>{(selectedComp as any).suggested_listing_url}</span>
+                  </a>
+                  {(selectedComp as any).listing_match_reason && (
+                    <div className="text-[10px] text-amber-800/80 leading-snug">
+                      {(selectedComp as any).listing_match_reason}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <button
+                      onClick={acceptSuggestedListing}
+                      disabled={savingListing}
+                      className="text-[11px] font-semibold text-white bg-olive hover:bg-olive-2 rounded px-2.5 py-1 disabled:opacity-50"
+                    >
+                      Use this link
+                    </button>
+                    <button
+                      onClick={dismissSuggestedListing}
+                      disabled={savingListing}
+                      className="text-[10px] text-ink-3 hover:text-red-700 underline disabled:opacity-50"
+                    >
+                      Dismiss
                     </button>
                   </div>
                 </div>

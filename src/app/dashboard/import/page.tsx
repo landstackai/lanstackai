@@ -3055,6 +3055,23 @@ export default function ImportPage() {
       const id = results[i]?.id;
       if (id) (c as any)._savedId = id;
     });
+
+    // Auto listing match — fire-and-forget per saved comp. High-
+    // confidence matches write source_url server-side; medium ones
+    // land in suggested_listing_url for agent confirm/dismiss on the
+    // comp panel. Deliberately NOT awaited: each search takes 30-60s
+    // and must never hold up the import flow. Failures are silent —
+    // the manual "Find listing online" button still exists.
+    for (const c of comps) {
+      const id = (c as any)._savedId;
+      if (!id || (c as any)._listingMatchFired) continue;
+      (c as any)._listingMatchFired = true;
+      fetch(`/api/comp/${id}/find-listing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'auto' }),
+      }).catch(() => {});
+    }
   };
 
   const saveComp = async (
