@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { geocodeComps } from '@/lib/utils/geocode';
 import { autoLocateFromMetadata } from '@/lib/utils/autoLocate';
 import {
@@ -10,19 +10,21 @@ import {
   mergeFeatures,
   selectBoundaryByAcreage,
 } from '@/lib/utils/countyParcels';
-import {
-  IMPORT_RESPONSE_FORMAT,
-  isSchemaExtractionEnabled,
-} from '@/lib/utils/compExtractionSchema';
+import { IMPORT_RESPONSE_SCHEMA } from '@/lib/utils/compExtractionSchema';
 
-export const maxDuration = 120; // vision + multi-page extraction can run up to 60–90s
+export const maxDuration = 300; // vision + multi-page extraction; headroom over the old 120 since the swapped engine runs longer per call
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Engine history: this route ran on OpenAI gpt-4o (vision + json_object/
+// json_schema response formats) until 2026-10, when the OpenAI account
+// ran dry and image imports started failing with HTTP 500. Engine
+// swapped to Claude; IMPORT_SYSTEM_PROMPT and all downstream
+// post-processing (acres override, math gate, holdings merge) are
+// unchanged.
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// Exported so the orchestrator route (which runs GPT + Claude in
-// parallel on every PDF upload) can reuse the same prompt that powers
-// the legacy /api/import-chat path. Single source of truth for GPT's
-// extraction behavior across both endpoints.
+// Exported so the orchestrator route can reuse the same prompt that
+// powers the legacy /api/import-chat path. Single source of truth for
+// text-path extraction behavior across both endpoints.
 export const IMPORT_SYSTEM_PROMPT = `You are Landstack AI — a land and ranch real estate data extraction specialist built for Texas land brokers.
 
 Your job is to:
@@ -351,101 +353,113 @@ export async function POST(request: NextRequest) {
   try {
     const { messages, documentContent, images } = await request.json();
 
-    const systemMessages = [
-      { role: 'system' as const, content: IMPORT_SYSTEM_PROMPT },
-    ];
+    // Split a data:image/...;base64,XXXX URL into the media type and
+    // raw base64 payload Anthropic's image blocks expect.
+    const parseDataUrl = (dataUrl: string) => {
+      const m = dataUrl.match(/^data:(image\/[a-z+.-]+);base64,(.+)$/i);
+      if (!m) return null;
+      return { mediaType: m[1].toLowerCase(), data: m[2] };
+    };
 
     // Replace the final user turn with document context when provided.
     // Image array → multimodal content. documentContent → text. Plain chat → unchanged.
     const lastIdx = messages.length - 1;
-    const processedMessages = messages.map((m: any, i: number) => {
+    const processedMessages: Anthropic.MessageParam[] = messages.map((m: any, i: number) => {
       const isLastUser = i === lastIdx && m.role === 'user';
       if (isLastUser && Array.isArray(images) && images.length > 0) {
-        const parts: any[] = [
+        const parts: Anthropic.ContentBlockParam[] = [
           {
             type: 'text',
             text:
               'Please extract all comparable sales from this document. ' +
               'Each page is provided as an image below. Read carefully — ' +
-              'tables, handwriting, and stamps may all contain key data.',
+              'tables, handwriting, and stamps may all contain key data. ' +
+              'Call submit_comps exactly once with the full result.',
           },
-          ...images.map((url: string) => ({
-            type: 'image_url',
-            image_url: { url, detail: 'high' as const },
-          })),
+          ...images.flatMap((url: string): Anthropic.ContentBlockParam[] => {
+            const img = parseDataUrl(url);
+            if (!img) return [];
+            return [{
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: img.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+                data: img.data,
+              },
+            }];
+          }),
         ];
         return { role: 'user' as const, content: parts };
       }
       if (isLastUser && documentContent) {
         return {
           role: 'user' as const,
-          content: `Please extract all comparable sales from this document:\n\n${documentContent}`,
+          content:
+            `Please extract all comparable sales from this document. ` +
+            `Call submit_comps exactly once with the full result:\n\n${documentContent}`,
         };
       }
       return { role: m.role as 'user' | 'assistant', content: m.content };
     });
 
-    // Phase 2b.2 — feature-flagged schema-locked extraction. When
-    // USE_SCHEMA_EXTRACTION is set, the model is bound to a strict
-    // JSON Schema (src/lib/utils/compExtractionSchema.ts) that enforces
-    // field types at the model level: numeric fields must be numbers,
-    // enum fields must use one of the allowed strings, etc.
-    //
-    // SAFETY FALLBACK: if OpenAI rejects the schema (validation error,
-    // strict-mode violation, unsupported keyword), we automatically
-    // fall back to plain json_object mode and retry. That way a bad
-    // schema can NEVER bring down extraction — the worst case is we
-    // lose the type-level safety net for that one request and revert
-    // to the looser-but-working JSON mode that's been running all year.
-    // Triggered the first time when an over-permissive
-    // `additionalProperties: true` on a sub-object made OpenAI reject
-    // every request with HTTP 500 for ~30 min — a fallback would
-    // have masked the bug instantly.
-    const useSchema = isSchemaExtractionEnabled();
-    let completion;
-    if (useSchema) {
-      try {
-        completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
-          max_tokens: 4000,
-          response_format: IMPORT_RESPONSE_FORMAT,
-          messages: [...systemMessages, ...processedMessages],
-        });
-        console.log('[import-chat] used schema-locked extraction format');
-      } catch (schemaErr: any) {
-        console.warn(
-          '[import-chat] schema-locked mode rejected by OpenAI ' +
-          `(${schemaErr?.message || 'unknown'}) — falling back to json_object mode`
-        );
-        completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
-          max_tokens: 4000,
-          response_format: { type: 'json_object' },
-          messages: [...systemMessages, ...processedMessages],
-        });
-      }
-    } else {
-      completion = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        max_tokens: 4000,
-        response_format: { type: 'json_object' },
-        messages: [...systemMessages, ...processedMessages],
-      });
-    }
+    // Schema-locked extraction via the submit_comps tool — the same
+    // IMPORT_RESPONSE_SCHEMA the OpenAI json_schema mode enforced, now
+    // provided as a (non-strict) tool. Anthropic strict mode rejects
+    // this schema's nullable-enum idiom and its 33 nullable fields
+    // exceed the 16-union strict limit; non-strict matches the
+    // production SUBMIT_COMPS_TOOL pattern that runs daily. tool_choice
+    // stays auto so a plain chat turn ("what county is X in?") can be
+    // answered in text without a forced empty extraction — the text
+    // path below handles that case exactly like the legacy json_object
+    // parser did.
+    const aiResponse = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
+      // 16k, not the old 4k — 6-comp appraisals were at the truncation
+      // boundary (same floor rationale as the orchestrator).
+      max_tokens: 16000,
+      system: IMPORT_SYSTEM_PROMPT,
+      tools: [{
+        name: 'submit_comps',
+        description:
+          'Submit the full extraction result. Call exactly once with the ' +
+          'message and every comparable sale found in the document.',
+        input_schema: IMPORT_RESPONSE_SCHEMA,
+      }],
+      messages: processedMessages,
+    } as any);
 
-    const responseText = completion.choices[0]?.message?.content || '{}';
+    const toolUse = (aiResponse.content as any[]).find(
+      (b) => b.type === 'tool_use' && b.name === 'submit_comps',
+    );
+    const responseText = (aiResponse.content as any[])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
 
     let parsed: any = {};
-    try {
-      parsed = JSON.parse(responseText);
-    } catch (e) {
-      // Fallback: try to find a `{...}` block in case the model wrapped it
-      const m = responseText.match(/\{[\s\S]*\}/);
-      if (m) {
-        try { parsed = JSON.parse(m[0]); } catch {}
-      }
-      if (!parsed || typeof parsed !== 'object') {
-        console.error('Failed to parse model JSON:', e, responseText.slice(0, 500));
+    if (toolUse) {
+      parsed = toolUse.input || {};
+    } else {
+      // No tool call — a plain chat answer, or the model wrote JSON as
+      // text. Try strict parse, then a {...} block, then fall back to
+      // treating the text as the chat message (comps: null keeps the
+      // "no extraction" semantics downstream).
+      try {
+        parsed = JSON.parse(responseText);
+      } catch (e) {
+        const m = responseText.match(/\{[\s\S]*\}/);
+        if (m) {
+          try { parsed = JSON.parse(m[0]); } catch {}
+        }
+        if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length === 0) {
+          parsed = responseText
+            ? { message: responseText, comps: null }
+            : {};
+          if (!responseText) {
+            console.error('Model returned neither submit_comps nor text:', JSON.stringify(aiResponse.content).slice(0, 500));
+          }
+        }
       }
     }
 
