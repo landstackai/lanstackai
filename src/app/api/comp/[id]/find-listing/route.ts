@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-export const maxDuration = 30;
+// Web search + verification can take a while; match the import routes.
+export const maxDuration = 120;
 
 // Auto-find a listing URL on Zillow / Realtor.com / Land.com for a saved comp
-// using OpenAI's web-search-enabled model. Saves to comps.source_url.
+// using Claude with the server-side web search tool. Previously ran on
+// OpenAI's gpt-4o-search-preview, which OpenAI retired (404 model_not_found)
+// — switched to Anthropic, which also powers the PDF extraction pipeline.
 export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
   const supabase = createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -50,11 +53,12 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
     comp.grantee ? `Bought by: ${comp.grantee}` : null,
   ].filter(Boolean).join(' · ');
 
+  // realtor.com blocks Anthropic's crawler — the API rejects it in
+  // allowed_domains, so it's excluded from the search entirely.
   const prompt = `Find a real estate listing on one of these sites that matches this Texas land property:
 - landsofamerica.com   (preferred for ranches / large land tracts)
 - landwatch.com        (preferred for ranches / large land tracts)
 - land.com             (preferred for ranches / large land tracts)
-- realtor.com          (general)
 - zillow.com           (general)
 
 CORE FACTS:
@@ -102,10 +106,9 @@ A missing link is far better than a wrong one. Brokers and their clients
 will rely on this output — be conservative on edge cases.
 
 OUTPUT — STRICT FORMAT REQUIREMENT:
-Reply with EXACTLY one line of valid JSON. No prose before or after. No
-markdown. No citation footnotes. The "url" field MUST contain the literal
-URL string (https://...) or be null. Do NOT phrase it as "available on
-Zillow" — paste the URL itself.
+End your reply with EXACTLY one line of valid JSON. No markdown fences.
+The "url" field MUST contain the literal URL string (https://...) or be
+null. Do NOT phrase it as "available on Zillow" — paste the URL itself.
 
 Schema:
 {"url": "https://...", "reason": "short sentence"}
@@ -113,23 +116,44 @@ or
 {"url": null, "reason": "short sentence explaining why no confident match"}`;
 
   try {
-    // Full search-preview model for higher verification accuracy. Cost is
-    // ~3x mini but the user has explicit trust/accuracy requirements: a
-    // wrong link is much worse than a missing link.
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-search-preview',
-      web_search_options: {},
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
+      max_tokens: 4000,
+      // Accuracy over cost: the broker and their clients rely on this link.
+      output_config: { effort: 'high' },
+      tools: [
+        {
+          type: 'web_search_20260209',
+          name: 'web_search',
+          max_uses: 6,
+          allowed_domains: [
+            'landsofamerica.com',
+            'landwatch.com',
+            'land.com',
+            'zillow.com',
+          ],
+        },
+      ],
       messages: [{ role: 'user', content: prompt }],
     } as any);
 
-    const text = (completion.choices[0]?.message?.content || '').trim();
+    // Final answer = concatenated text blocks (search-result blocks are
+    // interleaved in content; we only need Claude's conclusion).
+    const text = (response.content as any[])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+
     // Parse the model's structured response
     let url: string | null = null;
     let reason: string | null = null;
     try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      // Last JSON object in the text is the verdict line.
+      const jsonMatches = text.match(/\{[^{}]*\}/g);
+      const jsonMatch = jsonMatches ? jsonMatches[jsonMatches.length - 1] : null;
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch);
         if (typeof parsed.url === 'string') {
           const m = parsed.url.match(/https?:\/\/(?:[a-z0-9-]+\.)*(zillow|realtor|land|landsofamerica|landwatch)\.com\/[^\s)\]]+/i);
           url = m?.[0]?.replace(/[.,;!?]+$/, '') ?? null;
