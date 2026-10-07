@@ -489,10 +489,20 @@ export default function MapPage() {
     if (!selectedComp || !url || savingListing) return;
     setSavingListing(true);
     try {
+      // Broker rule: confirmed links also append to the description as
+      // a trailing "Listing: <url>" line (idempotent).
+      const desc = selectedComp.description || '';
+      const descWithLink =
+        desc.includes(url) || /Listing: https?:\/\//.test(desc)
+          ? desc
+          : desc.trim()
+            ? `${desc}\n\nListing: ${url}`
+            : `Listing: ${url}`;
       const patch = {
         source_url: url,
         suggested_listing_url: null,
         listing_match_confidence: 'medium_confirmed',
+        description: descWithLink,
       };
       const { error } = await supabase.from('comps').update(patch).eq('id', selectedComp.id);
       if (error) {

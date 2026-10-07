@@ -229,6 +229,16 @@ or
 
     if (mode === 'auto') {
       if (confidence === 'high') {
+        // Broker rule (2026-10-06): attached links also go into the
+        // description as a trailing "Listing: <url>" line so the link
+        // travels with the prose everywhere descriptions render.
+        const desc = comp.description || '';
+        const descWithLink =
+          desc.includes(url) || /Listing: https?:\/\//.test(desc)
+            ? desc
+            : desc.trim()
+              ? `${desc}\n\nListing: ${url}`
+              : `Listing: ${url}`;
         const { error: upErr } = await supabase
           .from('comps')
           .update({
@@ -236,6 +246,7 @@ or
             listing_match_confidence: 'high_auto',
             listing_match_reason: reason,
             suggested_listing_url: null,
+            description: descWithLink,
           })
           .eq('id', comp.id);
         if (upErr) console.error('[find-listing auto] high save failed:', upErr.message);
