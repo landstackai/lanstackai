@@ -56,6 +56,8 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
   // realtor.com blocks Anthropic's crawler — the API rejects it in
   // allowed_domains, so it's excluded from the search entirely.
   const prompt = `Find a real estate listing on one of these sites that matches this Texas land property:
+- westandswoperanches.com  (the broker's own site — check here FIRST; many
+                            comps are West and Swope's own past deals)
 - landsofamerica.com   (preferred for ranches / large land tracts)
 - landwatch.com        (preferred for ranches / large land tracts)
 - land.com             (preferred for ranches / large land tracts)
@@ -87,6 +89,12 @@ just acres + county which are too generic):
 A listing that aligns on water-feature-name + improvements + acreage is a
 HIGH confidence match even if the price or date is fuzzy. A listing that
 shares only acres + county is NOT a match — too many properties qualify.
+
+EXCEPTION — westandswoperanches.com ONLY: on the broker's own site, a
+matching property name + same county + acreage within ±5% is sufficient
+(comps are often the brokerage's own past deals with sparse records, and
+name collisions within one county at the same acreage don't happen on a
+single brokerage's site). This relaxation applies to NO other site.
 
 ROAD NAME EQUIVALENCES (treat as identical):
 - "PR" / "Prvt Rd" / "Private Rd" / "Private Road"  →  same road
@@ -127,6 +135,7 @@ or
           name: 'web_search',
           max_uses: 6,
           allowed_domains: [
+            'westandswoperanches.com',
             'landsofamerica.com',
             'landwatch.com',
             'land.com',
@@ -155,14 +164,14 @@ or
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch);
         if (typeof parsed.url === 'string') {
-          const m = parsed.url.match(/https?:\/\/(?:[a-z0-9-]+\.)*(zillow|realtor|land|landsofamerica|landwatch)\.com\/[^\s)\]]+/i);
+          const m = parsed.url.match(/https?:\/\/(?:[a-z0-9-]+\.)*(zillow|realtor|land|landsofamerica|landwatch|westandswoperanches)\.com\/[^\s)\]]+/i);
           url = m?.[0]?.replace(/[.,;!?]+$/, '') ?? null;
         }
         if (typeof parsed.reason === 'string') reason = parsed.reason.slice(0, 200);
       }
     } catch {
       // Fall back to URL extraction from raw text
-      const m = text.match(/https?:\/\/(?:[a-z0-9-]+\.)*(zillow|realtor|land|landsofamerica|landwatch)\.com\/[^\s)\]]+/i);
+      const m = text.match(/https?:\/\/(?:[a-z0-9-]+\.)*(zillow|realtor|land|landsofamerica|landwatch|westandswoperanches)\.com\/[^\s)\]]+/i);
       url = m?.[0]?.replace(/[.,;!?]+$/, '') ?? null;
     }
 
