@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import * as cheerio from 'cheerio';
 
 /**
@@ -34,7 +34,7 @@ import * as cheerio from 'cheerio';
 
 export const maxDuration = 30;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Realistic User-Agent so listing sites don't return a 403/bot page.
 // Most sites differentiate between obvious bots (curl, requests) and
@@ -44,8 +44,8 @@ const USER_AGENT =
   '(KHTML, like Gecko) Version/17.0 Safari/605.1.15';
 
 export async function POST(req: NextRequest) {
-  if (!process.env.OPENAI_API_KEY) {
-    return NextResponse.json({ error: 'openai key not configured' }, { status: 500 });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: 'anthropic key not configured' }, { status: 500 });
   }
 
   let body: any;
@@ -163,15 +163,14 @@ export async function POST(req: NextRequest) {
 
   let comp: any = null;
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-2024-08-06',
-      temperature: 0,
-      response_format: { type: 'json_object' },
+    // temperature:0 dropped — the parameter is removed on current
+    // Claude models (400 if sent). The old json_object response format
+    // is replaced by an explicit ONLY-JSON instruction + tolerant parse.
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
+      max_tokens: 4000,
+      system: LISTING_EXTRACTION_PROMPT + '\nAlways reply with ONLY the JSON object. No prose, no code fences.',
       messages: [
-        {
-          role: 'system',
-          content: LISTING_EXTRACTION_PROMPT,
-        },
         {
           role: 'user',
           content:
@@ -181,8 +180,18 @@ export async function POST(req: NextRequest) {
         },
       ],
     });
-    const raw = completion.choices?.[0]?.message?.content || '{}';
-    comp = JSON.parse(raw);
+    const raw = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim()
+      .replace(/^```(?:json)?\s*|\s*```$/g, '');
+    try {
+      comp = JSON.parse(raw);
+    } catch {
+      const m = raw.match(/\{[\s\S]*\}/);
+      comp = m ? JSON.parse(m[0]) : {};
+    }
   } catch (e: any) {
     return NextResponse.json(
       { error: 'AI extraction failed', detail: e?.message || 'unknown' },

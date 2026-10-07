@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const LAND_SYSTEM_PROMPT = `You are an expert land and ranch real estate writer specializing in Texas farm and ranch properties. 
 
@@ -52,16 +52,20 @@ ${form.grantor ? `Sold by: ${form.grantor}` : ''}
 ${form.financing ? `Financing: ${form.financing}` : ''}
     `.trim();
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
       max_tokens: 600,
+      system: LAND_SYSTEM_PROMPT,
       messages: [
-        { role: 'system', content: LAND_SYSTEM_PROMPT },
         { role: 'user', content: `Write a professional property description for this land comp:\n\n${propertyDetails}` },
       ],
     });
 
-    const description = completion.choices[0]?.message?.content?.trim();
+    const description = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
 
     return NextResponse.json({ description });
   } catch (error) {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export const maxDuration = 30;
 
@@ -138,17 +138,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'query required' }, { status: 400 });
   }
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
       max_tokens: 600,
-      response_format: { type: 'json_object' },
+      // The old json_object response format is replaced by an explicit
+      // output instruction — the prompt's Q/A examples already model
+      // pure-JSON answers.
+      system: SYSTEM_PROMPT + '\nAlways reply with ONLY the JSON object. No prose, no code fences.',
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: query },
       ],
     });
-    const text = completion.choices[0]?.message?.content || '{}';
-    const parsed = JSON.parse(text);
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim()
+      .replace(/^```(?:json)?\s*|\s*```$/g, '');
+    let parsed: any;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      const m = text.match(/\{[\s\S]*\}/);
+      parsed = m ? JSON.parse(m[0]) : {};
+    }
     return NextResponse.json(parsed);
   } catch (e: any) {
     return NextResponse.json(

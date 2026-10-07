@@ -5,12 +5,32 @@
 //   * Distance landmarks ("5mi south of Devine")
 //   * A search_hint that can be geocoded by Mapbox
 //
-// Cost: ~$0.02-0.05 per call (OpenAI vision, single image, low detail).
 // Only invoked when county+acreage parcel lookup didn't disambiguate.
+// Engine history: ran on OpenAI gpt-4o vision until 2026-10 (account
+// unfunded); swapped to Claude, prompts unchanged.
 
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Split a data:image/...;base64,XXXX URL into the media type and raw
+// base64 payload Anthropic's image blocks expect.
+function parseImageDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
+  const m = dataUrl.match(/^data:(image\/[a-z+.-]+);base64,(.+)$/i);
+  if (!m) return null;
+  return { mediaType: m[1].toLowerCase(), data: m[2] };
+}
+
+// Concatenated text blocks of a response, code fences stripped — the
+// replacement for the old json_object-mode guaranteed-JSON string.
+function jsonTextOf(response: any): string {
+  return (response.content as any[])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim()
+    .replace(/^```(?:json)?\s*|\s*```$/g, '') || '{}';
+}
 
 export type DistanceLandmark = {
   landmark: string;
@@ -84,23 +104,25 @@ export async function extractLocationSignals(
 
   const userContent: any[] = [{ type: 'text', text: textBlocks.join('\n') }];
   if (imageDataUrl) {
-    userContent.push({
-      type: 'image_url',
-      image_url: { url: imageDataUrl, detail: 'low' as const },
-    });
+    const img = parseImageDataUrl(imageDataUrl);
+    if (img) {
+      userContent.push({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType, data: img.data },
+      });
+    }
   }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
       max_tokens: 500,
-      response_format: { type: 'json_object' },
+      system: LOCATION_PROMPT + '\nAlways reply with ONLY the JSON object. No prose, no code fences.',
       messages: [
-        { role: 'system', content: LOCATION_PROMPT },
         { role: 'user', content: userContent },
       ],
-    });
-    const text = completion.choices[0]?.message?.content || '{}';
+    } as any);
+    const text = jsonTextOf(response);
     const parsed = JSON.parse(text);
     return {
       roads: Array.isArray(parsed.roads) ? parsed.roads : [],
@@ -158,22 +180,23 @@ export async function verifyParcelMatch(
   ].filter(Boolean).join('\n');
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
+    const img = parseImageDataUrl(imageDataUrl);
+    if (!img) return null;
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
       max_tokens: 200,
-      response_format: { type: 'json_object' },
+      system: VERIFY_PROMPT + '\nAlways reply with ONLY the JSON object. No prose, no code fences.',
       messages: [
-        { role: 'system', content: VERIFY_PROMPT },
         {
           role: 'user',
           content: [
             { type: 'text', text: `Candidate parcel:\n${candidateText}\n\nDoes this match the property in the image?` },
-            { type: 'image_url', image_url: { url: imageDataUrl, detail: 'low' as const } },
+            { type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } },
           ],
         },
       ],
-    });
-    const text = completion.choices[0]?.message?.content || '{}';
+    } as any);
+    const text = jsonTextOf(response);
     const parsed = JSON.parse(text);
     return {
       matches: Boolean(parsed.matches),

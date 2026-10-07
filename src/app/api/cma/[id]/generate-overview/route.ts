@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { createClient as createServerSupabase } from '@/lib/supabase/server';
 
 // POST /api/cma/[id]/generate-overview
@@ -30,7 +30,7 @@ import { createClient as createServerSupabase } from '@/lib/supabase/server';
 // or auto-context. Better to under-deliver than fabricate
 // improvements / water features / acreage that aren't actually there.
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `You are a Texas ranch broker writing the Subject Property Overview
 section of a Comparative Market Analysis. Your voice is professional
@@ -65,8 +65,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  if (!process.env.OPENAI_API_KEY) {
-    return NextResponse.json({ error: 'openai key not configured' }, { status: 500 });
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: 'anthropic key not configured' }, { status: 500 });
   }
 
   const { id } = await params;
@@ -119,16 +119,21 @@ BROKER'S NOTES (write the overview from these — do NOT invent facts beyond the
 ${notes}`;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.6, // some warmth without going off-script
+    // temperature dropped — the parameter is removed on current Claude
+    // models (400 if sent); default sampling carries the same warmth.
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-5-5',
       max_tokens: 500,
+      system: SYSTEM_PROMPT,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userMessage },
       ],
     });
-    const prose = completion.choices[0]?.message?.content?.trim();
+    const prose = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
     if (!prose) {
       return NextResponse.json(
         { error: 'AI returned empty response', hint: 'Try again — add more notes if it fails repeatedly.' },
